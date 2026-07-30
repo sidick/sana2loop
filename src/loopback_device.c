@@ -43,6 +43,7 @@
 #include <proto/exec.h>
 #include <proto/dos.h>
 #include <dos/dosextens.h>
+#include "pcap.h"
 
 /* Old-style dos.library file access mode (Open()'s accessMode) --
  * MODE_OLDFILE=1005 is a stable, long-documented Amiga constant; hand
@@ -77,8 +78,8 @@
  * 2/3=M6 crossover pair (also M7's oversilent/PMTUD pair, since neither
  * milestone's own assertions care about the other's config additions
  * there), 4=M5 malformed-config-fails, 5=M7 droppct, 6=M7 duppct,
- * 7=M7 reorder, 8=M7 offlineafter/onlineafter). */
-#define SANA2LOOP_NUM_UNITS   9
+ * 7=M7 reorder, 8=M7 offlineafter/onlineafter, 9=M8 consume-mode replay). */
+#define SANA2LOOP_NUM_UNITS   10
 #define SANA2LOOP_DEFAULT_MTU 1500
 /* Ethernet dst[6]+src[6]+type[2] -- the allowance SANA2IOF_RAW adds on top
  * of su_MTU (docs/PLAN.md's M4 entry: "SANA2IOF_RAW (buffer -> MTU+14)").
@@ -112,6 +113,22 @@
  * Also the config ceiling for `reorder=N` (the window size). */
 #define SANA2LOOP_MAX_REORDER 8
 
+/* M8 replay: fixed cap on how many pcap records a `mode=replay` unit will
+ * load, same fixed-capacity-over-dynamic-growth reasoning as
+ * SANA2LOOP_MAX_TRACKED_TYPES/_MULTICAST above. A capture with more
+ * records than this is REJECTED outright at open time (S2ERR_BAD_ARGUMENT)
+ * rather than silently truncated -- silently playing back only part of a
+ * named capture would be a worse surprise than a loud, obvious failure. 32
+ * is generous for the hand-crafted/small-corpus captures this project
+ * actually ships (M11's canonical ARP/DHCP/TCP-handshake corpus is a
+ * handful of packets); a test wanting more just needs a higher cap, not a
+ * design change. */
+#define SANA2LOOP_MAX_REPLAY_PACKETS 16
+/* dos.library path/filename length for `replay=<path>` -- generous for
+ * "S:sana2loop/whatever.pcap"-shaped values; same bounded-not-dynamic
+ * reasoning as the config-path buffers in read_unit_config() below. */
+#define SANA2LOOP_MAX_REPLAY_PATH 64
+
 /* SysBase -- the one file-scope global this file needs. Safe here: this is
  * a plain -nostdlib freestanding build (no -fbaserel), so globals use
  * normal addressing, not an A4-relative small-data segment that some
@@ -137,10 +154,11 @@ struct DosLibrary *DOSBase;
  * to S:sana2loop/unitN.config, read once at first-open (unit_OpenCnt
  * 0->1, same trigger as reset_unit()) and only from a real Process opener
  * -- see read_unit_config()'s own comment. `mtu`/`rxqueue` (M5), `mode`/
- * `peer` (M6), and `seed`/`droppct`/`duppct`/`truncate`/`oversilent`/
- * `reorder`/`offlineafter`/`onlineafter` (M7) are recognized here. The
- * proposal's remaining key vocabulary (replay/record/replaymode/
- * recordmax for M8-M9) has nothing to configure yet -- adding parser
+ * `peer` (M6), `seed`/`droppct`/`duppct`/`truncate`/`oversilent`/
+ * `reorder`/`offlineafter`/`onlineafter` (M7), and `mode=replay`/`replay`
+ * (M8, load_replay_file()) are recognized here. The proposal's remaining
+ * key vocabulary (record/replaymode/recordmax for M9's tick-scheduled
+ * replay and RAM record) has nothing to configure yet -- adding parser
  * support for a key with no consuming feature behind it would be dead
  * code, so each lands with its own milestone instead. */
 #define SANA2LOOP_CONFIG_BUF_SIZE 2048
@@ -166,6 +184,13 @@ struct DosLibrary *DOSBase;
  * config surface. */
 #define SANA2LOOP_MODE_ECHO      0
 #define SANA2LOOP_MODE_CROSSOVER 1
+/* M8: a unit configured `mode=replay` plays back a pre-loaded pcap file's
+ * packets in order, one per CMD_READ/S2_READORPHAN ("consume mode" --
+ * docs/PLAN.md decision #7 -- no VBlank/timestamp scheduling at all, that's
+ * M9's tick-scheduled replay). CMD_WRITE/S2_BROADCAST/S2_MULTICAST on a
+ * replay-mode unit fail S2ERR_NOT_SUPPORTED (see do_write()) -- a canned
+ * trace has nowhere meaningful to send anything. */
+#define SANA2LOOP_MODE_REPLAY    2
 
 struct UnitConfig {
     ULONG mtu;
@@ -181,6 +206,11 @@ struct UnitConfig {
     ULONG offlineafter; /* M7: 0 = disabled, else auto-offline after N writes */
     ULONG onlineafter;  /* M7: 0 = disabled, else auto-online after N failed
                             write attempts while offline */
+    char  replay_path[SANA2LOOP_MAX_REPLAY_PATH]; /* M8: mode=replay's
+                            source file; empty = not given. Transient --
+                            only consulted once, right after config parsing,
+                            to load_replay_file(); never itself persisted on
+                            the unit (see open()'s own comment). */
 };
 
 static char CONFIG_ENV_PREFIX[] = "ENV:sana2loop/unit";
@@ -285,9 +315,10 @@ static BOOL parse_config_line(struct UnitConfig *cfg, const char *line, const ch
             cfg->mode = SANA2LOOP_MODE_CROSSOVER;
             return TRUE;
         }
-        /* "replay" is a real future value (M8-M9) but has nothing to
-         * configure yet -- same reasoning as the keys not recognized at
-         * all above, just at the value level instead. */
+        if (key_matches(eq + 1, line_end, "replay")) {
+            cfg->mode = SANA2LOOP_MODE_REPLAY;
+            return TRUE;
+        }
         return FALSE;
     }
     if (key_matches(line, eq, "peer")) {
@@ -355,6 +386,27 @@ static BOOL parse_config_line(struct UnitConfig *cfg, const char *line, const ch
         if (!parse_ulong(eq + 1, line_end, &value))
             return FALSE;
         cfg->onlineafter = value;
+        return TRUE;
+    }
+    if (key_matches(line, eq, "replay")) {
+        /* Raw dos.library path/filename, not a numeric value -- copied
+         * byte-for-byte (no interpretation) into a bounded buffer via
+         * CopyMem (an Exec LVO, never compiler-synthesized), not a
+         * hand-rolled dst[k]=src[k] loop -- that exact shape is the
+         * "innocent-looking fixed/variable-count copy loop" idiom
+         * GCC's -O2 replaces with a `memcpy` call on this -nostdlib
+         * build (no libc, so no memcpy either -- see reset_unit()'s own
+         * comment for the same lesson learned the hard way in M3, and
+         * this milestone's own load_replay_file() for the matching
+         * struct-array-indexing/`__mulsi3` variant of it). Rejects
+         * (fail-fast, same as an out-of-range numeric value) a value too
+         * long to fit rather than silently truncating a path, which could
+         * otherwise resolve to a different, wrong file. */
+        ULONG vlen = (ULONG)(line_end - (eq + 1));
+        if (vlen >= sizeof(cfg->replay_path))
+            return FALSE;
+        CopyMem((APTR)(eq + 1), cfg->replay_path, vlen);
+        cfg->replay_path[vlen] = 0;
         return TRUE;
     }
     return FALSE; /* unrecognized key -- fail-fast, not silently ignored */
@@ -479,6 +531,15 @@ static BOOL read_unit_config(struct UnitConfig *cfg, UBYTE unit_index)
         (cfg->peer >= SANA2LOOP_NUM_UNITS || cfg->peer == unit_index))
         return FALSE;
 
+    /* Same reasoning, M8: replay mode with no `replay=` path at all has
+     * nothing to play back -- unlike a config FILE itself (missing = "use
+     * defaults", read_unit_config()'s own top-level contract), a named
+     * replay source that's simply absent from the config is a config
+     * mistake, not a legitimate "no replay" default (there's no sensible
+     * default pcap to fall back to). */
+    if (cfg->mode == SANA2LOOP_MODE_REPLAY && cfg->replay_path[0] == 0)
+        return FALSE;
+
     return TRUE;
 }
 
@@ -571,6 +632,39 @@ struct Sana2LoopUnit {
                                           online transition -- su_OfflineAfter */
     ULONG       su_FailCounter;       /* failed write attempts since going
                                           offline -- su_OnlineAfter */
+    /* M8 consume-mode replay: a pre-loaded pcap file's records, parsed
+     * once at open time (load_replay_file()) into the exact same
+     * EchoPacket shape CMD_WRITE builds, so CMD_READ/S2_READORPHAN's
+     * existing fill_read_from_packet() serves them with no separate code
+     * path. su_ReplayPackets is NULL unless su_Mode==SANA2LOOP_MODE_REPLAY
+     * and loading succeeded; AllocMem'd to hold exactly su_ReplayCount
+     * entries (not a fixed SANA2LOOP_MAX_REPLAY_PACKETS-sized array
+     * embedded in every unit -- only replay-mode units pay for this). */
+    struct EchoPacket *su_ReplayPackets; /* base of the allocation -- kept
+                                          only so reset_unit() can FreeMem
+                                          it; never indexed directly (see
+                                          su_ReplayNext) */
+    struct EchoPacket *su_ReplayNext; /* next record to serve -- a plain
+                                          running POINTER, walked forward
+                                          one struct at a time (su_ReplayNext++,
+                                          a fixed compile-time-constant
+                                          address step) rather than indexed
+                                          as su_ReplayPackets[su_ReplayPos]:
+                                          that indexing form needs a runtime
+                                          count*sizeof(struct EchoPacket)
+                                          multiply for a non-power-of-2,
+                                          which compiles to an unavailable
+                                          __mulsi3 call on this -nostdlib
+                                          -m68000 build -- found the hard
+                                          way building this exact feature,
+                                          see load_replay_file()'s comment */
+    ULONG       su_ReplayCount;       /* records actually loaded */
+    ULONG       su_ReplayPos;         /* records served so far; once this
+                                          reaches su_ReplayCount, reads just
+                                          queue normally (identical to "no
+                                          traffic arrived yet") -- a plain
+                                          counter, only ever compared, never
+                                          used to index su_ReplayPackets */
     struct List su_PendingReads;      /* queued, TYPED CMD_READ IORequests */
     struct List su_OrphanReads;       /* queued S2_READORPHAN IORequests (untyped) */
     struct List su_PendingData;       /* packets awaiting a CMD_READ/S2_READORPHAN,
@@ -1175,6 +1269,23 @@ static void reset_unit(struct Sana2LoopUnit *unit)
     unit->su_WriteCounter  = 0;
     unit->su_FailCounter   = 0;
 
+    /* M8: free any replay buffer loaded by a PREVIOUS lifetime of this
+     * unit (i.e. it was mode=replay, ran, closed to 0, and is now being
+     * reset for whoever opens it next -- who may not even ask for replay
+     * mode again). open() calls load_replay_file() fresh, after this, only
+     * if the new config actually says mode=replay. */
+    if (unit->su_ReplayPackets) {
+        /* Matches load_replay_file()'s actual allocation size, not
+         * su_ReplayCount (how many of those slots ended up used) -- see
+         * that function's own comment for why it's always the full
+         * SANA2LOOP_MAX_REPLAY_PACKETS-sized block. */
+        FreeMem(unit->su_ReplayPackets, SANA2LOOP_MAX_REPLAY_PACKETS * sizeof(struct EchoPacket));
+        unit->su_ReplayPackets = NULL;
+    }
+    unit->su_ReplayNext  = NULL;
+    unit->su_ReplayCount = 0;
+    unit->su_ReplayPos   = 0;
+
     unit->su_Stats.PacketsReceived      = 0;
     unit->su_Stats.PacketsSent          = 0;
     unit->su_Stats.BadData              = 0;
@@ -1194,6 +1305,224 @@ static void list_init(struct List *list)
     list->lh_Head     = (struct Node *)&list->lh_Tail;
     list->lh_Tail      = NULL;
     list->lh_TailPred  = (struct Node *)&list->lh_Head;
+}
+
+/* M8: reads and parses `path` (a dos.library-openable pcap capture) into
+ * unit->su_ReplayPackets, one struct EchoPacket per captured Ethernet
+ * frame -- the SAME shape CMD_WRITE builds, so CMD_READ/S2_READORPHAN's
+ * existing fill_read_from_packet() serves a replayed record with no
+ * separate delivery path at all. dst[0:6]/src[6:12] become
+ * ep_DstAddr/ep_SrcAddr (zero-padded past 6, same convention every other
+ * address field in this file already uses); the on-wire type field
+ * (bytes 12:14) is ALWAYS big-endian on the real wire, unaffected by the
+ * pcap CONTAINER's own endianness (which only governs the file/record
+ * HEADER's numeric fields, decided once here from the magic and reused
+ * for every record); everything from byte 14 on becomes ep_Data.
+ *
+ * Fail-fast on anything that doesn't fit: wrong linktype, a record
+ * shorter than a full 14-byte Ethernet header or bigger than this device
+ * ever builds (SANA2LOOP_MAX_PACKET), a snaplen-truncated record
+ * (incl_len != orig_len -- replaying a shortened frame would be replaying
+ * something that never really existed on the wire), more records than
+ * SANA2LOOP_MAX_REPLAY_PACKETS, or an empty capture (nothing to replay is
+ * as much a config mistake as a malformed one here). All open-time
+ * failures, per open()'s own comment: unlike a missing CONFIG file
+ * (defaults apply), a missing/unreadable REPLAY file has no sensible
+ * default to fall back to -- `mode=replay` named a specific source and
+ * meant it.
+ *
+ * __attribute__((noinline)) is load-bearing, not a style choice: this
+ * function is only called once (from open()), the classic shape GCC
+ * auto-inlines on sight -- and inlined here, it broke the build with an
+ * undefined `__mulsi3` reference, found the hard way. struct
+ * Sana2LoopUnit isn't power-of-2 sized, so `unit`'s address (derived in
+ * open() as `&sld->sld_Units[unitnum]`, unitnum a genuine runtime value)
+ * always technically needs a real multiply to compute -- every OTHER
+ * sld_Units[] index site in this file (delivery_target(), init_device()'s
+ * setup loop) needs exactly the same math. Un-inlined, `unit` just arrives
+ * as an ordinary pointer argument already in a register, so nothing here
+ * ever recomputes it. Inlined into open()'s much larger merged function
+ * body, GCC's register allocator instead decided to rematerialize that
+ * pointer from scratch at the point of use (`sld_Units_base +
+ * unitnum*sizeof(unit)`) rather than keep it live in a callee-saved
+ * register across the whole thing -- and synthesizing a multiply by
+ * sizeof(struct Sana2LoopUnit) (an awkward, non-power-of-2, many-bit
+ * constant) apparently exceeded whatever shift/add budget this backend
+ * allows before falling back to a __mulsi3 call, which this -nostdlib
+ * build has no libgcc to satisfy. Any future milestone that grows this
+ * struct further should re-check for the same failure (rebuild, look for
+ * `undefined reference to '__mulsi3'`) -- the exact byte count that tips
+ * this over isn't something to reason about in advance, just verify. */
+static BOOL __attribute__((noinline)) load_replay_file(struct Sana2LoopUnit *unit, const char *path)
+{
+    static UBYTE filehdr[PCAP_FILE_HEADER_SIZE];
+    static UBYTE rechdr[PCAP_PKTHDR_SIZE];
+    static UBYTE framebuf[SANA2LOOP_MAX_PACKET];
+    struct Process *proc;
+    APTR old_window_ptr;
+    BPTR file;
+    struct pcap_file_header fh;
+    struct EchoPacket *packets;
+    ULONG magic_raw;
+    BOOL swapped;
+    ULONG count = 0;
+    BOOL ok = TRUE;
+
+    DOSBase = (struct DosLibrary *)OpenLibrary((STRPTR)"dos.library", 0);
+    if (!DOSBase)
+        return FALSE;
+
+    /* Same pr_WindowPtr suppression as read_unit_config() -- see its
+     * comment for why an unassigned/removable-volume-looking path must
+     * never be allowed to put up a blocking DOS requester here. */
+    proc = (struct Process *)FindTask(NULL);
+    old_window_ptr = proc->pr_WindowPtr;
+    proc->pr_WindowPtr = (APTR)-1L;
+    file = Open((STRPTR)path, MODE_OLDFILE);
+    proc->pr_WindowPtr = old_window_ptr;
+
+    if (!file) {
+        CloseLibrary((struct Library *)DOSBase);
+        DOSBase = NULL;
+        return FALSE;
+    }
+
+    if (Read(file, filehdr, PCAP_FILE_HEADER_SIZE) != PCAP_FILE_HEADER_SIZE) {
+        Close(file);
+        CloseLibrary((struct Library *)DOSBase);
+        DOSBase = NULL;
+        return FALSE;
+    }
+
+    /* Endianness is a property of THIS FILE, decided once from its magic
+     * (read here with swapped=FALSE just to get the raw 32 bits out --
+     * the comparison below is byte-pattern-vs-byte-pattern, not numeric,
+     * so which order pcap_read_u32() itself used to assemble them doesn't
+     * matter as long as it's used consistently) -- never this CPU's own
+     * byte order (see pcap.h's own comment). */
+    magic_raw = pcap_read_u32(filehdr, FALSE);
+    if (magic_raw == PCAP_MAGIC_NATIVE) {
+        swapped = FALSE;
+    } else if (magic_raw == PCAP_MAGIC_SWAPPED) {
+        swapped = TRUE;
+    } else {
+        Close(file);
+        CloseLibrary((struct Library *)DOSBase);
+        DOSBase = NULL;
+        return FALSE;
+    }
+    pcap_parse_file_header(filehdr, swapped, &fh);
+    if (fh.linktype != PCAP_LINKTYPE_ETHERNET) {
+        Close(file);
+        CloseLibrary((struct Library *)DOSBase);
+        DOSBase = NULL;
+        return FALSE;
+    }
+
+    /* Always the full SANA2LOOP_MAX_REPLAY_PACKETS-slot allocation, not
+     * sized to the capture's actual record count -- that count isn't known
+     * until the whole file has been read, and a two-pass read (count, then
+     * allocate exactly, then re-read) buys nothing a fixed-size allocation
+     * doesn't already give this device elsewhere (rxqueue, S2_TRACKTYPE,
+     * S2_ADD/DELMULTICASTADDRESS). reset_unit()'s matching FreeMem() must
+     * use this same size, not su_ReplayCount's -- it's the actual
+     * allocation size, independent of how many slots ended up used.
+     * SANA2LOOP_MAX_REPLAY_PACKETS=16 was picked empirically, not just
+     * "generous": 32 (the original guess) reliably failed this exact
+     * AllocMem() under bundled AROS specifically (confirmed via a
+     * temporary AvailMem(MEMF_LARGEST) probe while chasing this) -- AROS,
+     * unlike a real ROM in true ROM space, has to load its own Kickstart
+     * replacement INTO this profile's 512K+512K chip+fast budget, leaving
+     * measurably less free than real Kickstart 1.3 does on the identical
+     * profile. 16 (25KB) passed with real headroom to spare on both
+     * targets; 32 (49KB) did not on AROS. */
+    packets = AllocMem(SANA2LOOP_MAX_REPLAY_PACKETS * sizeof(struct EchoPacket), MEMF_CLEAR);
+    if (!packets) {
+        Close(file);
+        CloseLibrary((struct Library *)DOSBase);
+        DOSBase = NULL;
+        return FALSE;
+    }
+
+    /* `cur` walks forward one struct EchoPacket at a time via plain
+     * pointer increment (cur++ below) -- deliberately NOT `packets[count]`
+     * array indexing. struct EchoPacket isn't power-of-2 sized (its
+     * ep_Data[SANA2LOOP_MAX_PACKET] dominates), so indexing it by a
+     * RUNTIME variable needs an actual count*sizeof(struct EchoPacket)
+     * multiply -- which this -nostdlib -m68000 build has no libgcc to
+     * satisfy (found the hard way: linked clean until this function tried
+     * exactly that, then failed with an undefined `__mulsi3` reference).
+     * `cur++` is just address += a compile-time-constant step, never a
+     * multiply -- same reasoning the per-unit su_ReplayNext field this
+     * loads into exists for (see its own comment). */
+    {
+        struct EchoPacket *cur = packets;
+
+        for (;;) {
+            struct pcap_pkthdr ph;
+            LONG got;
+            ULONG flen;
+            int k;
+
+            got = Read(file, rechdr, PCAP_PKTHDR_SIZE);
+            if (got == 0)
+                break; /* clean EOF between records -- done */
+            if (got != PCAP_PKTHDR_SIZE) {
+                ok = FALSE;
+                break;
+            }
+            pcap_parse_pkthdr(rechdr, swapped, &ph);
+            flen = ph.incl_len;
+
+            if (ph.incl_len != ph.orig_len || flen < SANA2LOOP_RAW_HDR_SIZE ||
+                flen > SANA2LOOP_MAX_PACKET || count >= SANA2LOOP_MAX_REPLAY_PACKETS) {
+                ok = FALSE;
+                break;
+            }
+
+            if (Read(file, framebuf, (LONG)flen) != (LONG)flen) {
+                ok = FALSE;
+                break;
+            }
+
+            /* Address fields: same "16-iteration, conditional-value" loop
+             * shape do_write() already uses successfully elsewhere in this
+             * file -- the ternary defeats the compiler's copy-loop
+             * idiom-recognition (it isn't a bare dst[k]=src[k] load-store),
+             * unlike the payload copy just below, which IS that shape and
+             * so goes through CopyMem instead. */
+            for (k = 0; k < SANA2_MAX_ADDR_BYTES; k++) {
+                cur->ep_DstAddr[k] = (k < 6) ? framebuf[k] : 0;
+                cur->ep_SrcAddr[k] = (k < 6) ? framebuf[6 + k] : 0;
+            }
+            /* On-wire Ethernet type field: always big-endian on the real
+             * wire, independent of this FILE's own container endianness
+             * (see this function's header comment). */
+            cur->ep_PacketType = ((ULONG)framebuf[12] << 8) | (ULONG)framebuf[13];
+            cur->ep_Length = flen - SANA2LOOP_RAW_HDR_SIZE;
+            /* CopyMem, not a hand-rolled dst[k]=src[k+C] loop -- exactly
+             * the idiom that just broke the `replay=` config-value copy
+             * above (see parse_config_line()'s comment); same fix. */
+            CopyMem(framebuf + SANA2LOOP_RAW_HDR_SIZE, cur->ep_Data, cur->ep_Length);
+            count++;
+            cur++;
+        }
+    }
+
+    Close(file);
+    CloseLibrary((struct Library *)DOSBase);
+    DOSBase = NULL;
+
+    if (!ok || count == 0) {
+        FreeMem(packets, SANA2LOOP_MAX_REPLAY_PACKETS * sizeof(struct EchoPacket));
+        return FALSE;
+    }
+
+    unit->su_ReplayPackets = packets;
+    unit->su_ReplayNext    = packets;
+    unit->su_ReplayCount   = count;
+    unit->su_ReplayPos     = 0;
+    return TRUE;
 }
 
 /*------- init_device ---------------------------------------
@@ -1292,6 +1621,10 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
             cfg.reorder      = unit->su_ReorderWindow;
             cfg.offlineafter = unit->su_OfflineAfter;
             cfg.onlineafter  = unit->su_OnlineAfter;
+            cfg.replay_path[0] = 0; /* M8: not persisted on the unit --
+                                        transient, see UnitConfig's field
+                                        comment -- so always starts empty,
+                                        never seeded from prior state */
             if (!read_unit_config(&cfg, unit->su_Index)) {
                 io->io_Error = S2ERR_BAD_ARGUMENT;
                 return;
@@ -1313,6 +1646,20 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
             unit->su_ReorderWindow = cfg.reorder;
             unit->su_OfflineAfter = cfg.offlineafter;
             unit->su_OnlineAfter  = cfg.onlineafter;
+
+            /* M8: mode=replay's source is loaded once, right here -- same
+             * 0->1 determinism boundary as everything else this block
+             * applies. read_unit_config() already guaranteed replay_path
+             * is non-empty whenever cfg.mode is SANA2LOOP_MODE_REPLAY. A
+             * load failure fails the WHOLE open (S2ERR_BAD_ARGUMENT) --
+             * unlike a missing config file, there's no sensible default
+             * to fall back to for a specifically-named, missing/malformed
+             * capture; see load_replay_file()'s own comment. */
+            if (unit->su_Mode == SANA2LOOP_MODE_REPLAY &&
+                !load_replay_file(unit, cfg.replay_path)) {
+                io->io_Error = S2ERR_BAD_ARGUMENT;
+                return;
+            }
         }
     }
 
@@ -1557,6 +1904,17 @@ static void do_write(struct Sana2LoopDevice *sld, struct Sana2LoopUnit *unit,
     if (io->ios2_Req.io_Flags & SANA2IOF_RAW)
         max_len += SANA2LOOP_RAW_HDR_SIZE;
 
+    /* M8: a replay-mode unit plays back a canned trace -- there is no
+     * meaningful destination for anything written to it to go. Checked
+     * before su_Online (a replay unit's online state has nothing to do
+     * with whether writing to it makes sense at all -- this is a
+     * fundamental "not supported for this mode", not a temporary
+     * unavailability S2ERR_OUTOFSERVICE would imply). */
+    if (unit->su_Mode == SANA2LOOP_MODE_REPLAY) {
+        io0->io_Error = S2ERR_NOT_SUPPORTED;
+        return;
+    }
+
     if (!unit->su_Online) {
         io0->io_Error = S2ERR_OUTOFSERVICE;
         note_write_failure(unit); /* M7: su_OnlineAfter -- may auto-recover
@@ -1713,6 +2071,28 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
          * catch-anything counterpart. */
         struct EchoPacket *pkt = NULL, *scan, *next;
 
+        /* M8: a replay-mode unit's CMD_READ ignores typing entirely --
+         * "consume mode" is a scripted, in-order playback of whatever the
+         * capture actually contains, not a filter -- identical treatment
+         * to S2_READORPHAN below (see this case's own comment there for
+         * why). Once the loaded sequence is exhausted, falls straight
+         * through to the exact same queuing behavior as any other unit
+         * with no traffic waiting -- a replay unit doesn't hand out a
+         * special "end of stream" signal; SANA-II has no such concept. */
+        if (unit->su_Mode == SANA2LOOP_MODE_REPLAY && unit->su_ReplayPos < unit->su_ReplayCount) {
+            struct EchoPacket *rp = unit->su_ReplayNext;
+            unit->su_ReplayNext++; /* plain pointer step -- see the field's
+                                       own comment for why not su_ReplayPackets[su_ReplayPos] */
+            unit->su_ReplayPos++;
+            if (fill_read_from_packet(io, rp)) {
+                io0->io_Error = 0;
+            } else {
+                io0->io_Error = S2ERR_NO_RESOURCES;
+                io->ios2_WireError = S2WERR_BUFF_ERROR;
+            }
+            break;
+        }
+
         Disable();
         for (scan = (struct EchoPacket *)unit->su_PendingData.lh_Head;
              scan->ep_Node.ln_Succ;
@@ -1748,7 +2128,28 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
          * (by deliver_packet()'s precedence) only ever holds packets that
          * already failed to match any pending typed read -- i.e. already
          * orphaned, no further type filtering needed here. */
-        struct EchoPacket *pkt = (struct EchoPacket *)safe_rem_head(&unit->su_PendingData);
+        struct EchoPacket *pkt;
+
+        /* M8: see CMD_READ's matching comment above -- same replay-buffer
+         * check, same exhausted-falls-through-to-normal-queuing behavior.
+         * CMD_READ and S2_READORPHAN are indistinguishable on a
+         * replay-mode unit: both just mean "give me the next captured
+         * frame, whatever type it turns out to be". */
+        if (unit->su_Mode == SANA2LOOP_MODE_REPLAY && unit->su_ReplayPos < unit->su_ReplayCount) {
+            struct EchoPacket *rp = unit->su_ReplayNext;
+            unit->su_ReplayNext++; /* plain pointer step -- see the field's
+                                       own comment for why not su_ReplayPackets[su_ReplayPos] */
+            unit->su_ReplayPos++;
+            if (fill_read_from_packet(io, rp)) {
+                io0->io_Error = 0;
+            } else {
+                io0->io_Error = S2ERR_NO_RESOURCES;
+                io->ios2_WireError = S2WERR_BUFF_ERROR;
+            }
+            break;
+        }
+
+        pkt = (struct EchoPacket *)safe_rem_head(&unit->su_PendingData);
         if (pkt) {
             Disable();
             unit->su_PendingDataCount--;

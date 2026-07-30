@@ -32,7 +32,7 @@ they may require Kickstart 2.0+ where convenient (documented per-tool).
 ## Current state
 
 Working through `docs/PLAN.md`'s milestones (M0-M12: spec-correctness
-backfill, then Phases 2-4). **M0-M7 done**, each validated on-target under
+backfill, then Phases 2-4). **M0-M8 done**, each validated on-target under
 Copperline against both bundled AROS (CI) and a real Kickstart 1.3 ROM
 (`make copperline-smoke` / `KICK=... make copperline-smoke`,
 see `tests/copperline/`) before being considered complete.
@@ -154,8 +154,40 @@ see `tests/copperline/`) before being considered complete.
     for `S2_READORPHAN` without ever calling `OpenDevice()` on it first --
     hung identically on both AROS and real 1.3, so a genuine bug, not a
     quirk). See `docs/sana2-notes.md`'s M7 section for the full story.
-  - 9 units pre-allocated in the device base (unit 0 wired for echo by
-    default; units 2-3 default-paired for crossover; units 4-8 spare/echo,
+  - **M8**: `src/pcap.h` -- hand-rolled classic pcap format, both endians
+    (magic-based per-file byte-order detection, since a big-endian 68000
+    reading a little-endian host capture needs to byte-swap every OTHER
+    numeric field despite nothing about the 68000 changing), no I/O in the
+    header itself. `mode=replay` + `replay=<path>` (a dos.library-openable
+    pcap file, loaded once at open time by `load_replay_file()`) plays the
+    capture back in order, one record per `CMD_READ`/`S2_READORPHAN`
+    ("consume mode" -- no timestamp/VBlank scheduling at all; M9 owns that
+    variant) -- both commands behave identically on a replay unit, ignoring
+    `ios2_PacketType` entirely. `CMD_WRITE`/`S2_BROADCAST`/`S2_MULTICAST`
+    on a replay unit fail `S2ERR_NOT_SUPPORTED`. Unlike a missing CONFIG
+    file (defaults apply), a missing/malformed REPLAY file fails the whole
+    `OpenDevice()` -- there's no sensible default capture to fall back to.
+    Found two build-breaking, libgcc-adjacent miscompiles while building
+    this: a hand-rolled `dst[k]=src[k]` copy loop for the `replay=` config
+    value became an unavailable `memcpy` call (fixed via `CopyMem`, the
+    established pattern), and `load_replay_file()` getting inlined into
+    `open()` made the compiler rematerialize the `unit` pointer via a
+    runtime multiply-by-`sizeof(struct Sana2LoopUnit)` (`__mulsi3`, also
+    unavailable) instead of keeping it live in a register -- fixed with
+    `__attribute__((noinline))`, since every other array-of-unit-structs
+    index site in this file needs the identical multiply and has so far
+    stayed under this backend's shift/add synthesis budget; this one
+    didn't, once inlined. Also found, empirically, that
+    `SANA2LOOP_MAX_REPLAY_PACKETS` (the fixed cap on loaded records)
+    couldn't be as generous as first guessed (32, ~49 KB): that reliably
+    failed its own `AllocMem()` under bundled AROS specifically, since
+    AROS has to load its own Kickstart replacement into the same
+    512K+512K test profile a real ROM never touches, leaving measurably
+    less free RAM. Settled on 16 (~25 KB), which passes with headroom on
+    both targets. See `docs/sana2-notes.md`'s M8 section for the full
+    story.
+  - 10 units pre-allocated in the device base (unit 0 wired for echo by
+    default; units 2-3 default-paired for crossover; units 4-9 spare/echo,
     each claimed by exactly one on-target test's own config fixture so no
     two tests' expectations ever collide on the same unit -- see
     `tests/copperline/run.sh`'s fixture layout for the current
@@ -179,7 +211,8 @@ see `tests/copperline/`) before being considered complete.
   reason specific to itself (not the device): see the comment block at its
   top for a real on-target bug this tripped over and how it was found.
 
-Not yet done: pcap replay/record, `SanaDump`/`SanaSend`.
+Not yet done: VBlank tick-scheduled replay + RAM record (M9), `SanaDump`/
+`SanaSend`.
 
 ## Architecture
 
@@ -240,7 +273,7 @@ pinned `ghcr.io/reinauer/container-amiga-gcc` image narrator.wyoming uses
 
 `make docker` has been run successfully in this environment (both binaries
 build clean), and `make copperline-smoke` has confirmed every sub-test
-through M7 on-target against both bundled AROS and real Kickstart 1.3 (see
+through M8 on-target against both bundled AROS and real Kickstart 1.3 (see
 "Testing under Copperline" below and `tests/copperline/sana2test.c`'s
 `SUB=` list).
 

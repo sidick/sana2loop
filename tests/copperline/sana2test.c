@@ -110,7 +110,29 @@ static char NAME_FAULTDUP[]        = "faultdup";
 static char NAME_FAULTREORDER[]    = "faultreorder";
 static char NAME_FAULTOVERSILENT[] = "faultoversilent";
 static char NAME_FAULTFLAP[]       = "faultflap";
+static char NAME_REPLAY[]          = "replay";
 static char DBG_CHECKIO_NULL[]    = "DBG_CHECKIO_NULL=";
+
+/* M8 replay fixture data -- must exactly match
+ * tests/copperline/fixtures/replay.pcap's 3 hand-crafted records (see
+ * run.sh's own comment for how that file gets onto the ADF). Every array
+ * here is a NAMED global, never an inline literal -- see this file's own
+ * header comment for why that matters even for plain data, not just
+ * strings passed to a function. */
+static UBYTE REPLAY_DST0[] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01};
+static UBYTE REPLAY_SRC0[] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x02};
+static char  REPLAY_PAY0[] = "REPLAY-A";
+static UBYTE REPLAY_DST1[] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x03};
+static UBYTE REPLAY_SRC1[] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x04};
+static char  REPLAY_PAY1[] = "REPLAY-BB";
+static UBYTE REPLAY_DST2[] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x05};
+static UBYTE REPLAY_SRC2[] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x06};
+static char  REPLAY_PAY2[] = "REPLAY-CCC";
+static UBYTE *REPLAY_DST[3] = {REPLAY_DST0, REPLAY_DST1, REPLAY_DST2};
+static UBYTE *REPLAY_SRC[3] = {REPLAY_SRC0, REPLAY_SRC1, REPLAY_SRC2};
+static char  *REPLAY_PAY[3] = {REPLAY_PAY0, REPLAY_PAY1, REPLAY_PAY2};
+static ULONG  REPLAY_TYPE[3] = {0x0800, 0x0806, 0x86DD};
+static ULONG  REPLAY_LEN[3]  = {8, 9, 10};
 
 /* _start must be the very first thing in the file and contain no data of
  * its own -- it only calls test_main(), which holds all the real logic and
@@ -1456,6 +1478,85 @@ static int test_main(void)
         }
 
         report(NAME_FAULTFLAP, ok, &fails);
+    }
+
+    /* --- replay: unit 9's config (mode=replay,
+     * replay=S:sana2loop/replay.pcap) plays back a 3-record fixture
+     * capture in order via CMD_READ -- deliberately submitted with a
+     * wrong, non-matching ios2_PacketType each time, proving "consume
+     * mode" ignores typing entirely (M9's real tick-scheduled replay is
+     * the only thing this milestone leaves undone; this is a plain
+     * in-order drain). Once exhausted, a further CMD_READ just queues
+     * like any other unit with nothing waiting -- reclaimed via AbortIO,
+     * same pattern the abortio/faultoversilent sub-tests already use --
+     * and CMD_WRITE fails S2ERR_NOT_SUPPORTED, since a canned trace has
+     * nowhere to send anything. --- */
+    {
+        BOOL ok = TRUE;
+        struct MsgPort *port9 = make_port();
+        struct IOSana2Req *io9 = port9 ? make_io(port9) : NULL;
+
+        if (io9 && OpenDevice((STRPTR)DEVICE_NAME, 9, (struct IORequest *)io9, 0) == 0) {
+            int i;
+
+            for (i = 0; i < 3; i++) {
+                int k;
+
+                io9->ios2_Req.io_Command = CMD_READ;
+                io9->ios2_PacketType = 0xFFFF; /* deliberately wrong */
+                io9->ios2_Data = readbuf;
+                io9->ios2_Req.io_Flags = 0;
+                do_io(io9);
+
+                ok = ok && (io9->ios2_Req.io_Error == 0) &&
+                     (io9->ios2_PacketType == REPLAY_TYPE[i]) &&
+                     (io9->ios2_DataLength == REPLAY_LEN[i]);
+                for (k = 0; k < 6; k++) {
+                    if (io9->ios2_DstAddr[k] != REPLAY_DST[i][k])
+                        ok = FALSE;
+                    if (io9->ios2_SrcAddr[k] != REPLAY_SRC[i][k])
+                        ok = FALSE;
+                }
+                for (k = 0; k < (int)REPLAY_LEN[i]; k++)
+                    if (readbuf[k] != (UBYTE)REPLAY_PAY[i][k])
+                        ok = FALSE;
+            }
+
+            /* capture exhausted -- next read just queues, doesn't complete */
+            io9->ios2_Req.io_Command = CMD_READ;
+            io9->ios2_PacketType = 0;
+            io9->ios2_Data = readbuf;
+            io9->ios2_Req.io_Flags = 0;
+            send_io(io9);
+            AbortIO((struct IORequest *)io9);
+            WaitIO((struct IORequest *)io9);
+            ok = ok && (io9->ios2_Req.io_Error == IOERR_ABORTED);
+
+            /* replay-mode CMD_WRITE: unsupported */
+            {
+                int k;
+                io9->ios2_Req.io_Command = CMD_WRITE;
+                io9->ios2_PacketType = 0x0900;
+                io9->ios2_DataLength = sizeof(PAYLOAD) - 1;
+                io9->ios2_Data = (APTR)PAYLOAD;
+                for (k = 0; k < SANA2_MAX_ADDR_BYTES; k++)
+                    io9->ios2_DstAddr[k] = (k < 6) ? (UBYTE)(0xC0 + k) : 0;
+            }
+            do_io(io9);
+            ok = ok && (io9->ios2_Req.io_Error == S2ERR_NOT_SUPPORTED);
+
+            CloseDevice((struct IORequest *)io9);
+        } else {
+            ok = FALSE;
+        }
+        if (io9)
+            FreeMem(io9, sizeof(struct IOSana2Req));
+        if (port9) {
+            FreeSignal(port9->mp_SigBit);
+            FreeMem(port9, sizeof(struct MsgPort));
+        }
+
+        report(NAME_REPLAY, ok, &fails);
     }
 
     CloseDevice((struct IORequest *)io1);

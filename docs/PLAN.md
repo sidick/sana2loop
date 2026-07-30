@@ -37,8 +37,8 @@ the technical detail behind each one.
 | M5 | ✅ Done | Config infra: parser, ENV:/S: read at first-open, latch semantics; decide `-lgcc` vs local div helpers; prove DOS-under-Forbid open on real 1.3 | `src/loopback_device.c`, `Makefile`, `run.sh` (config on ADF: `mtu=1400` → DQ reports 1400; malformed → open fails) |
 | M6 | ✅ Done | Crossover: config-driven `mode`/`peer` (defaults: units 0–1 echo, 2↔3 crossover), pair validation at first-open, unswapped addressing, receive filtering (station/bcast/mcast/PROM) | `src/loopback_device.c`, `run.sh`, harness (SendIO read on 3 + write on 2; wrong-dst filtered unless PROM) |
 | M7 | ✅ Done | Fault injection: xorshift32 + full pipeline + forced offline/online events + PMTUD black hole | `src/loopback_device.c`, harness (droppct=100 never completes; duppct=100 → 2 reads; fixed-seed reorder → assert exact permutation) |
-| M8 | ⏳ Next | pcap core (`src/pcap.h`, both endians) + consume-mode replay; commit fixture bytes | `src/pcap.h`, `src/loopback_device.c`, `fixtures/`, harness |
-| M9 | | VBlank tick server, tick-scheduled replay, RAM record + close-flush, interrupt-context-hook knob, 68000 per-packet overhead measurement (VBlank-count bracketing, tracked not gated). Record test: `run.sh` extracts written pcap off the ADF post-run via xdftool and byte-compares — **verify early that Copperline persists floppy writes to the image** | `src/loopback_device.c`, `run.sh` |
+| M8 | ✅ Done | pcap core (`src/pcap.h`, both endians) + consume-mode replay; commit fixture bytes | `src/pcap.h`, `src/loopback_device.c`, `fixtures/`, harness |
+| M9 | ⏳ Next | VBlank tick server, tick-scheduled replay, RAM record + close-flush, interrupt-context-hook knob, 68000 per-packet overhead measurement (VBlank-count bracketing, tracked not gated). Record test: `run.sh` extracts written pcap off the ADF post-run via xdftool and byte-compares — **verify early that Copperline persists floppy writes to the image** | `src/loopback_device.c`, `run.sh` |
 | M10 | | Docs pass: teaching-reference comments through the source, README, sana2-notes refresh. Also stand up a `userdocs/` end-user site (MkDocs Material, adopting sibling project amiauth's pattern in preference to narrator.wyoming's, since amiauth's is the more tried-and-tested one) alongside a `tools/docs2guide.py`-style converter producing an on-Amiga AmigaGuide manual from the same `userdocs/` source -- one docs source feeding both the web site and native Amiga reading, not two to keep in sync by hand | all sources, `docs/`, new `userdocs/`, `mkdocs.yml`, `tools/docs2guide.py` |
 | M11 | | Tools: `src/tools/pcapio.c`, `sana2open.c`, `SanaDump`, `SanaSend`; `host/make_fixtures.py` + `host/lint_pcap.py` (scapy); canonical corpus (ARP, DHCP, TCP handshake) | new `src/tools/*`, `host/*`, `fixtures/`, `Makefile` |
 | M12 | | Aminet packaging + release flow, adopting sibling project amiauth's pattern (in preference to narrator.wyoming's simpler one, since amiauth's is the more tried-and-tested of the two): tag-driven `release.yml` that verifies the pushed tag matches `version.mk` and the `.readme`'s `Version:` field before doing anything else, cross-builds via the pinned Docker image, greps the built binary for its `$VER` string, packages via `make dist` (building a real, archive-capable `lha` from source -- Ubuntu's/Homebrew's is extract-only), validates the readme with `aminet-release-action` in `validate-only` mode, creates the GitHub release (curated notes from the `.readme` for the first release, `--generate-notes` once there's real tag-to-tag history to diff), and only then hands off to a *separate* job gated on a GitHub Environment requiring manual approval for the actual (irreversible-ish) Aminet FTP upload -- human-in-the-loop by construction, not an afterthought | `Makefile`, `version.mk`, `.github/workflows/release.yml`, release docs |
@@ -98,7 +98,13 @@ proper.
   loop (not `% window`) avoids it for the reorder index, since a
   runtime-variable modulo compiles to a `__umodsi3` call on this
   `-m68000` target regardless of how small the operands are at runtime.
-  Stays undecided until something genuinely needs real division.
+  Stays undecided until something genuinely needs real division. M8 came
+  close from the multiplication side instead: indexing an array of
+  non-power-of-2-sized structs by a runtime variable needs `__mulsi3` too
+  (found when `load_replay_file()` got inlined into `open()` and the
+  compiler rematerialized a unit pointer that way) -- avoided via
+  `__attribute__((noinline))` plus pointer-walking instead of indexing,
+  not by finally linking `-lgcc`. Still deferred.
 - ReplyMsg + consumer hooks from a VBlank server on real 1.3 (M9).
 - Copperline floppy write-back persistence (M9's record assertion depends on it).
 

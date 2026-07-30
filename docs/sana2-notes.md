@@ -205,14 +205,15 @@ have no config file, and compiled-in defaults apply -- but a file that
 `S2ERR_BAD_ARGUMENT` (an unrecognized key is exactly as fatal as a
 malformed line: silent typo-tolerance is wrong for a test tool).
 
-`mtu`/`rxqueue` (M5) and `mode`/`peer` (M6, see its own section below) are
-recognized so far -- the only per-unit knobs that already exist as real
-device state. The proposal's remaining config vocabulary
-(`seed`/`droppct`/`duppct`/`reorder`/`truncate`/`oversilent`/
-`offlineafter`/`onlineafter` for M7 fault injection; `replay`/`record`/
-`replaymode`/`recordmax` for M8-M9) has nothing to configure yet -- each
-key lands with the milestone that actually consumes it, not before (a
-recognized key with no backing feature would be dead code). `mtu` is
+`mtu`/`rxqueue` (M5), `mode`/`peer` (M6, see its own section below),
+`seed`/`droppct`/`duppct`/`truncate`/`oversilent`/`reorder`/`offlineafter`/
+`onlineafter` (M7, fault injection), and `mode=replay`/`replay` (M8, see
+its own section below) are recognized so far -- every per-unit knob that
+already exists as real device state. The proposal's remaining config
+vocabulary (`record`/`replaymode`/`recordmax` for M9's tick-scheduled
+replay and RAM record) has nothing to configure yet -- each key lands with
+the milestone that actually consumes it, not before (a recognized key with
+no backing feature would be dead code). `mtu` is
 bounded above by `SANA2LOOP_MAX_PACKET -
 SANA2LOOP_RAW_HDR_SIZE` (1500) -- a configured MTU above that would let a
 RAW write's relaxed size check (M4) exceed the fixed `EchoPacket` buffer's
@@ -391,6 +392,100 @@ shaping this one packet, more a consequence of having sent it at all.
   serial output" technique this project has reached for before, since the
   hang happens before any `IORequest` involved ever completes (so there's
   no `ios2_WireError`/`ios2_Req.io_Error` to inspect after the fact).
+
+## pcap core + consume-mode replay (M8)
+
+`src/pcap.h`: hand-rolled classic pcap ("libpcap savefile") format, no I/O
+in the header at all -- callers own Open/Read/Write, this only knows how
+to make sense of bytes already in memory. Both endians deliberately:
+`PCAP_MAGIC_NATIVE`/`PCAP_MAGIC_SWAPPED` let a reader detect, from the
+file's own magic number, which byte order every OTHER numeric field in
+that file uses -- decided once per file, not by whichever CPU happens to
+be reading it. A big-endian 68000 reading a little-endian-written host
+capture (scapy/tcpdump -- the common case) needs `swapped=TRUE`, despite
+nothing about the 68000 itself changing. `pcap_read_u16()`/`pcap_read_u32()`
+read a raw byte buffer honoring that; `pcap_parse_file_header()`/
+`pcap_parse_pkthdr()` build an already-parsed, native-typed, in-memory
+struct from it. Deliberately never cast a raw file buffer directly to
+`struct pcap_file_header`/`pcap_pkthdr` -- that would depend on this
+compiler's struct padding matching the on-disk layout, which isn't
+guaranteed (and the explicit parse functions cost nothing extra).
+
+A `mode=replay` unit plays back a pre-loaded pcap file's records in order,
+one per `CMD_READ`/`S2_READORPHAN` -- "consume mode" (docs/PLAN.md decision
+#7): no timestamp/VBlank scheduling at all, just a scripted, in-order
+drain. M9 owns the real tick-scheduled (VBlank-driven, timestamp-honoring)
+replay variant this deliberately doesn't attempt yet.
+
+- **Config**: `mode=replay` plus `replay=<path>` (a dos.library-openable
+  file, read the SAME way config files are -- `pr_WindowPtr` suppression,
+  process-context gating). Unlike a missing/malformed CONFIG file (which
+  just means "use defaults"), a missing/malformed REPLAY file is a hard
+  open-time failure (`S2ERR_BAD_ARGUMENT`) -- there's no sensible default
+  capture to fall back to for a `mode=replay` that named one specifically.
+- **Loading** (`load_replay_file()`, called once at open time, same 0->1
+  determinism boundary as everything else `reset_unit()`/`open()` cover):
+  parses each captured Ethernet frame's first 14 bytes (dst/src/type) into
+  the exact same `struct EchoPacket` shape `CMD_WRITE` already builds, so
+  `CMD_READ`/`S2_READORPHAN`'s existing `fill_read_from_packet()` serves a
+  replayed record with no separate delivery path. Fail-fast on: wrong
+  `linktype` (only `LINKTYPE_ETHERNET` supported), a record shorter than a
+  full Ethernet header or bigger than this device ever builds, a
+  snaplen-truncated record (`incl_len != orig_len` -- replaying a
+  shortened frame would be replaying something that never really existed
+  on the wire), more records than `SANA2LOOP_MAX_REPLAY_PACKETS` (16), or
+  an empty capture.
+- **Typing is ignored**: `CMD_READ` on a replay-mode unit behaves exactly
+  like `S2_READORPHAN` -- both just mean "give me the next captured frame,
+  whatever type it turns out to be." Once the loaded sequence is
+  exhausted, a further read just queues like any unit with no traffic
+  waiting -- SANA-II has no "end of stream" concept, so this device
+  doesn't invent one.
+- **`CMD_WRITE`/`S2_BROADCAST`/`S2_MULTICAST` on a replay-mode unit fail
+  `S2ERR_NOT_SUPPORTED`**: a canned trace has nowhere meaningful to send
+  anything. Checked ahead of the `su_Online` check in `do_write()` --
+  this is a fundamental "not supported for this mode," not a temporary
+  unavailability.
+- **`su_ReplayNext` is a running POINTER, not an array index.**
+  `struct EchoPacket` isn't power-of-2 sized (its
+  `ep_Data[SANA2LOOP_MAX_PACKET]` dominates), so indexing it by a runtime
+  variable (`su_ReplayPackets[su_ReplayPos]`, or the equally-tempting
+  `packets[count]` while loading) needs an actual
+  `count*sizeof(struct EchoPacket)` multiply -- which compiles to an
+  unavailable `__mulsi3` call on this `-nostdlib -m68000` build. A plain
+  pointer increment (`su_ReplayNext++`) is just `address += a
+  compile-time-constant step`, never a multiply, so replay consumption and
+  loading both walk forward with a cursor instead of indexing.
+- **`__attribute__((noinline))` on `load_replay_file()` is load-bearing**,
+  not style: inlined into `open()` (its only call site, the classic shape
+  GCC auto-inlines), the compiler's register allocator rematerialized the
+  `unit` pointer via exactly the runtime-multiply-by-`sizeof(Sana2LoopUnit)`
+  this milestone otherwise avoided, rather than keeping it live in a
+  register across the larger merged function -- broke the build with the
+  same undefined `__mulsi3` reference. Every OTHER `sld_Units[]` index site
+  in this file (`delivery_target()`, `init_device()`'s setup loop) needs
+  the identical multiply and has so far stayed under whatever shift/add
+  budget this backend allows before falling back to a library call; this
+  one didn't, once inlined. Any future milestone growing `struct
+  Sana2LoopUnit` further should re-check for the same failure by rebuilding
+  and grepping for `__mulsi3` -- the exact byte count that tips this over
+  isn't something to reason about in advance.
+- **`SANA2LOOP_MAX_REPLAY_PACKETS=16` was picked empirically.** The
+  original guess (32, ~49 KB) reliably failed its own `AllocMem()` under
+  bundled AROS specifically (confirmed via a temporary `AvailMem(MEMF_LARGEST)`
+  probe) -- AROS, unlike a real ROM in true ROM space, has to load its own
+  Kickstart replacement INTO the test profile's 512K+512K chip+fast budget,
+  leaving measurably less free than real Kickstart 1.3 does on the
+  identical profile. 16 (~25 KB) passed with headroom on both targets.
+- Always the FULL `SANA2LOOP_MAX_REPLAY_PACKETS`-slot allocation is made
+  at load time, not one sized to the capture's actual record count -- that
+  count isn't known until the whole file has been read, and a two-pass
+  read (count, then allocate exactly, then re-read) buys nothing a
+  fixed-size allocation doesn't already give this device elsewhere
+  (`rxqueue`, `S2_TRACKTYPE`, `S2_ADD/DELMULTICASTADDRESS`).
+  `reset_unit()`'s matching `FreeMem()` (freeing a previous lifetime's
+  buffer at the next 0->1 transition) must use this same fixed size, not
+  `su_ReplayCount`.
 
 ## `S2_DEVICEQUERY` convention (easy to get backwards)
 
