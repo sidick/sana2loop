@@ -63,10 +63,17 @@ rm -f "$ADF"
     makedir c + makedir s + makedir devs + makedir s/sana2loop + \
     write "$DEVICE" devs/loopback.device + \
     write "$BIN" c/sana2test + \
-    write "$HERE/adf-startup-sequence.txt" s/startup-sequence + \
-    write "$HERE/fixtures/unit1.config" s/sana2loop/unit1.config + \
-    write "$HERE/fixtures/unit4.config" s/sana2loop/unit4.config \
+    write "$HERE/adf-startup-sequence.txt" s/startup-sequence \
     > /dev/null
+
+# Per-unit config fixtures: one xdftool invocation per file, not batched
+# into the command above, since the fixture set has grown milestone over
+# milestone (M5/M6/M7) and a plain glob keeps this from needing an edit
+# every time a new one is added.
+for f in "$HERE"/fixtures/unit*.config; do
+    n=$(basename "$f" .config)
+    "$XDFTOOL" "$ADF" write "$f" "s/sana2loop/$n.config" > /dev/null
+done
 
 OUT=$(mktemp)
 cleanup() { rm -f "$OUT"; }
@@ -85,7 +92,7 @@ grep -q '^END' "$OUT" 2>/dev/null || { echo "FAIL: no END marker (raise BENCH?)"
 # just the aggregate RESULT= -- so a regression in one milestone's check
 # names itself instead of being buried in one pass/fail bit. Keep this list
 # in sync with the NAME_* constants in sana2test.c as milestones add more.
-SUBTESTS="online devicequery stationaddress echo offline onevent oneventnow abortio cmdflush bufferhooks delivery configinterface tracktype broadcast multicast multicastaddress raw config crossover"
+SUBTESTS="online devicequery stationaddress echo offline onevent oneventnow abortio cmdflush bufferhooks delivery configinterface tracktype broadcast multicast multicastaddress raw config crossover faultdrop faultdup faultreorder faultoversilent faultflap"
 fails=0
 for s in $SUBTESTS; do
     grep -q "^SUB=${s}=PASS$" "$OUT" 2>/dev/null || {

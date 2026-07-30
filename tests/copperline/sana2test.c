@@ -105,6 +105,11 @@ static char NAME_MULTICASTADDR[]  = "multicastaddress";
 static char NAME_RAW[]            = "raw";
 static char NAME_CONFIG[]         = "config";
 static char NAME_CROSSOVER[]      = "crossover";
+static char NAME_FAULTDROP[]       = "faultdrop";
+static char NAME_FAULTDUP[]        = "faultdup";
+static char NAME_FAULTREORDER[]    = "faultreorder";
+static char NAME_FAULTOVERSILENT[] = "faultoversilent";
+static char NAME_FAULTFLAP[]       = "faultflap";
 static char DBG_CHECKIO_NULL[]    = "DBG_CHECKIO_NULL=";
 
 /* _start must be the very first thing in the file and contain no data of
@@ -1053,6 +1058,404 @@ static int test_main(void)
         }
 
         report(NAME_CROSSOVER, ok, &fails);
+    }
+
+    /* --- faultdrop: unit 5's config (droppct=100) makes every write
+     * silently lost -- the write itself still "succeeds" (io_Error==0,
+     * same as real best-effort Ethernet has no way to tell a sender a
+     * frame got lost), but a queued read for it never completes. --- */
+    {
+        BOOL ok = TRUE;
+        struct MsgPort *port5 = make_port();
+        struct IOSana2Req *io5 = port5 ? make_io(port5) : NULL;
+
+        if (io5 && OpenDevice((STRPTR)DEVICE_NAME, 5, (struct IORequest *)io5, 0) == 0) {
+            io5->ios2_Req.io_Command = S2_ONLINE;
+            do_io(io5);
+            ok = (io5->ios2_Req.io_Error == 0);
+
+            io5->ios2_Req.io_Command = CMD_READ;
+            io5->ios2_Data = readbuf;
+            io5->ios2_PacketType = 0xD100;
+            io5->ios2_Req.io_Flags = 0;
+            send_io(io5);
+
+            /* A separate writer open -- do_io on io5 while it's
+             * SendIO-pending would deadlock (same request, same task). */
+            {
+                struct MsgPort *port5w = make_port();
+                struct IOSana2Req *io5w = port5w ? make_io(port5w) : NULL;
+
+                if (io5w && OpenDevice((STRPTR)DEVICE_NAME, 5, (struct IORequest *)io5w, 0) == 0) {
+                    int i;
+                    io5w->ios2_Req.io_Command = CMD_WRITE;
+                    io5w->ios2_PacketType = 0xD100;
+                    io5w->ios2_DataLength = sizeof(PAYLOAD) - 1;
+                    io5w->ios2_Data = (APTR)PAYLOAD;
+                    for (i = 0; i < SANA2_MAX_ADDR_BYTES; i++)
+                        io5w->ios2_DstAddr[i] = (i < 6) ? (UBYTE)(0x90 + i) : 0;
+                    do_io(io5w);
+                    ok = ok && (io5w->ios2_Req.io_Error == 0);
+                    CloseDevice((struct IORequest *)io5w);
+                } else {
+                    ok = FALSE;
+                }
+                if (io5w)
+                    FreeMem(io5w, sizeof(struct IOSana2Req));
+                if (port5w) {
+                    FreeSignal(port5w->mp_SigBit);
+                    FreeMem(port5w, sizeof(struct MsgPort));
+                }
+            }
+
+            AbortIO((struct IORequest *)io5); /* nothing ever arrived to satisfy it */
+            WaitIO((struct IORequest *)io5);
+            ok = ok && (io5->ios2_Req.io_Error == IOERR_ABORTED);
+
+            CloseDevice((struct IORequest *)io5);
+        } else {
+            ok = FALSE;
+        }
+        if (io5)
+            FreeMem(io5, sizeof(struct IOSana2Req));
+        if (port5) {
+            FreeSignal(port5->mp_SigBit);
+            FreeMem(port5, sizeof(struct MsgPort));
+        }
+
+        report(NAME_FAULTDROP, ok, &fails);
+    }
+
+    /* --- faultdup: unit 6's config (duppct=100) makes every write
+     * deliver TWICE -- two independently queued typed reads for the same
+     * packet type must BOTH complete from just one write, proving real
+     * duplication (a second, separately delivered packet), not the same
+     * buffer referenced twice. --- */
+    {
+        BOOL ok = TRUE;
+        struct MsgPort *port6a = make_port();
+        struct IOSana2Req *io6a = port6a ? make_io(port6a) : NULL;
+        struct MsgPort *port6b = make_port();
+        struct IOSana2Req *io6b = port6b ? make_io(port6b) : NULL;
+        struct MsgPort *port6w = make_port();
+        struct IOSana2Req *io6w = port6w ? make_io(port6w) : NULL;
+
+        if (io6a && io6b && io6w &&
+            OpenDevice((STRPTR)DEVICE_NAME, 6, (struct IORequest *)io6a, 0) == 0 &&
+            OpenDevice((STRPTR)DEVICE_NAME, 6, (struct IORequest *)io6b, 0) == 0 &&
+            OpenDevice((STRPTR)DEVICE_NAME, 6, (struct IORequest *)io6w, 0) == 0) {
+            int i;
+
+            io6w->ios2_Req.io_Command = S2_ONLINE;
+            do_io(io6w);
+            ok = (io6w->ios2_Req.io_Error == 0);
+
+            io6a->ios2_Req.io_Command = CMD_READ;
+            io6a->ios2_Data = readbuf;
+            io6a->ios2_PacketType = 0xD200;
+            io6a->ios2_Req.io_Flags = 0;
+            send_io(io6a);
+
+            io6b->ios2_Req.io_Command = CMD_READ;
+            io6b->ios2_Data = readbuf2;
+            io6b->ios2_PacketType = 0xD200;
+            io6b->ios2_Req.io_Flags = 0;
+            send_io(io6b);
+
+            io6w->ios2_Req.io_Command = CMD_WRITE;
+            io6w->ios2_PacketType = 0xD200;
+            io6w->ios2_DataLength = sizeof(PAYLOAD) - 1;
+            io6w->ios2_Data = (APTR)PAYLOAD;
+            for (i = 0; i < SANA2_MAX_ADDR_BYTES; i++)
+                io6w->ios2_DstAddr[i] = (i < 6) ? (UBYTE)(0xA0 + i) : 0;
+            do_io(io6w);
+            ok = ok && (io6w->ios2_Req.io_Error == 0);
+
+            WaitIO((struct IORequest *)io6a);
+            WaitIO((struct IORequest *)io6b);
+            ok = ok && (io6a->ios2_Req.io_Error == 0) && (io6b->ios2_Req.io_Error == 0);
+
+            CloseDevice((struct IORequest *)io6a);
+            CloseDevice((struct IORequest *)io6b);
+            CloseDevice((struct IORequest *)io6w);
+        } else {
+            ok = FALSE;
+        }
+        if (io6a)
+            FreeMem(io6a, sizeof(struct IOSana2Req));
+        if (io6b)
+            FreeMem(io6b, sizeof(struct IOSana2Req));
+        if (io6w)
+            FreeMem(io6w, sizeof(struct IOSana2Req));
+        if (port6a) {
+            FreeSignal(port6a->mp_SigBit);
+            FreeMem(port6a, sizeof(struct MsgPort));
+        }
+        if (port6b) {
+            FreeSignal(port6b->mp_SigBit);
+            FreeMem(port6b, sizeof(struct MsgPort));
+        }
+        if (port6w) {
+            FreeSignal(port6w->mp_SigBit);
+            FreeMem(port6w, sizeof(struct MsgPort));
+        }
+
+        report(NAME_FAULTDUP, ok, &fails);
+    }
+
+    /* --- faultreorder: unit 7's config (seed=7, reorder=3) produces an
+     * EXACT, precomputable delivery permutation for 6 packets sent in
+     * order 0..5 -- precomputed on the host with a Python replica of this
+     * device's xorshift32()+prng_index() (see fixtures/unit7.config's own
+     * comment): writes at (0-indexed) positions 2, 3, 4, 5 each trigger
+     * one IMMEDIATE delivery (the reorder buffer reaching its window of
+     * 3), in the order [2, 3, 0, 5]; the two packets still buffered
+     * afterward (1 and 4) are delivered by a final S2_OFFLINE flush, in
+     * their original arrival order. Each write's ios2_PacketType
+     * (0x9000+i) identifies which original packet arrived -- simpler than
+     * needing distinct payload content on top of distinct types, since
+     * S2_READORPHAN (untyped) is what's used to receive. --- */
+    {
+        BOOL ok = TRUE;
+        struct MsgPort *porta = make_port();
+        struct IOSana2Req *ioa = porta ? make_io(porta) : NULL; /* reader */
+        struct MsgPort *portb = make_port();
+        struct IOSana2Req *iob = portb ? make_io(portb) : NULL; /* writer */
+
+        if (ioa && iob &&
+            OpenDevice((STRPTR)DEVICE_NAME, 7, (struct IORequest *)ioa, 0) == 0 &&
+            OpenDevice((STRPTR)DEVICE_NAME, 7, (struct IORequest *)iob, 0) == 0) {
+            static const UWORD expect_immediate[4] = {2, 3, 0, 5};
+            static const UWORD expect_flush[2]     = {1, 4};
+            int i;
+
+            ioa->ios2_Req.io_Command = S2_ONLINE;
+            do_io(ioa);
+            ok = ok && (ioa->ios2_Req.io_Error == 0);
+
+            for (i = 0; i < 6; i++) {
+                BOOL expect_delivery = (i >= 2); /* writes 2..5 each evict one */
+
+                if (expect_delivery) {
+                    ioa->ios2_Req.io_Command = S2_READORPHAN;
+                    ioa->ios2_Data = readbuf;
+                    ioa->ios2_Req.io_Flags = 0;
+                    send_io(ioa);
+                }
+
+                iob->ios2_Req.io_Command = CMD_WRITE;
+                iob->ios2_PacketType = (ULONG)(0x9000 + i);
+                iob->ios2_DataLength = sizeof(PAYLOAD) - 1;
+                iob->ios2_Data = (APTR)PAYLOAD;
+                {
+                    int k;
+                    for (k = 0; k < SANA2_MAX_ADDR_BYTES; k++)
+                        iob->ios2_DstAddr[k] = (k < 6) ? (UBYTE)(0x80 + k) : 0;
+                }
+                do_io(iob);
+                ok = ok && (iob->ios2_Req.io_Error == 0);
+
+                if (expect_delivery) {
+                    WaitIO((struct IORequest *)ioa);
+                    ok = ok && (ioa->ios2_Req.io_Error == 0) &&
+                         (ioa->ios2_PacketType == (ULONG)(0x9000 + expect_immediate[i - 2]));
+                }
+            }
+
+            /* Final flush: packets 1 and 4 remain buffered -- S2_OFFLINE
+             * delivers both within that one synchronous call. Queue two
+             * orphan reads first, in the order they must be satisfied
+             * (FIFO orphan queue, oldest-queued first). */
+            {
+                struct MsgPort *portc = make_port();
+                struct IOSana2Req *ioc = portc ? make_io(portc) : NULL;
+
+                if (ioc && OpenDevice((STRPTR)DEVICE_NAME, 7, (struct IORequest *)ioc, 0) == 0) {
+                    ioa->ios2_Req.io_Command = S2_READORPHAN;
+                    ioa->ios2_Data = readbuf;
+                    ioa->ios2_Req.io_Flags = 0;
+                    send_io(ioa);
+
+                    ioc->ios2_Req.io_Command = S2_READORPHAN;
+                    ioc->ios2_Data = readbuf2;
+                    ioc->ios2_Req.io_Flags = 0;
+                    send_io(ioc);
+
+                    iob->ios2_Req.io_Command = S2_OFFLINE;
+                    do_io(iob);
+                    ok = ok && (iob->ios2_Req.io_Error == 0);
+
+                    WaitIO((struct IORequest *)ioa);
+                    WaitIO((struct IORequest *)ioc);
+                    ok = ok && (ioa->ios2_Req.io_Error == 0) && (ioc->ios2_Req.io_Error == 0) &&
+                         (ioa->ios2_PacketType == (ULONG)(0x9000 + expect_flush[0])) &&
+                         (ioc->ios2_PacketType == (ULONG)(0x9000 + expect_flush[1]));
+
+                    CloseDevice((struct IORequest *)ioc);
+                } else {
+                    ok = FALSE;
+                }
+                if (ioc)
+                    FreeMem(ioc, sizeof(struct IOSana2Req));
+                if (portc) {
+                    FreeSignal(portc->mp_SigBit);
+                    FreeMem(portc, sizeof(struct MsgPort));
+                }
+            }
+
+            CloseDevice((struct IORequest *)ioa);
+            CloseDevice((struct IORequest *)iob);
+        } else {
+            ok = FALSE;
+        }
+        if (ioa)
+            FreeMem(ioa, sizeof(struct IOSana2Req));
+        if (iob)
+            FreeMem(iob, sizeof(struct IOSana2Req));
+        if (porta) {
+            FreeSignal(porta->mp_SigBit);
+            FreeMem(porta, sizeof(struct MsgPort));
+        }
+        if (portb) {
+            FreeSignal(portb->mp_SigBit);
+            FreeMem(portb, sizeof(struct MsgPort));
+        }
+
+        report(NAME_FAULTREORDER, ok, &fails);
+    }
+
+    /* --- faultoversilent: units 2/3 (M6's default crossover pair) get an
+     * extra config knob each for this sub-test alone: unit 2's
+     * oversilent=1, unit 3's mtu=500 (both harmless to M6's own test,
+     * which only ever writes tiny 20-byte payloads). A write from unit 2
+     * within its OWN (default 1500) MTU but over unit 3's must succeed
+     * (io_Error==0 -- the caller is never told) yet never actually arrive
+     * -- a real PMTUD black hole, the pathology PMTUD itself exists to
+     * detect and route around. --- */
+    {
+        BOOL ok = TRUE;
+        struct MsgPort *port2o = make_port();
+        struct IOSana2Req *io2o = port2o ? make_io(port2o) : NULL; /* unit 2, writer */
+        struct MsgPort *port3o = make_port();
+        struct IOSana2Req *io3o = port3o ? make_io(port3o) : NULL; /* unit 3, reader */
+
+        if (io2o && io3o &&
+            OpenDevice((STRPTR)DEVICE_NAME, 2, (struct IORequest *)io2o, 0) == 0 &&
+            OpenDevice((STRPTR)DEVICE_NAME, 3, (struct IORequest *)io3o, 0) == 0) {
+            static UBYTE bigbuf[600];
+            int i;
+            UBYTE unit3_addr[SANA2_MAX_ADDR_BYTES];
+
+            for (i = 0; i < 600; i++)
+                bigbuf[i] = (UBYTE)i;
+
+            io2o->ios2_Req.io_Command = S2_ONLINE;
+            do_io(io2o);
+            io3o->ios2_Req.io_Command = S2_ONLINE;
+            do_io(io3o);
+            ok = ok && (io2o->ios2_Req.io_Error == 0) && (io3o->ios2_Req.io_Error == 0);
+
+            io3o->ios2_Req.io_Command = S2_GETSTATIONADDRESS;
+            do_io(io3o);
+            for (i = 0; i < SANA2_MAX_ADDR_BYTES; i++)
+                unit3_addr[i] = io3o->ios2_SrcAddr[i];
+
+            io3o->ios2_Req.io_Command = CMD_READ;
+            io3o->ios2_Data = readbuf;
+            io3o->ios2_PacketType = 0xD300;
+            io3o->ios2_Req.io_Flags = 0;
+            send_io(io3o);
+
+            io2o->ios2_Req.io_Command = CMD_WRITE;
+            io2o->ios2_PacketType = 0xD300;
+            io2o->ios2_DataLength = 600; /* within unit 2's 1500 MTU, over unit 3's 500 */
+            io2o->ios2_Data = bigbuf;
+            for (i = 0; i < SANA2_MAX_ADDR_BYTES; i++)
+                io2o->ios2_DstAddr[i] = unit3_addr[i];
+            do_io(io2o);
+            ok = ok && (io2o->ios2_Req.io_Error == 0); /* accepted... */
+
+            AbortIO((struct IORequest *)io3o);
+            WaitIO((struct IORequest *)io3o);
+            ok = ok && (io3o->ios2_Req.io_Error == IOERR_ABORTED); /* ...but vanished */
+
+            CloseDevice((struct IORequest *)io2o);
+            CloseDevice((struct IORequest *)io3o);
+        } else {
+            ok = FALSE;
+        }
+        if (io2o)
+            FreeMem(io2o, sizeof(struct IOSana2Req));
+        if (io3o)
+            FreeMem(io3o, sizeof(struct IOSana2Req));
+        if (port2o) {
+            FreeSignal(port2o->mp_SigBit);
+            FreeMem(port2o, sizeof(struct MsgPort));
+        }
+        if (port3o) {
+            FreeSignal(port3o->mp_SigBit);
+            FreeMem(port3o, sizeof(struct MsgPort));
+        }
+
+        report(NAME_FAULTOVERSILENT, ok, &fails);
+    }
+
+    /* --- faultflap: unit 8's config (offlineafter=2, onlineafter=2)
+     * auto-flaps online/offline based on write-attempt counts, simulating
+     * a flaky link that recovers on its own. Writes 1-2 succeed; write 3
+     * (crossing offlineafter's threshold from write 2) finds the unit
+     * already auto-offline; writes 3-4 both fail S2ERR_OUTOFSERVICE
+     * (failed-attempt count reaching onlineafter's threshold on write 4);
+     * write 5 succeeds again, the unit having auto-recovered. --- */
+    {
+        BOOL ok = TRUE;
+        struct MsgPort *port8 = make_port();
+        struct IOSana2Req *io8 = port8 ? make_io(port8) : NULL;
+
+        if (io8 && OpenDevice((STRPTR)DEVICE_NAME, 8, (struct IORequest *)io8, 0) == 0) {
+            int i;
+
+            io8->ios2_Req.io_Command = S2_ONLINE;
+            do_io(io8);
+            ok = (io8->ios2_Req.io_Error == 0);
+
+            for (i = 0; i < 2; i++) {
+                int k;
+                io8->ios2_Req.io_Command = CMD_WRITE;
+                io8->ios2_PacketType = 0xD400;
+                io8->ios2_DataLength = sizeof(PAYLOAD) - 1;
+                io8->ios2_Data = (APTR)PAYLOAD;
+                for (k = 0; k < SANA2_MAX_ADDR_BYTES; k++)
+                    io8->ios2_DstAddr[k] = (k < 6) ? (UBYTE)(0xB0 + k) : 0;
+                do_io(io8);
+                ok = ok && (io8->ios2_Req.io_Error == 0);
+            }
+
+            /* write 3: unit auto-went offline after write 2 above. */
+            do_io(io8);
+            ok = ok && (io8->ios2_Req.io_Error == S2ERR_OUTOFSERVICE);
+
+            /* write 4: 2nd failed attempt -- triggers auto-recovery for
+             * the NEXT attempt, but this one still fails. */
+            do_io(io8);
+            ok = ok && (io8->ios2_Req.io_Error == S2ERR_OUTOFSERVICE);
+
+            /* write 5: unit auto-recovered -- succeeds again. */
+            do_io(io8);
+            ok = ok && (io8->ios2_Req.io_Error == 0);
+
+            CloseDevice((struct IORequest *)io8);
+        } else {
+            ok = FALSE;
+        }
+        if (io8)
+            FreeMem(io8, sizeof(struct IOSana2Req));
+        if (port8) {
+            FreeSignal(port8->mp_SigBit);
+            FreeMem(port8, sizeof(struct MsgPort));
+        }
+
+        report(NAME_FAULTFLAP, ok, &fails);
     }
 
     CloseDevice((struct IORequest *)io1);

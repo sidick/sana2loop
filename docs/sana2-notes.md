@@ -310,6 +310,88 @@ echo mode has no real second party:
    filtering would only get in the way of the simplest test scenario, the
    original Phase 1 design intent.
 
+## Fault injection pipeline (M7)
+
+All disabled by default (`reset_unit()`): a plain write with no fault
+config behaves exactly as it did before this milestone. Fixed order, run
+in `do_write()` after `CopyFromBuff` succeeds: MTU-vs-peer (`oversilent`)
+-> `droppct` -> `truncate` -> `duppct` -> `reorder`. `offlineafter` is a
+side effect ticked once at the very end, after the packet (and its
+duplicate, if any) have already been handed off -- not really "part of"
+shaping this one packet, more a consequence of having sent it at all.
+
+- **PRNG**: xorshift32, one `ULONG` of state per unit, seeded from config
+  `seed=N` (0 coerced to 1 -- xorshift32 never leaves the all-zero state
+  otherwise) and re-seeded fresh at every 0->1 open transition, same
+  determinism boundary as everything else `reset_unit()` covers.
+- **Percent thresholds** (`droppct`/`duppct`, 0-100): `pct*655` compared
+  against the upper 16 bits of a draw, approximating `pct`/100 without a
+  32-bit division this `-nostdlib` build has no libgcc for. 0 and 100 are
+  exact boundaries, not leaning on the approximation at the edges --
+  100*655=65500, not the full 0-65535 range, so without special-casing it
+  a configured `droppct=100` would still let ~0.05% of writes through.
+- **`reorder=N`** (0-`SANA2LOOP_MAX_REORDER`, 8): a fixed-size, per-unit
+  buffer of packet pointers. New packets are appended until the buffer
+  reaches its configured window; once full, a PRNG-chosen SLOT (not
+  necessarily the newest arrival) is evicted for immediate delivery, and
+  the remaining slots are shifted down to close the gap -- preserving
+  their *relative* arrival order, which is what lets a final flush (see
+  below) just walk the buffer front-to-back with no separate bookkeeping.
+  This bounds how far out of order a packet can arrive (at most
+  `window - 1` later packets can overtake it before it's forced out), and
+  it means the PRNG only ever needs to draw an index in a small range --
+  done via masking to 3 bits and rejecting an out-of-window draw, NOT
+  `% window` (a runtime-variable modulo compiles to a `__umodsi3` call on
+  this `-m68000` target regardless of how small the operands turn out to
+  be, since the compiler can't see that from a variable divisor -- the
+  exact same class of libgcc trap M3's `memmove`-idiom discovery already
+  taught this project to watch for, just for division instead of copies).
+  Anything still buffered gets flushed, in genuine arrival order (no
+  further permutation), on `S2_OFFLINE` (manual or `offlineafter`'s
+  auto-trigger), `CMD_FLUSH`, or last-close -- so nothing is ever silently
+  stuck there forever once nothing's left to push it back out.
+- **`oversilent=1`**: only meaningful for crossover-mode writes (echo's
+  delivery target IS the writer, so its own MTU check already covers the
+  case). If a packet fits the writer's own MTU but exceeds the crossover
+  PEER's, this makes the write succeed (`io_Error` stays 0 -- the caller
+  is never told) while the packet silently vanishes instead of ever
+  reaching `deliver_packet()`. This simulates a real PMTUD (Path MTU
+  Discovery) black hole: an oversized frame that should trigger "packet
+  too big" feedback (or, at the IP layer, an ICMP fragmentation-needed
+  message) instead just disappears, exactly the pathology PMTUD itself
+  exists to detect and route around.
+- **`offlineafter`/`onlineafter`**: packet-count-driven auto-flapping,
+  simulating a flaky link. `su_WriteCounter` counts successful writes
+  since the last online transition; once it reaches `offlineafter`, the
+  unit auto-forces itself offline (same transition as a manual
+  `S2_OFFLINE`, including the reorder-buffer flush) for the *next* write
+  attempt -- the write that crosses the threshold still completes
+  normally, this isn't retroactive. Symmetrically, `su_FailCounter` counts
+  failed (`S2ERR_OUTOFSERVICE`) write ATTEMPTS while offline; once it
+  reaches `onlineafter`, the unit auto-recovers online for the next
+  attempt (that attempt itself still fails).
+- A latent M4 bug surfaced and fixed while building this: `do_write()`'s
+  addressing branch for "real, unswapped" delivery (crossover mode, or
+  echo's own `S2_BROADCAST`/`S2_MULTICAST`) now fills `ep_SrcAddr` from
+  the writer's own actual station address. M4's version had reused the
+  swap-mode's `src = ios2_DstAddr` line unconditionally for ALL non-echo
+  writes, meaning a broadcast frame's "source" was wrongly the broadcast
+  address itself -- never caught because M4's own broadcast/multicast
+  tests only ever asserted the delivered *destination*, not source.
+- **A real on-target bug this milestone's own harness found**: the
+  `faultreorder` sub-test's final-flush helper allocated a third
+  `IOSana2Req`/`MsgPort` pair but never called `OpenDevice()` on it before
+  using it for `S2_READORPHAN` -- `SendIO()` on a request with a NULL
+  `io_Device` doesn't fail cleanly, it hangs indefinitely (confirmed
+  identical on bundled AROS and real Kickstart 1.3, so a genuine harness
+  bug, not a target-specific quirk). Found by bisecting with temporary
+  inline-`RawPutChar` tracing on both sides (device and harness) until the
+  exact missing `OpenDevice()` call was obvious from where the trace
+  simply stopped -- the same "leak a value/checkpoint through direct
+  serial output" technique this project has reached for before, since the
+  hang happens before any `IORequest` involved ever completes (so there's
+  no `ios2_WireError`/`ios2_Req.io_Error` to inspect after the fact).
+
 ## `S2_DEVICEQUERY` convention (easy to get backwards)
 
 The caller pre-sets `ios2_StatData->SizeAvailable` to the size of *its own*

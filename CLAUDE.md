@@ -32,7 +32,7 @@ they may require Kickstart 2.0+ where convenient (documented per-tool).
 ## Current state
 
 Working through `docs/PLAN.md`'s milestones (M0-M12: spec-correctness
-backfill, then Phases 2-4). **M0-M6 done**, each validated on-target under
+backfill, then Phases 2-4). **M0-M7 done**, each validated on-target under
 Copperline against both bundled AROS (CI) and a real Kickstart 1.3 ROM
 (`make copperline-smoke` / `KICK=... make copperline-smoke`,
 see `tests/copperline/`) before being considered complete.
@@ -127,17 +127,47 @@ see `tests/copperline/`) before being considered complete.
     and M6's crossover test (needing units 2 and 3 to both open cleanly)
     don't collide over the same fixture. See `docs/sana2-notes.md`'s M6
     section for the full story.
-  - 5 units pre-allocated in the device base (unit 0 wired for echo by
-    default; units 2-3 default-paired for crossover; unit 4 spare/echo,
-    reserved for on-target tests needing a fixture-free unit). A unit
-    fully resets (`reset_unit()`: offline, factory address, stats zeroed,
-    `rxqueue` back to 0, mode/peer to their compiled-in default) the
-    moment its open count goes 0->1, then (M5) has its config file read --
-    "config re-read on next open" now means exactly this. No separate
-    unit task -- echo completes synchronously inside `BeginIO` on the
-    calling task; that path itself still never touches dos.library (only
-    `open()`'s M5 config read does), so the echo/delivery path's own 1.3
-    compliance is unchanged.
+  - **M7**: fault injection pipeline, all off by default. Fixed order in
+    `do_write()` after `CopyFromBuff`: MTU-vs-peer (`oversilent=1` -- a
+    real PMTUD black hole with mismatched crossover MTUs: the write
+    succeeds, `io_Error` stays 0, but the packet silently never arrives)
+    -> `droppct` -> `truncate` -> `duppct` (a genuine second
+    `deliver_or_reorder()` call with a `CopyMem`-duplicated packet, not
+    the same buffer referenced twice) -> `reorder` (fixed 8-slot
+    PRNG-permuted buffer, flushed in real arrival order on `S2_OFFLINE`/
+    `CMD_FLUSH`/last-close). `offlineafter`/`onlineafter` auto-flap
+    online/offline off write-attempt counters, simulating a flaky link.
+    PRNG is xorshift32, seeded from config (`seed=N`, 0 coerced to 1),
+    re-seeded fresh every 0->1 open transition. Percent thresholds and the
+    reorder buffer's index draw both avoid needing 32-bit division (no
+    libgcc in this build) -- so despite docs/PLAN.md flagging M7 as the
+    milestone likely to finally force the deferred `-lgcc` decision, it
+    still didn't. `SANA2LOOP_NUM_UNITS` is now 9 (was 5): five more
+    fixture-dedicated units for droppct/duppct/reorder/offlineafter-
+    onlineafter, plus two new config keys added to the existing M6
+    crossover pair (2/3) for the oversilent/PMTUD test -- harmless to M6's
+    own assertions there, which only ever write tiny 20-byte payloads.
+    Also fixed a latent M4 bug (real, unswapped addressing was already
+    needed for M6, and turned up that M4's broadcast/multicast had reused
+    echo's swap-mode source-address line unconditionally) and found a
+    real on-target harness bug of its OWN (a third test `IOSana2Req` used
+    for `S2_READORPHAN` without ever calling `OpenDevice()` on it first --
+    hung identically on both AROS and real 1.3, so a genuine bug, not a
+    quirk). See `docs/sana2-notes.md`'s M7 section for the full story.
+  - 9 units pre-allocated in the device base (unit 0 wired for echo by
+    default; units 2-3 default-paired for crossover; units 4-8 spare/echo,
+    each claimed by exactly one on-target test's own config fixture so no
+    two tests' expectations ever collide on the same unit -- see
+    `tests/copperline/run.sh`'s fixture layout for the current
+    allocation). A unit fully resets (`reset_unit()`: offline, factory
+    address, stats zeroed, `rxqueue` back to 0, mode/peer/fault-injection
+    knobs all to their compiled-in defaults) the moment its open count
+    goes 0->1, then (M5) has its config file read -- "config re-read on
+    next open" now means exactly this. No separate unit task -- echo
+    completes synchronously inside `BeginIO` on the calling task; that
+    path itself still never touches dos.library (only `open()`'s M5
+    config read does), so the echo/delivery path's own 1.3 compliance is
+    unchanged.
 - `src/sanainfo.c` -- `SanaInfo`, the Phase 1 validation tool: opens a unit,
   optionally issues `S2_ONLINE`/`S2_OFFLINE`, prints `S2_DEVICEQUERY` +
   station address. Normal clib2 CLI program (V36+ Exec calls -- see the
@@ -149,7 +179,7 @@ see `tests/copperline/`) before being considered complete.
   reason specific to itself (not the device): see the comment block at its
   top for a real on-target bug this tripped over and how it was found.
 
-Not yet done: fault injection knobs, pcap replay/record, `SanaDump`/`SanaSend`.
+Not yet done: pcap replay/record, `SanaDump`/`SanaSend`.
 
 ## Architecture
 
@@ -210,7 +240,7 @@ pinned `ghcr.io/reinauer/container-amiga-gcc` image narrator.wyoming uses
 
 `make docker` has been run successfully in this environment (both binaries
 build clean), and `make copperline-smoke` has confirmed every sub-test
-through M6 on-target against both bundled AROS and real Kickstart 1.3 (see
+through M7 on-target against both bundled AROS and real Kickstart 1.3 (see
 "Testing under Copperline" below and `tests/copperline/sana2test.c`'s
 `SUB=` list).
 

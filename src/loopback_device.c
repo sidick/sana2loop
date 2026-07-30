@@ -69,13 +69,16 @@
  * default too, both so a plain "no config at all" boot still has more
  * than one echo-mode unit available and to leave the M6 crossover default
  * (2<->3) as the sole example of it, rather than making every remaining
- * unit crossover-paired. Unit 4 is a spare, echo-default unit reserved for
- * on-target tests that need a unit no other test already has a fixture
- * or expectation riding on (see tests/copperline/run.sh's per-unit
- * config fixture layout -- M5's malformed-config test lives there
- * specifically so M6's crossover test can rely on units 2 and 3 both
- * opening cleanly). */
-#define SANA2LOOP_NUM_UNITS   5
+ * unit crossover-paired. Units 4 and up are otherwise-uncommitted,
+ * echo-default units that on-target tests claim one at a time via their
+ * own config fixture, specifically so no two tests' expectations ever
+ * collide on the same unit (see tests/copperline/run.sh's per-unit
+ * config fixture layout for the current allocation: 1=M5 mtu override,
+ * 2/3=M6 crossover pair (also M7's oversilent/PMTUD pair, since neither
+ * milestone's own assertions care about the other's config additions
+ * there), 4=M5 malformed-config-fails, 5=M7 droppct, 6=M7 duppct,
+ * 7=M7 reorder, 8=M7 offlineafter/onlineafter). */
+#define SANA2LOOP_NUM_UNITS   9
 #define SANA2LOOP_DEFAULT_MTU 1500
 /* Ethernet dst[6]+src[6]+type[2] -- the allowance SANA2IOF_RAW adds on top
  * of su_MTU (docs/PLAN.md's M4 entry: "SANA2IOF_RAW (buffer -> MTU+14)").
@@ -105,6 +108,10 @@
  * joined groups gets S2ERR_NO_RESOURCES/S2WERR_MULTICAST_FULL. */
 #define SANA2LOOP_MAX_MULTICAST 8
 
+/* M7 reorder buffer size -- docs/PLAN.md's "fixed 8-slot pointer array".
+ * Also the config ceiling for `reorder=N` (the window size). */
+#define SANA2LOOP_MAX_REORDER 8
+
 /* SysBase -- the one file-scope global this file needs. Safe here: this is
  * a plain -nostdlib freestanding build (no -fbaserel), so globals use
  * normal addressing, not an A4-relative small-data segment that some
@@ -129,14 +136,13 @@ struct DosLibrary *DOSBase;
 /* M5 config-file infrastructure: ENV:sana2loop/unitN.config, falling back
  * to S:sana2loop/unitN.config, read once at first-open (unit_OpenCnt
  * 0->1, same trigger as reset_unit()) and only from a real Process opener
- * -- see read_unit_config()'s own comment. `mtu`/`rxqueue` (M5) and
- * `mode`/`peer` (M6) are recognized here: those are the only per-unit
- * knobs that already exist as real device state today. The proposal's
- * remaining key vocabulary (seed/droppct/duppct/reorder/truncate/
- * oversilent/offlineafter/onlineafter for M7 fault injection; replay/
- * record/replaymode/recordmax for M8-M9) has nothing to configure yet --
- * adding parser support for a key with no consuming feature behind it
- * would be dead code, so each lands with its own milestone instead. */
+ * -- see read_unit_config()'s own comment. `mtu`/`rxqueue` (M5), `mode`/
+ * `peer` (M6), and `seed`/`droppct`/`duppct`/`truncate`/`oversilent`/
+ * `reorder`/`offlineafter`/`onlineafter` (M7) are recognized here. The
+ * proposal's remaining key vocabulary (replay/record/replaymode/
+ * recordmax for M8-M9) has nothing to configure yet -- adding parser
+ * support for a key with no consuming feature behind it would be dead
+ * code, so each lands with its own milestone instead. */
 #define SANA2LOOP_CONFIG_BUF_SIZE 2048
 /* Must leave SANA2LOOP_RAW_HDR_SIZE of headroom below the fixed
  * EchoPacket buffer (SANA2LOOP_MAX_PACKET) -- a configured MTU above this
@@ -147,6 +153,9 @@ struct DosLibrary *DOSBase;
  * requirement, just a guard against a typo'd huge value exhausting real
  * 1.3's limited chip/fast memory pool via runaway EchoPacket queuing. */
 #define SANA2LOOP_CONFIG_MAX_RXQUEUE 64
+/* `truncate=N` can't usefully exceed the biggest packet this device ever
+ * builds -- same ceiling `mtu` itself uses. */
+#define SANA2LOOP_CONFIG_MAX_TRUNCATE (SANA2LOOP_MAX_PACKET - SANA2LOOP_RAW_HDR_SIZE)
 
 /* M6: a unit is either a standalone echo loopback (Phase 1 behavior,
  * unchanged) or crossover-paired with exactly one other unit (a real,
@@ -163,6 +172,15 @@ struct UnitConfig {
     ULONG rxqueue;
     ULONG mode;
     ULONG peer;
+    ULONG seed;         /* M7: xorshift32 seed, 0 coerced to 1 at use time */
+    ULONG droppct;      /* M7: 0-100 */
+    ULONG duppct;       /* M7: 0-100 */
+    ULONG truncate;     /* M7: 0 = disabled, else cap packet length to this */
+    ULONG oversilent;   /* M7: 0 or 1 */
+    ULONG reorder;      /* M7: 0-SANA2LOOP_MAX_REORDER window size */
+    ULONG offlineafter; /* M7: 0 = disabled, else auto-offline after N writes */
+    ULONG onlineafter;  /* M7: 0 = disabled, else auto-online after N failed
+                            write attempts while offline */
 };
 
 static char CONFIG_ENV_PREFIX[] = "ENV:sana2loop/unit";
@@ -278,6 +296,65 @@ static BOOL parse_config_line(struct UnitConfig *cfg, const char *line, const ch
         if (value >= SANA2LOOP_NUM_UNITS)
             return FALSE;
         cfg->peer = value;
+        return TRUE;
+    }
+    if (key_matches(line, eq, "seed")) {
+        if (!parse_ulong(eq + 1, line_end, &value))
+            return FALSE;
+        cfg->seed = value; /* 0 is a legal config value -- coerced to 1
+                               only where the PRNG is actually seeded */
+        return TRUE;
+    }
+    if (key_matches(line, eq, "droppct")) {
+        if (!parse_ulong(eq + 1, line_end, &value))
+            return FALSE;
+        if (value > 100)
+            return FALSE;
+        cfg->droppct = value;
+        return TRUE;
+    }
+    if (key_matches(line, eq, "duppct")) {
+        if (!parse_ulong(eq + 1, line_end, &value))
+            return FALSE;
+        if (value > 100)
+            return FALSE;
+        cfg->duppct = value;
+        return TRUE;
+    }
+    if (key_matches(line, eq, "truncate")) {
+        if (!parse_ulong(eq + 1, line_end, &value))
+            return FALSE;
+        if (value > SANA2LOOP_CONFIG_MAX_TRUNCATE)
+            return FALSE;
+        cfg->truncate = value;
+        return TRUE;
+    }
+    if (key_matches(line, eq, "oversilent")) {
+        if (!parse_ulong(eq + 1, line_end, &value))
+            return FALSE;
+        if (value > 1)
+            return FALSE;
+        cfg->oversilent = value;
+        return TRUE;
+    }
+    if (key_matches(line, eq, "reorder")) {
+        if (!parse_ulong(eq + 1, line_end, &value))
+            return FALSE;
+        if (value > SANA2LOOP_MAX_REORDER)
+            return FALSE;
+        cfg->reorder = value;
+        return TRUE;
+    }
+    if (key_matches(line, eq, "offlineafter")) {
+        if (!parse_ulong(eq + 1, line_end, &value))
+            return FALSE;
+        cfg->offlineafter = value;
+        return TRUE;
+    }
+    if (key_matches(line, eq, "onlineafter")) {
+        if (!parse_ulong(eq + 1, line_end, &value))
+            return FALSE;
+        cfg->onlineafter = value;
         return TRUE;
     }
     return FALSE; /* unrecognized key -- fail-fast, not silently ignored */
@@ -464,6 +541,36 @@ struct Sana2LoopUnit {
     BOOL        su_McastInUse[SANA2LOOP_MAX_MULTICAST];
     UBYTE       su_McastAddr[SANA2LOOP_MAX_MULTICAST][6];
     ULONG       su_McastRefCount[SANA2LOOP_MAX_MULTICAST];
+    /* M7 fault injection -- see docs/sana2-notes.md's M7 section for the
+     * full pipeline story. All zero/disabled by default (reset_unit()):
+     * fault injection is opt-in, never a surprise. */
+    ULONG       su_Seed;              /* configured seed, re-applied (0->1
+                                          coerced) to su_PrngState at every
+                                          reset_unit() */
+    ULONG       su_PrngState;         /* live xorshift32 state */
+    ULONG       su_DropPct;           /* 0-100 */
+    ULONG       su_DupPct;            /* 0-100 */
+    ULONG       su_Truncate;          /* 0 = disabled, else cap packet
+                                          length to this many bytes */
+    BOOL        su_Oversilent;        /* MTU-vs-peer exceeded -> silent
+                                          accept-and-vanish instead of
+                                          S2ERR_MTU_EXCEEDED (crossover
+                                          only -- see do_write()) */
+    ULONG       su_ReorderWindow;     /* 0 = disabled, else 1-
+                                          SANA2LOOP_MAX_REORDER */
+    struct EchoPacket *su_ReorderBuf[SANA2LOOP_MAX_REORDER]; /* arrival-
+                                          ordered while buffered -- see
+                                          reorder_push()/reorder_flush() */
+    ULONG       su_ReorderCount;      /* current fill level, <= su_ReorderWindow */
+    ULONG       su_OfflineAfter;      /* 0 = disabled, else auto-S2_OFFLINE
+                                          after this many successful writes */
+    ULONG       su_OnlineAfter;       /* 0 = disabled, else auto-S2_ONLINE
+                                          after this many failed (offline)
+                                          write attempts */
+    ULONG       su_WriteCounter;      /* successful writes since the last
+                                          online transition -- su_OfflineAfter */
+    ULONG       su_FailCounter;       /* failed write attempts since going
+                                          offline -- su_OnlineAfter */
     struct List su_PendingReads;      /* queued, TYPED CMD_READ IORequests */
     struct List su_OrphanReads;       /* queued S2_READORPHAN IORequests (untyped) */
     struct List su_PendingData;       /* packets awaiting a CMD_READ/S2_READORPHAN,
@@ -789,6 +896,179 @@ static void fire_event(struct Sana2LoopUnit *unit, ULONG event)
     Enable();
 }
 
+/* Forward declaration: reorder_push()/reorder_flush() below need to call
+ * this, but its own definition (unchanged since M2/M6) lives further down
+ * near do_write(), its other caller. */
+static void deliver_packet(struct Sana2LoopUnit *unit, struct EchoPacket *pkt);
+
+/* Which unit does a packet WRITTEN on `unit` actually get delivered to?
+ * `unit` itself for echo (Phase 1's reflexive self-delivery), its
+ * configured peer for crossover (M6). Shared by do_write() and the M7
+ * reorder buffer, both of which need to resolve this independently of
+ * each other (the reorder buffer may release a packet long after the
+ * write that produced it). */
+static struct Sana2LoopUnit *delivery_target(struct Sana2LoopDevice *sld, struct Sana2LoopUnit *unit)
+{
+    return (unit->su_Mode == SANA2LOOP_MODE_CROSSOVER) ? &sld->sld_Units[unit->su_Peer] : unit;
+}
+
+/* xorshift32 -- a small, fast, fully deterministic (given a fixed seed)
+ * PRNG for fault-injection jitter/permutation; not cryptographic, doesn't
+ * need to be. Needs only shifts and XORs -- no libgcc dependency (see
+ * prng_index() below for why avoiding a general 32-bit modulo mattered
+ * enough to shape its design too, and docs/PLAN.md's deferred -lgcc
+ * decision, which this milestone -- despite being flagged as the one that
+ * might finally force it -- still doesn't). */
+static ULONG xorshift32(ULONG *state)
+{
+    ULONG x = *state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *state = x;
+    return x;
+}
+
+/* Draws a uniform index in [0, window) without a general ULONG % ULONG --
+ * that compiles to a __umodsi3 call on this -nostdlib -m68000 build
+ * regardless of how small the operands turn out to be at runtime (the
+ * compiler can't see that from a runtime variable divisor). Masking to 3
+ * bits (0-7, covering SANA2LOOP_MAX_REORDER's whole range) and rejecting
+ * an out-of-window draw instead is plain compares/ANDs -- always
+ * terminates quickly (window=8 never rejects at all; the worst case,
+ * window=5, still only rejects 3/8 draws on average). */
+static ULONG prng_index(ULONG *state, ULONG window)
+{
+    ULONG idx;
+    do {
+        idx = xorshift32(state) & 0x07;
+    } while (idx >= window);
+    return idx;
+}
+
+/* "Roughly pct% chance", using only a multiply (native on plain 68000,
+ * unlike division) -- 655 approximates 65536/100, so comparing the upper
+ * 16 bits of a draw against pct*655 approximates a pct% hit rate. 0 and
+ * 100 are handled as EXACT boundaries rather than leaning on the
+ * approximation at the edges: 100*655=65500, not the full 0-65535 range,
+ * so without this a configured droppct=100 would still let ~0.05% of
+ * writes through -- not the absolute guarantee "100%" has to mean. */
+static BOOL prng_hits_pct(ULONG *state, ULONG pct)
+{
+    ULONG roll;
+    if (pct == 0)
+        return FALSE;
+    if (pct >= 100)
+        return TRUE;
+    roll = xorshift32(state) >> 16;
+    return roll < pct * 655;
+}
+
+/* Buffers `pkt` into `writer`'s fixed-size reorder window; once the
+ * window is full, PRNG-evicts ONE of the currently-buffered packets
+ * (which may be the one just inserted, all equally likely) for actual
+ * delivery now, left-shifting the remaining buffered packets down over
+ * the gap so they stay in their original relative arrival order. That
+ * arrival-order invariant is what lets reorder_flush() below just walk
+ * the buffer front-to-back with no separate bookkeeping -- and it's what
+ * bounds how far out of order a packet can arrive: at most
+ * `su_ReorderWindow - 1` LATER packets can overtake it before it's
+ * forced out, not an unbounded shuffle. */
+static void reorder_push(struct Sana2LoopDevice *sld, struct Sana2LoopUnit *writer, struct EchoPacket *pkt)
+{
+    writer->su_ReorderBuf[writer->su_ReorderCount++] = pkt;
+    if (writer->su_ReorderCount == writer->su_ReorderWindow) {
+        ULONG idx = prng_index(&writer->su_PrngState, writer->su_ReorderWindow);
+        struct EchoPacket *evicted = writer->su_ReorderBuf[idx];
+        ULONG k;
+        for (k = idx; k + 1 < writer->su_ReorderCount; k++)
+            writer->su_ReorderBuf[k] = writer->su_ReorderBuf[k + 1];
+        writer->su_ReorderCount--;
+        deliver_packet(delivery_target(sld, writer), evicted);
+    }
+}
+
+/* Delivers everything still sitting in `writer`'s reorder buffer, in
+ * their original arrival order (no further PRNG permutation) -- so
+ * nothing is ever silently stuck there forever. Called on S2_OFFLINE
+ * (manual or auto via su_OfflineAfter), CMD_FLUSH, and last-close
+ * (drain_unit()), per docs/PLAN.md's M7 entry. */
+static void reorder_flush(struct Sana2LoopDevice *sld, struct Sana2LoopUnit *writer)
+{
+    struct Sana2LoopUnit *target = delivery_target(sld, writer);
+    ULONG i;
+    for (i = 0; i < writer->su_ReorderCount; i++)
+        deliver_packet(target, writer->su_ReorderBuf[i]);
+    writer->su_ReorderCount = 0;
+}
+
+/* The last step of the fault pipeline: either buffer `pkt` for later,
+ * PRNG-permuted release (su_ReorderWindow > 0), or hand it straight to
+ * deliver_packet() at its resolved target (no reordering configured --
+ * the common case, unchanged behavior). Used for both the original
+ * packet and duppct's duplicate, if any -- the plan's pipeline order
+ * (droppct -> truncate -> duppct -> reorder) puts reorder AFTER
+ * duplication, so a dup is just as subject to reordering as the
+ * original. */
+static void deliver_or_reorder(struct Sana2LoopDevice *sld, struct Sana2LoopUnit *unit, struct EchoPacket *pkt)
+{
+    if (unit->su_ReorderWindow > 0)
+        reorder_push(sld, unit, pkt);
+    else
+        deliver_packet(delivery_target(sld, unit), pkt);
+}
+
+/* Shared by S2_ONLINE and M7's su_OnlineAfter auto-recovery -- exactly
+ * the same transition either way, just a different trigger. */
+static void force_online(struct Sana2LoopUnit *unit)
+{
+    unit->su_Online = TRUE;
+    unit->su_FailCounter = 0;
+    fire_event(unit, S2EVENT_ONLINE);
+}
+
+/* Shared by S2_OFFLINE and M7's su_OfflineAfter auto-trigger. Flushes the
+ * reorder buffer as part of going offline -- a unit that's about to stop
+ * accepting writes shouldn't leave whatever it already accepted stuck
+ * in a buffer with no future write ever arriving to push it back out. */
+static void force_offline(struct Sana2LoopDevice *sld, struct Sana2LoopUnit *unit)
+{
+    unit->su_Online = FALSE;
+    unit->su_WriteCounter = 0;
+    fire_event(unit, S2EVENT_OFFLINE);
+    reorder_flush(sld, unit);
+}
+
+/* Ticks su_OfflineAfter's write counter; once it reaches the configured
+ * threshold, auto-forces the unit offline (as if a caller had issued
+ * S2_OFFLINE itself) and resets the counter. Called on every write this
+ * unit's own pipeline accepts as "sent" -- whether or not the packet is
+ * later dropped/deduplicated/reordered, since offlineafter counts what
+ * the WRITER attempted, not what actually arrived anywhere. The write
+ * that crosses the threshold still completes normally; the auto-offline
+ * transition takes effect for the NEXT write attempt, not retroactively. */
+static void note_write_success(struct Sana2LoopDevice *sld, struct Sana2LoopUnit *unit)
+{
+    if (unit->su_OfflineAfter == 0)
+        return;
+    if (++unit->su_WriteCounter >= unit->su_OfflineAfter)
+        force_offline(sld, unit);
+}
+
+/* Ticks su_OnlineAfter's failure counter (write ATTEMPTS while offline);
+ * once it reaches the configured threshold, auto-forces the unit back
+ * online and resets the counter -- simulating a flaky link that recovers
+ * on its own after enough retries. The attempt that crosses the threshold
+ * still fails S2ERR_OUTOFSERVICE itself; recovery takes effect for the
+ * NEXT attempt. */
+static void note_write_failure(struct Sana2LoopUnit *unit)
+{
+    if (unit->su_OnlineAfter == 0)
+        return;
+    if (++unit->su_FailCounter >= unit->su_OnlineAfter)
+        force_online(unit);
+}
+
 /* Called when a unit's open count drops to zero: nobody is left to read
  * queued data or notice queued waits, so fail/free them rather than leak
  * them across the next open. */
@@ -877,6 +1157,23 @@ static void reset_unit(struct Sana2LoopUnit *unit)
 
     for (i = 0; i < SANA2LOOP_MAX_MULTICAST; i++)
         unit->su_McastInUse[i] = FALSE;
+
+    /* M7 fault injection: all disabled by default. su_ReorderCount should
+     * already be 0 here (close()'s drain_unit() path flushes any buffered
+     * packets before a unit can ever reach 0 opens again), but resetting
+     * it costs nothing and keeps this function trustworthy on its own. */
+    unit->su_Seed         = 1;
+    unit->su_PrngState    = 1;
+    unit->su_DropPct      = 0;
+    unit->su_DupPct       = 0;
+    unit->su_Truncate     = 0;
+    unit->su_Oversilent   = FALSE;
+    unit->su_ReorderWindow = 0;
+    unit->su_ReorderCount  = 0;
+    unit->su_OfflineAfter  = 0;
+    unit->su_OnlineAfter   = 0;
+    unit->su_WriteCounter  = 0;
+    unit->su_FailCounter   = 0;
 
     unit->su_Stats.PacketsReceived      = 0;
     unit->su_Stats.PacketsSent          = 0;
@@ -983,18 +1280,39 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
          * only this caller's open attempt is rejected. */
         if (FindTask(NULL)->tc_Node.ln_Type == NT_PROCESS) {
             struct UnitConfig cfg;
-            cfg.mtu     = unit->su_MTU;
-            cfg.rxqueue = unit->su_RxQueueMax;
-            cfg.mode    = unit->su_Mode;
-            cfg.peer    = unit->su_Peer;
+            cfg.mtu          = unit->su_MTU;
+            cfg.rxqueue      = unit->su_RxQueueMax;
+            cfg.mode         = unit->su_Mode;
+            cfg.peer         = unit->su_Peer;
+            cfg.seed         = unit->su_Seed;
+            cfg.droppct      = unit->su_DropPct;
+            cfg.duppct       = unit->su_DupPct;
+            cfg.truncate     = unit->su_Truncate;
+            cfg.oversilent   = unit->su_Oversilent;
+            cfg.reorder      = unit->su_ReorderWindow;
+            cfg.offlineafter = unit->su_OfflineAfter;
+            cfg.onlineafter  = unit->su_OnlineAfter;
             if (!read_unit_config(&cfg, unit->su_Index)) {
                 io->io_Error = S2ERR_BAD_ARGUMENT;
                 return;
             }
-            unit->su_MTU        = cfg.mtu;
-            unit->su_RxQueueMax = cfg.rxqueue;
-            unit->su_Mode       = cfg.mode;
-            unit->su_Peer       = cfg.peer;
+            unit->su_MTU          = cfg.mtu;
+            unit->su_RxQueueMax   = cfg.rxqueue;
+            unit->su_Mode         = cfg.mode;
+            unit->su_Peer         = cfg.peer;
+            unit->su_Seed         = cfg.seed;
+            /* PRNG re-seeded fresh at every 0->1 transition, same
+             * determinism boundary as everything else reset_unit()
+             * covers -- 0 coerced to 1 (docs/PLAN.md), since xorshift32
+             * with a zero seed never leaves the zero state. */
+            unit->su_PrngState    = cfg.seed ? cfg.seed : 1;
+            unit->su_DropPct      = cfg.droppct;
+            unit->su_DupPct       = cfg.duppct;
+            unit->su_Truncate     = cfg.truncate;
+            unit->su_Oversilent   = cfg.oversilent ? TRUE : FALSE;
+            unit->su_ReorderWindow = cfg.reorder;
+            unit->su_OfflineAfter = cfg.offlineafter;
+            unit->su_OnlineAfter  = cfg.onlineafter;
         }
     }
 
@@ -1037,8 +1355,14 @@ close(struct Library *dev asm("a6"), struct IORequest *io asm("a1"))
 
     abort_requests_for_open(unit, slo);
 
-    if (--unit->su_Unit.unit_OpenCnt == 0)
+    if (--unit->su_Unit.unit_OpenCnt == 0) {
         drain_unit(unit);
+        /* M7: last-close also flushes anything this unit has buffered as
+         * a WRITER in its own reorder window, per docs/PLAN.md's M7
+         * entry -- otherwise a packet could sit there forever once
+         * nobody's left to ever write another one and push it back out. */
+        reorder_flush((struct Sana2LoopDevice *)dev, unit);
+    }
 
     FreeMem(slo, sizeof(struct Sana2LoopOpen));
     io2->ios2_BufferManagement = NULL;
@@ -1210,7 +1534,16 @@ static void deliver_packet(struct Sana2LoopUnit *unit, struct EchoPacket *pkt)
  *    forced it to all-1s before do_write() was ever called).
  *
  * `sld` is needed only to reach a crossover peer's struct
- * Sana2LoopUnit -- echo-mode writes never touch it. */
+ * Sana2LoopUnit -- echo-mode writes never touch it.
+ *
+ * M7 fault injection pipeline, fixed order (docs/PLAN.md): MTU (own, then
+ * -- crossover only -- the peer's, where `oversilent` matters) -> droppct
+ * -> truncate -> duppct -> reorder. su_OfflineAfter is a side effect of
+ * every successful write, not really "part of" the pipeline's shaping of
+ * this one packet -- ticked once at the very end via note_write_success(),
+ * after the packet (and its duplicate, if any) have already been handed
+ * off. All of it defaults to off (reset_unit()): a plain write with no
+ * config behaves exactly as it did before this milestone. */
 static void do_write(struct Sana2LoopDevice *sld, struct Sana2LoopUnit *unit,
                       struct IORequest *io0, struct IOSana2Req *io, BOOL is_plain_write)
 {
@@ -1226,6 +1559,8 @@ static void do_write(struct Sana2LoopDevice *sld, struct Sana2LoopUnit *unit,
 
     if (!unit->su_Online) {
         io0->io_Error = S2ERR_OUTOFSERVICE;
+        note_write_failure(unit); /* M7: su_OnlineAfter -- may auto-recover
+                                      online for the NEXT attempt */
         return;
     }
     if (io->ios2_DataLength > max_len || io->ios2_DataLength > SANA2LOOP_MAX_PACKET) {
@@ -1269,9 +1604,51 @@ static void do_write(struct Sana2LoopDevice *sld, struct Sana2LoopUnit *unit,
     }
     Enable();
 
-    target = (unit->su_Mode == SANA2LOOP_MODE_CROSSOVER)
-             ? &sld->sld_Units[unit->su_Peer] : unit;
-    deliver_packet(target, pkt);
+    target = delivery_target(sld, unit);
+
+    /* MTU-vs-peer / oversilent: only meaningful for crossover -- echo's
+     * target IS unit, so target->su_MTU == unit->su_MTU and the earlier
+     * own-MTU check already covered this case. Simulates a real PMTUD
+     * black hole: the caller's own MTU check passed, but the frame is
+     * still too big for what's actually on the other end of the link,
+     * and (with oversilent=1) nothing ever tells the caller that. */
+    if (unit->su_Mode == SANA2LOOP_MODE_CROSSOVER && pkt->ep_Length > target->su_MTU) {
+        FreeMem(pkt, sizeof(struct EchoPacket));
+        if (unit->su_Oversilent) {
+            note_write_success(sld, unit); /* accepted, silently vanished */
+            return;                       /* io0->io_Error stays 0 */
+        }
+        io0->io_Error = S2ERR_MTU_EXCEEDED;
+        return;
+    }
+
+    if (prng_hits_pct(&unit->su_PrngState, unit->su_DropPct)) {
+        FreeMem(pkt, sizeof(struct EchoPacket));
+        note_write_success(sld, unit); /* still "sent" -- silently lost,
+                                           same as real best-effort Ethernet */
+        return;
+    }
+
+    if (unit->su_Truncate > 0 && pkt->ep_Length > unit->su_Truncate)
+        pkt->ep_Length = unit->su_Truncate;
+
+    if (prng_hits_pct(&unit->su_PrngState, unit->su_DupPct)) {
+        struct EchoPacket *dup = AllocMem(sizeof(struct EchoPacket), MEMF_CLEAR);
+        if (dup) {
+            /* CopyMem, not a struct assignment: EchoPacket is large enough
+             * (its ep_Data[SANA2LOOP_MAX_PACKET] dominates) that a plain
+             * `*dup = *pkt` risks the same class of miscompile M3 already
+             * found the hard way for a much smaller struct -- GCC can
+             * still decide a big enough copy is worth a library call this
+             * -nostdlib build doesn't have. CopyMem is an Exec LVO, not a
+             * compiler-synthesized one, so it's always safe here. */
+            CopyMem(pkt, dup, sizeof(struct EchoPacket));
+            deliver_or_reorder(sld, unit, dup);
+        }
+    }
+
+    deliver_or_reorder(sld, unit, pkt);
+    note_write_success(sld, unit);
 }
 
 /* device dependent beginio function */
@@ -1401,6 +1778,9 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
             pending->ios2_Req.io_Error = IOERR_ABORTED;
             ReplyMsg(&pending->ios2_Req.io_Message);
         }
+        /* M7: also flush anything this unit has buffered as a WRITER in
+         * its own reorder window, per docs/PLAN.md's M7 entry. */
+        reorder_flush(sld, unit);
         break;
     }
 
@@ -1669,13 +2049,11 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
     }
 
     case S2_ONLINE:
-        unit->su_Online = TRUE;
-        fire_event(unit, S2EVENT_ONLINE);
+        force_online(unit);
         break;
 
     case S2_OFFLINE:
-        unit->su_Online = FALSE;
-        fire_event(unit, S2EVENT_OFFLINE);
+        force_offline(sld, unit);
         break;
 
     case S2_ONEVENT: {
