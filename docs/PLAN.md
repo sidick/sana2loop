@@ -11,7 +11,7 @@ The device stays on its hard constraints: 68000/KS1.3 baseline, no utility.libra
 ## Key design decisions (from Plan-agent analysis, verified against `devices/sana2.h`)
 
 1. **Per-open cookie** (`struct Sana2LoopOpen`): allocated in `open()`, its pointer **replaces** `ios2_BufferManagement` per SANA-II convention — consumers contractually copy it into every subsequent IOSana2Req, so every queued read carries its opener's hooks. Freed in `close()` (CloseDevice uses the same IORequest). Fields: MinNode (on a `su_Opens` list), unit back-pointer, magic (`'S2LO'`), `CopyToBuff`/`CopyFromBuff` function pointers, recorded `S2_PacketFilter` hook, open flags (`SANA2OPF_MINE/PROM`). When the opener passes no copy tags, install internal `CopyMem`-based defaults — one uniform copy path everywhere.
-2. **Tag walk** must handle `TAG_MORE`/`TAG_SKIP`/`TAG_IGNORE`/`TAG_END` (the trap `FindTagItem` normally hides). Tags: `S2_CopyToBuff`(+1)/`S2_CopyFromBuff`(+2)/`S2_PacketFilter`(+3) off `S2_Dummy = TAG_USER+0xB0000`; record-and-ignore the Rev 7 16/32/DMA variants.
+2. **Tag walk** must handle `TAG_MORE`/`TAG_SKIP`/`TAG_IGNORE`/`TAG_END` (the trap `FindTagItem` normally hides). Tags: `S2_CopyToBuff`(+1)/`S2_CopyFromBuff`(+2)/`S2_PacketFilter`(+3) off `S2_Dummy = TAG_USER+0xB0000`; record-and-ignore the Rev 7 16/32/DMA variants **at the time this decision was made** -- revisited by the "SANA-II conformance coverage" section below (M13), which plans to actually support them as advisory hooks instead.
 3. **`deliver_packet()` refactor**: one delivery path used by echo, crossover, and replay: complete a matching **typed** read → else a queued `S2_READORPHAN` → else (rxqueue>0) queue bounded → else drop + stats. Copies always via the completing request's cookie hooks; **never call a consumer hook or ReplyMsg inside `Disable()`** (pop nodes under Disable, act outside — existing discipline).
 4. **Unit reset at first-open** (open count 0→1): offline, unconfigured address, stats zeroed, PRNG reseeded, config re-read. Defines the "config re-read on next open" semantics; busy units latch their active config (never re-read mid-flight).
 5. **Config**: `ENV:sana2loop/unit<N>.config`, fallback `S:sana2loop/unit<N>.config`. Line-based `key=value`, `#` comments. dos.library opened locally inside `open()` only when `FindTask(NULL)->tc_Node.ln_Type == NT_PROCESS` (plain-task openers get defaults). Whole file (≤2 KB) into a temp buffer, parsed in place. **Fail-fast**: unknown key/malformed line → open fails `S2ERR_BAD_ARGUMENT` (silent typo-tolerance is wrong for a test tool). Keys: `mode` (echo|crossover|replay), `peer`, `mtu`, `addr`, `seed`, `droppct`, `duppct`, `reorder` (0–8 window), `truncate`, `oversilent`, `rxqueue`, `strictconfig`, `offlineafter`/`onlineafter`, `replay`/`record`/`replaymode`/`recordmax` (Phase 3).
@@ -42,6 +42,43 @@ the technical detail behind each one.
 | M10 | | Docs pass: teaching-reference comments through the source, README, sana2-notes refresh. Also stand up a `userdocs/` end-user site (MkDocs Material, adopting sibling project amiauth's pattern in preference to narrator.wyoming's, since amiauth's is the more tried-and-tested one) alongside a `tools/docs2guide.py`-style converter producing an on-Amiga AmigaGuide manual from the same `userdocs/` source -- one docs source feeding both the web site and native Amiga reading, not two to keep in sync by hand | all sources, `docs/`, new `userdocs/`, `mkdocs.yml`, `tools/docs2guide.py` |
 | M11 | | Tools: `src/tools/pcapio.c`, `sana2open.c`, `SanaDump`, `SanaSend`; `host/make_fixtures.py` + `host/lint_pcap.py` (scapy); canonical corpus (ARP, DHCP, TCP handshake) | new `src/tools/*`, `host/*`, `fixtures/`, `Makefile` |
 | M12 | | Aminet packaging + release flow, adopting sibling project amiauth's pattern (in preference to narrator.wyoming's simpler one, since amiauth's is the more tried-and-tested of the two): tag-driven `release.yml` that verifies the pushed tag matches `version.mk` and the `.readme`'s `Version:` field before doing anything else, cross-builds via the pinned Docker image, greps the built binary for its `$VER` string, packages via `make dist` (building a real, archive-capable `lha` from source -- Ubuntu's/Homebrew's is extract-only), validates the readme with `aminet-release-action` in `validate-only` mode, creates the GitHub release (curated notes from the `.readme` for the first release, `--generate-notes` once there's real tag-to-tag history to diff), and only then hands off to a *separate* job gated on a GitHub Environment requiring manual approval for the actual (irreversible-ish) Aminet FTP upload -- human-in-the-loop by construction, not an afterthought | `Makefile`, `version.mk`, `.github/workflows/release.yml`, release docs |
+| M13 | | SANA-II Rev 2/3/4/7 conformance coverage (see its own section below) + a conformance/quirk probe tool exercising both directions (driver advertising vs stack actually invoking) with graceful-fallback checks | `src/loopback_device.c`, new probe tool, harness |
+
+## SANA-II conformance coverage: Rev 2/3/4/7 additions
+
+loopback.device and the conformance/quirk probe should exercise the
+post-Commodore SANA-II revisions (as documented by Olaf Barthel on the
+AmigaOS docs wiki), since real-world stacks (Roadshow, AmiTCP-derived
+stacks) probe for these:
+
+- Rev 2+3 — buffer management negotiation
+  - Support S2_CopyToBuff16 / S2_CopyFromBuff16 and
+    S2_CopyToBuff32 / S2_CopyFromBuff32 as advisory hooks, negotiated
+    via tags at OpenDevice(). Driver may ignore per-buffer at its
+    discretion — probe should confirm stacks handle a driver that
+    declines as well as one that accepts.
+
+- Rev 4 — peer/DNS address + raw MTU
+  - Implement S2_GETPEERADDRESS and S2_GETDNSADDRESS commands
+    (meaningful for PPP-style / dynamically addressed links; loopback
+    can synthesize plausible values or zero-fill per spec when N/A).
+  - Populate Sana2DeviceQuery.RawMTU distinctly from the negotiated
+    MTU, and support S2ERR_NOT_SUPPORTED / S2ERR_MTU_EXCEEDED paths
+    for raw read/write when RawMTU is 0 or exceeded — good fit for
+    the existing fault-injection knobs.
+
+- Rev 7 — DMA-capable buffer hooks
+  - Add S2_DMACopyToBuff32 / S2_DMACopyFromBuff32 and the 64-bit
+    variants as optional hooks, with correct ios2_WireError reporting
+    on rejection (FALSE hook return == NULL-pointer equivalent per
+    spec).
+
+Conformance probe should test both directions: driver advertising
+support and stack actually invoking each hook/command, plus graceful
+fallback when either side doesn't implement a given revision's
+addition. Vendor-specific extensions (WiFi ioctls, batch transfer
+modes, etc.) are explicitly out of scope — they're outside SANA-II
+proper.
 
 ## Risks to verify at first touch
 
