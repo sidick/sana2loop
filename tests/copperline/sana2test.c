@@ -1,12 +1,18 @@
 /* sana2test.c -- on-target (m68k/AmigaOS) smoke test for loopback.device.
  *
- * Opens loopback.device unit 0, brings it online, checks S2_DEVICEQUERY and
- * S2_GETSTATIONADDRESS, then exercises the echo path (CMD_WRITE followed by
- * CMD_READ, which must come back with src/dst swapped per the proposal's
- * echo semantics). Emits results over serial via exec/RawPutChar -- the ROM
- * debug path, which needs no serial.device handler, no Mount, and no
- * Workbench files, so it works in the most minimal boot. Copperline's
- * `--serial stdout` captures it; see run.sh for the pass/fail check.
+ * Opens loopback.device unit 0 twice (two independent IORequests/ports,
+ * modeling two concurrent consumers of the same unit -- exactly the
+ * scenario echo/crossover state-sharing exists for), then runs a growing
+ * set of named sub-tests against it, each emitting a `SUB=<name>=PASS` or
+ * `SUB=<name>=FAIL` serial line. run.sh asserts each SUB= line plus the
+ * final aggregate RESULT=. This file grows one sub-test per milestone
+ * (see docs/PLAN.md); the SUB= protocol exists so each milestone's
+ * regression is individually visible in the serial capture rather than
+ * buried in one pass/fail bit.
+ *
+ * Emits over serial via exec/RawPutChar -- the ROM debug path, which needs
+ * no serial.device handler, no Mount, and no Workbench files, so it works
+ * in the most minimal boot. Copperline's `--serial stdout` captures it.
  *
  * RawPutChar technique lifted from the sibling amiauth project's
  * tests/copperline/serialtest.c. Unlike that program, this one is
@@ -59,25 +65,29 @@ static char MSG_FAIL_SIGNAL[]  = "FAIL_SIGNAL\r\n";
 static char MSG_FAIL_IOREQ[]   = "FAIL_IOREQ\r\n";
 static char MSG_OPEN_FAIL[]    = "OPEN=FAIL\r\n";
 static char MSG_OPEN_OK[]      = "OPEN=OK\r\n";
-static char MSG_ONLINE_ERR[]   = "ONLINE_ERR=";
-static char MSG_DQ_ERR[]       = "DQ_ERR=";
 static char MSG_MTU[]          = "MTU=";
 static char MSG_HWTYPE[]       = "HWTYPE=";
-static char MSG_ADDR_ERR[]     = "ADDR_ERR=";
 static char MSG_ADDR[]         = "ADDR=";
-static char MSG_WRITE_ERR[]    = "WRITE_ERR=";
-static char MSG_READ_ERR[]     = "READ_ERR=";
-static char MSG_ECHO_ADDR[]    = "ECHO_ADDR=";
-static char MSG_ECHO_DATA[]    = "ECHO_DATA=";
-static char MSG_OK[]           = "OK";
-static char MSG_MISMATCH[]     = "MISMATCH";
 static char MSG_CRLF[]         = "\r\n";
 static char MSG_RESULT_PASS[]  = "RESULT=PASS\r\n";
 static char MSG_RESULT_FAIL[]  = "RESULT=FAIL\r\n";
 static char MSG_END[]          = "END\r\n";
+static char MSG_SUB[]          = "SUB=";
+static char MSG_EQ_PASS[]      = "=PASS\r\n";
+static char MSG_EQ_FAIL[]      = "=FAIL\r\n";
 static char HEX_DIGITS[]       = "0123456789abcdef";
 static char PAYLOAD[]          = "sana2loop-echo-test";
 static char DEVICE_NAME[]      = "loopback.device";
+
+static char NAME_ONLINE[]         = "online";
+static char NAME_DEVICEQUERY[]    = "devicequery";
+static char NAME_STATIONADDR[]    = "stationaddress";
+static char NAME_ECHO[]           = "echo";
+static char NAME_OFFLINE[]        = "offline";
+static char NAME_ONEVENT[]        = "onevent";
+static char NAME_ABORTIO[]        = "abortio";
+static char NAME_CMDFLUSH[]       = "cmdflush";
+static char DBG_CHECKIO_NULL[]    = "DBG_CHECKIO_NULL=";
 
 /* _start must be the very first thing in the file and contain no data of
  * its own -- it only calls test_main(), which holds all the real logic and
@@ -93,6 +103,12 @@ static void raw_put(char c);
 static void raw_str(const char *s);
 static void raw_u16(unsigned short v, int width);
 static void raw_hex_byte(unsigned char b);
+static void report(const char *name, BOOL ok, int *fails);
+static struct MsgPort *make_port(void);
+static struct IOSana2Req *make_io(struct MsgPort *port);
+static BOOL open_unit0(struct IOSana2Req *io);
+static void send_io(struct IOSana2Req *io);
+static void do_io(struct IOSana2Req *io);
 
 int __attribute__((no_reorder)) _start(void)
 {
@@ -101,28 +117,238 @@ int __attribute__((no_reorder)) _start(void)
 
 static int test_main(void)
 {
-    struct MsgPort *port;
-    struct IOSana2Req *io;
+    struct MsgPort *port1, *port2;
+    struct IOSana2Req *io1, *io2;
     static UBYTE readbuf[64];
     int fails = 0;
-    BYTE sigbit;
 
     SysBase = *(struct ExecBase **)4UL;
 
     raw_str(MSG_BEGIN);
 
+    port1 = make_port();
+    port2 = make_port();
+    if (!port1 || !port2) {
+        raw_str(MSG_END);
+        return 1;
+    }
+    io1 = make_io(port1);
+    io2 = make_io(port2);
+    if (!io1 || !io2) {
+        raw_str(MSG_END);
+        return 1;
+    }
+    if (!open_unit0(io1) || !open_unit0(io2)) {
+        raw_str(MSG_END);
+        return 1;
+    }
+    raw_str(MSG_OPEN_OK);
+
+    /* --- online --- */
+    io1->ios2_Req.io_Command = S2_ONLINE;
+    do_io(io1);
+    report(NAME_ONLINE, io1->ios2_Req.io_Error == 0, &fails);
+
+    /* --- devicequery --- */
+    {
+        struct Sana2DeviceQuery dq;
+        BOOL ok;
+        dq.SizeAvailable = sizeof(dq);
+        io1->ios2_Req.io_Command = S2_DEVICEQUERY;
+        io1->ios2_StatData = &dq;
+        do_io(io1);
+        ok = (io1->ios2_Req.io_Error == 0) && dq.MTU == 1500 &&
+             dq.HardwareType == S2WireType_Ethernet;
+        if (io1->ios2_Req.io_Error == 0) {
+            raw_str(MSG_MTU);
+            raw_u16(dq.MTU, 1);
+            raw_str(MSG_CRLF);
+            raw_str(MSG_HWTYPE);
+            raw_u16(dq.HardwareType, 1);
+            raw_str(MSG_CRLF);
+        }
+        report(NAME_DEVICEQUERY, ok, &fails);
+    }
+
+    /* --- stationaddress --- */
+    {
+        BOOL ok;
+        io1->ios2_Req.io_Command = S2_GETSTATIONADDRESS;
+        do_io(io1);
+        ok = (io1->ios2_Req.io_Error == 0);
+        if (ok) {
+            int i;
+            raw_str(MSG_ADDR);
+            for (i = 0; i < 6; i++)
+                raw_hex_byte(io1->ios2_SrcAddr[i]);
+            raw_str(MSG_CRLF);
+        }
+        report(NAME_STATIONADDR, ok, &fails);
+    }
+
+    /* --- echo: pre-queue the read (SendIO) before the write, so this
+     * already matches the consumer pattern strict SANA-II receive
+     * semantics require (a read must be queued before a packet arrives, or
+     * it is dropped, not buffered) -- see docs/PLAN.md M2. Uses io1 for the
+     * read and io2 for the write: DoIO on io1 while it's SendIO-pending
+     * would deadlock (same request, same task), so a second IORequest/port
+     * is the correct tool, not a workaround. */
+    {
+        int i;
+        BOOL addr_ok = TRUE, data_ok = TRUE;
+
+        io1->ios2_Req.io_Command = CMD_READ;
+        io1->ios2_Data = readbuf;
+        io1->ios2_Req.io_Flags = 0;
+        send_io(io1);
+
+        io2->ios2_Req.io_Command = CMD_WRITE;
+        for (i = 0; i < SANA2_MAX_ADDR_BYTES; i++)
+            io2->ios2_DstAddr[i] = (i < 6) ? (UBYTE)(0xAA + i) : 0;
+        io2->ios2_PacketType = 0x1234;
+        io2->ios2_DataLength = sizeof(PAYLOAD) - 1;
+        io2->ios2_Data = (APTR)PAYLOAD;
+        do_io(io2);
+
+        WaitIO((struct IORequest *)io1);
+
+        if (io1->ios2_Req.io_Error || io2->ios2_Req.io_Error) {
+            addr_ok = data_ok = FALSE;
+        } else {
+            for (i = 0; i < 6; i++)
+                if (io1->ios2_SrcAddr[i] != (UBYTE)(0xAA + i))
+                    addr_ok = FALSE;
+            if (io1->ios2_DataLength != sizeof(PAYLOAD) - 1)
+                data_ok = FALSE;
+            else
+                for (i = 0; i < (int)io1->ios2_DataLength; i++)
+                    if (readbuf[i] != (UBYTE)PAYLOAD[i])
+                        data_ok = FALSE;
+        }
+        report(NAME_ECHO, addr_ok && data_ok, &fails);
+    }
+
+    /* --- offline: a write while offline must fail S2ERR_OUTOFSERVICE --- */
+    {
+        BOOL ok;
+        io1->ios2_Req.io_Command = S2_OFFLINE;
+        do_io(io1);
+
+        io1->ios2_Req.io_Command = CMD_WRITE;
+        io1->ios2_DataLength = sizeof(PAYLOAD) - 1;
+        io1->ios2_Data = (APTR)PAYLOAD;
+        do_io(io1);
+        ok = (io1->ios2_Req.io_Error == S2ERR_OUTOFSERVICE);
+
+        io1->ios2_Req.io_Command = S2_ONLINE; /* restore for later sub-tests */
+        do_io(io1);
+
+        report(NAME_OFFLINE, ok, &fails);
+    }
+
+    /* --- onevent: edge-triggered -- a queued S2_ONEVENT for S2EVENT_OFFLINE
+     * must complete only once S2_OFFLINE actually fires, with
+     * ios2_WireError reporting the mask.
+     *
+     * CheckIO() right after SendIO() is logged (DBG_CHECKIO_NULL) as a
+     * "did this NOT complete synchronously" diagnostic, but deliberately
+     * not gated on: confirmed on real Kickstart 1.3 it correctly reports
+     * not-yet-complete (1) here, but under Copperline's bundled AROS it
+     * reports complete (0) at this same point even though the device
+     * hasn't replied yet -- an AROS CheckIO compatibility quirk, not a
+     * device or harness bug (the actual delivered values below are correct
+     * on both). Consistent with this project treating the AROS CI lane as
+     * a gross-regression check, not a stand-in for real 1.3 -- see
+     * CLAUDE.md. */
+    {
+        BOOL ok;
+        io2->ios2_Req.io_Command = S2_ONEVENT;
+        io2->ios2_WireError = S2EVENT_OFFLINE;
+        io2->ios2_Req.io_Flags = 0;
+        send_io(io2);
+
+        raw_str(DBG_CHECKIO_NULL);
+        raw_u16((unsigned short)(CheckIO((struct IORequest *)io2) == NULL), 1);
+        raw_str(MSG_CRLF);
+
+        io1->ios2_Req.io_Command = S2_OFFLINE;
+        do_io(io1);
+
+        WaitIO((struct IORequest *)io2);
+        ok = (io2->ios2_Req.io_Error == 0) &&
+             (io2->ios2_WireError == S2EVENT_OFFLINE);
+
+        io1->ios2_Req.io_Command = S2_ONLINE; /* restore */
+        do_io(io1);
+
+        report(NAME_ONEVENT, ok, &fails);
+    }
+
+    /* --- abortio: a queued CMD_READ with nothing to satisfy it must abort
+     * cleanly with IOERR_ABORTED, not hang. --- */
+    {
+        BOOL ok;
+        io2->ios2_Req.io_Command = CMD_READ;
+        io2->ios2_Data = readbuf;
+        io2->ios2_Req.io_Flags = 0;
+        send_io(io2);
+
+        AbortIO((struct IORequest *)io2);
+        WaitIO((struct IORequest *)io2);
+        ok = (io2->ios2_Req.io_Error == IOERR_ABORTED);
+
+        report(NAME_ABORTIO, ok, &fails);
+    }
+
+    /* --- cmdflush: CMD_FLUSH (issued on io1) must abort a read queued by a
+     * DIFFERENT opener (io2) on the same unit -- flush is a unit-wide
+     * operation, not per-opener. --- */
+    {
+        BOOL ok;
+        io2->ios2_Req.io_Command = CMD_READ;
+        io2->ios2_Data = readbuf;
+        io2->ios2_Req.io_Flags = 0;
+        send_io(io2);
+
+        io1->ios2_Req.io_Command = CMD_FLUSH;
+        do_io(io1);
+
+        WaitIO((struct IORequest *)io2);
+        ok = (io1->ios2_Req.io_Error == 0) &&
+             (io2->ios2_Req.io_Error == IOERR_ABORTED);
+
+        report(NAME_CMDFLUSH, ok, &fails);
+    }
+
+    CloseDevice((struct IORequest *)io1);
+    CloseDevice((struct IORequest *)io2);
+    FreeMem(io1, sizeof(struct IOSana2Req));
+    FreeMem(io2, sizeof(struct IOSana2Req));
+    FreeSignal(port1->mp_SigBit);
+    FreeSignal(port2->mp_SigBit);
+    FreeMem(port1, sizeof(struct MsgPort));
+    FreeMem(port2, sizeof(struct MsgPort));
+
+    raw_str(fails ? MSG_RESULT_FAIL : MSG_RESULT_PASS);
+    raw_str(MSG_END);
+    return fails ? 1 : 0;
+}
+
+static struct MsgPort *make_port(void)
+{
+    struct MsgPort *port;
+    BYTE sigbit;
+
     port = AllocMem(sizeof(struct MsgPort), MEMF_PUBLIC | MEMF_CLEAR);
     if (!port) {
         raw_str(MSG_FAIL_PORT);
-        raw_str(MSG_END);
-        return 1;
+        return NULL;
     }
     sigbit = AllocSignal(-1);
     if (sigbit == -1) {
         raw_str(MSG_FAIL_SIGNAL);
         FreeMem(port, sizeof(struct MsgPort));
-        raw_str(MSG_END);
-        return 1;
+        return NULL;
     }
     port->mp_Node.ln_Type = NT_MSGPORT;
     port->mp_Flags        = PA_SIGNAL;
@@ -131,139 +357,61 @@ static int test_main(void)
     port->mp_MsgList.lh_Head     = (struct Node *)&port->mp_MsgList.lh_Tail;
     port->mp_MsgList.lh_Tail     = NULL;
     port->mp_MsgList.lh_TailPred = (struct Node *)&port->mp_MsgList.lh_Head;
+    return port;
+}
+
+static struct IOSana2Req *make_io(struct MsgPort *port)
+{
+    struct IOSana2Req *io;
 
     io = AllocMem(sizeof(struct IOSana2Req), MEMF_PUBLIC | MEMF_CLEAR);
     if (!io) {
         raw_str(MSG_FAIL_IOREQ);
-        FreeSignal(sigbit);
-        FreeMem(port, sizeof(struct MsgPort));
-        raw_str(MSG_END);
-        return 1;
+        return NULL;
     }
     io->ios2_Req.io_Message.mn_Node.ln_Type = NT_MESSAGE;
     io->ios2_Req.io_Message.mn_ReplyPort    = port;
     io->ios2_Req.io_Message.mn_Length       = sizeof(struct IOSana2Req);
+    return io;
+}
 
+static BOOL open_unit0(struct IOSana2Req *io)
+{
     if (OpenDevice((STRPTR)DEVICE_NAME, 0, (struct IORequest *)io, 0)) {
         raw_str(MSG_OPEN_FAIL);
-        FreeMem(io, sizeof(struct IOSana2Req));
-        FreeSignal(sigbit);
-        FreeMem(port, sizeof(struct MsgPort));
-        raw_str(MSG_END);
-        return 1;
+        return FALSE;
     }
-    raw_str(MSG_OPEN_OK);
+    return TRUE;
+}
 
-    io->ios2_Req.io_Command = S2_ONLINE;
+/* Every request in this harness is reused across many commands (two
+ * IORequests carry the whole sub-test suite, on purpose -- see the header
+ * comment). ReplyMsg() marks a completed message's node NT_REPLYMSG; that
+ * mark does not reset itself, so resubmitting a just-completed IORequest
+ * without restoring NT_MESSAGE first makes CheckIO() report it as already
+ * complete before the device has even seen the new command. Real code
+ * normally uses a fresh IORequest per command (or amiga.lib's
+ * CreateExtIO(), which sets this once) specifically to avoid ever needing
+ * to think about this; reusing two by hand means these wrappers must. */
+static void send_io(struct IOSana2Req *io)
+{
+    io->ios2_Req.io_Message.mn_Node.ln_Type = NT_MESSAGE;
+    SendIO((struct IORequest *)io);
+}
+
+static void do_io(struct IOSana2Req *io)
+{
+    io->ios2_Req.io_Message.mn_Node.ln_Type = NT_MESSAGE;
     DoIO((struct IORequest *)io);
-    raw_str(MSG_ONLINE_ERR);
-    raw_u16((unsigned short)(unsigned char)io->ios2_Req.io_Error, 1);
-    raw_str(MSG_CRLF);
-    if (io->ios2_Req.io_Error)
-        fails++;
+}
 
-    {
-        struct Sana2DeviceQuery dq;
-        dq.SizeAvailable = sizeof(dq);
-        io->ios2_Req.io_Command = S2_DEVICEQUERY;
-        io->ios2_StatData = &dq;
-        DoIO((struct IORequest *)io);
-        raw_str(MSG_DQ_ERR);
-        raw_u16((unsigned short)(unsigned char)io->ios2_Req.io_Error, 1);
-        raw_str(MSG_CRLF);
-        if (io->ios2_Req.io_Error) {
-            fails++;
-        } else {
-            raw_str(MSG_MTU);
-            raw_u16(dq.MTU, 1);
-            raw_str(MSG_CRLF);
-            raw_str(MSG_HWTYPE);
-            raw_u16(dq.HardwareType, 1);
-            raw_str(MSG_CRLF);
-            if (dq.MTU != 1500 || dq.HardwareType != S2WireType_Ethernet)
-                fails++;
-        }
-    }
-
-    io->ios2_Req.io_Command = S2_GETSTATIONADDRESS;
-    DoIO((struct IORequest *)io);
-    raw_str(MSG_ADDR_ERR);
-    raw_u16((unsigned short)(unsigned char)io->ios2_Req.io_Error, 1);
-    raw_str(MSG_CRLF);
-    if (io->ios2_Req.io_Error) {
-        fails++;
-    } else {
-        int i;
-        raw_str(MSG_ADDR);
-        for (i = 0; i < 6; i++)
-            raw_hex_byte(io->ios2_SrcAddr[i]);
-        raw_str(MSG_CRLF);
-    }
-
-    /* Echo test: write a packet to a made-up destination, then read it back.
-     * With no CMD_READ queued yet, the write queues the packet; the
-     * subsequent read must find it immediately (quick completion) with
-     * src/dst swapped, per the device's echo semantics. */
-    {
-        int i;
-        io->ios2_Req.io_Command = CMD_WRITE;
-        for (i = 0; i < SANA2_MAX_ADDR_BYTES; i++)
-            io->ios2_DstAddr[i] = (i < 6) ? (UBYTE)(0xAA + i) : 0;
-        io->ios2_PacketType = 0x1234;
-        io->ios2_DataLength = sizeof(PAYLOAD) - 1;
-        io->ios2_Data = (APTR)PAYLOAD;
-        DoIO((struct IORequest *)io);
-        raw_str(MSG_WRITE_ERR);
-        raw_u16((unsigned short)(unsigned char)io->ios2_Req.io_Error, 1);
-        raw_str(MSG_CRLF);
-        if (io->ios2_Req.io_Error)
-            fails++;
-    }
-
-    {
-        int i;
-        BOOL addr_ok = TRUE, data_ok = TRUE;
-
-        io->ios2_Req.io_Command = CMD_READ;
-        io->ios2_Data = readbuf;
-        DoIO((struct IORequest *)io);
-        raw_str(MSG_READ_ERR);
-        raw_u16((unsigned short)(unsigned char)io->ios2_Req.io_Error, 1);
-        raw_str(MSG_CRLF);
-
-        if (io->ios2_Req.io_Error) {
-            fails++;
-        } else {
-            /* Echoed src must equal what we wrote as dst. */
-            for (i = 0; i < 6; i++)
-                if (io->ios2_SrcAddr[i] != (UBYTE)(0xAA + i))
-                    addr_ok = FALSE;
-            if (io->ios2_DataLength != sizeof(PAYLOAD) - 1)
-                data_ok = FALSE;
-            else
-                for (i = 0; i < (int)io->ios2_DataLength; i++)
-                    if (readbuf[i] != (UBYTE)PAYLOAD[i])
-                        data_ok = FALSE;
-
-            raw_str(MSG_ECHO_ADDR);
-            raw_str(addr_ok ? MSG_OK : MSG_MISMATCH);
-            raw_str(MSG_CRLF);
-            raw_str(MSG_ECHO_DATA);
-            raw_str(data_ok ? MSG_OK : MSG_MISMATCH);
-            raw_str(MSG_CRLF);
-            if (!addr_ok || !data_ok)
-                fails++;
-        }
-    }
-
-    CloseDevice((struct IORequest *)io);
-    FreeMem(io, sizeof(struct IOSana2Req));
-    FreeSignal(sigbit);
-    FreeMem(port, sizeof(struct MsgPort));
-
-    raw_str(fails ? MSG_RESULT_FAIL : MSG_RESULT_PASS);
-    raw_str(MSG_END);
-    return fails ? 1 : 0;
+static void report(const char *name, BOOL ok, int *fails)
+{
+    raw_str(MSG_SUB);
+    raw_str(name);
+    raw_str(ok ? MSG_EQ_PASS : MSG_EQ_FAIL);
+    if (!ok)
+        (*fails)++;
 }
 
 /* exec RawPutChar: char in d0, SysBase in a6, LVO -516. */

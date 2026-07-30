@@ -74,6 +74,20 @@ set -- --config machine.toml --noaudio --serial stdout --benchmark-until "$BENCH
 tr -d '\r' <"$OUT" >"$OUT.n" && mv "$OUT.n" "$OUT"
 echo "----- serial capture -----"; cat "$OUT"; echo "--------------------------"
 grep -q '^END' "$OUT" 2>/dev/null || { echo "FAIL: no END marker (raise BENCH?)" >&2; exit 1; }
-grep -q '^RESULT=PASS' "$OUT" 2>/dev/null || { echo "FAIL: RESULT=PASS not found" >&2; exit 1; }
+
+# Every named sub-test from sana2test.c must show PASS individually -- not
+# just the aggregate RESULT= -- so a regression in one milestone's check
+# names itself instead of being buried in one pass/fail bit. Keep this list
+# in sync with the NAME_* constants in sana2test.c as milestones add more.
+SUBTESTS="online devicequery stationaddress echo offline onevent abortio cmdflush"
+fails=0
+for s in $SUBTESTS; do
+    grep -q "^SUB=${s}=PASS$" "$OUT" 2>/dev/null || {
+        echo "FAIL: SUB=${s} did not report PASS" >&2
+        fails=$((fails + 1))
+    }
+done
+grep -q '^RESULT=PASS' "$OUT" 2>/dev/null || { echo "FAIL: RESULT=PASS not found" >&2; fails=$((fails + 1)); }
+[ "$fails" -eq 0 ] || exit 1
 
 echo "PASS: loopback.device on-target smoke test (via serial)"
