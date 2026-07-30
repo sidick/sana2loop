@@ -37,9 +37,18 @@
 #include <exec/resident.h>
 #include <exec/devices.h>
 #include <exec/memory.h>
+#include <exec/tasks.h>
 #include <devices/sana2.h>
 #include <utility/tagitem.h>
 #include <proto/exec.h>
+#include <proto/dos.h>
+#include <dos/dosextens.h>
+
+/* Old-style dos.library file access mode (Open()'s accessMode) --
+ * MODE_OLDFILE=1005 is a stable, long-documented Amiga constant; hand
+ * defined rather than pulling in the whole of <dos/dos.h> for one value,
+ * matching this file's existing minimal-include-set philosophy. */
+#define MODE_OLDFILE 1005
 
 #define STR(s)  #s
 #define XSTR(s) STR(s)
@@ -94,6 +103,248 @@
  * framework may or may not point at us. Set once in init_device(), which
  * Exec guarantees runs single-threaded before any Open. */
 struct ExecBase *SysBase;
+
+/* DOSBase -- like SysBase above, a plain global this toolchain's
+ * <proto/dos.h> inline stubs reference by this exact name (dos.library
+ * has no fixed low-memory pointer the way Exec does, so it must be
+ * OpenLibrary()'d first); <proto/dos.h> itself already declares it
+ * `extern struct DosLibrary *DOSBase` -- matching that exact type here is
+ * what actually supplies its storage. Unlike SysBase, NOT set once at
+ * init: dos.library isn't always available/needed (a device targeting
+ * Kickstart 1.3 doesn't open it at load time), so read_unit_config() --
+ * the only place this file ever touches dos.library -- opens it, uses
+ * it, and closes it again within that single function call, every time
+ * (see that function's own comment for the known, accepted concurrency
+ * gap this leaves). */
+struct DosLibrary *DOSBase;
+
+/* M5 config-file infrastructure: ENV:sana2loop/unitN.config, falling back
+ * to S:sana2loop/unitN.config, read once at first-open (unit_OpenCnt
+ * 0->1, same trigger as reset_unit()) and only from a real Process opener
+ * -- see read_unit_config()'s own comment. Only `mtu` and `rxqueue` are
+ * recognized here: those are the only two per-unit knobs that already
+ * exist as real device state today. The proposal's full key vocabulary
+ * (mode/peer for M6 crossover; seed/droppct/duppct/reorder/truncate/
+ * oversilent/offlineafter/onlineafter for M7 fault injection; replay/
+ * record/replaymode/recordmax for M8-M9) has nothing to configure yet --
+ * adding parser support for a key with no consuming feature behind it
+ * would be dead code, so each lands with its own milestone instead. */
+#define SANA2LOOP_CONFIG_BUF_SIZE 2048
+/* Must leave SANA2LOOP_RAW_HDR_SIZE of headroom below the fixed
+ * EchoPacket buffer (SANA2LOOP_MAX_PACKET) -- a configured MTU above this
+ * would let a RAW write's relaxed size check (M4) exceed the buffer's
+ * actual capacity. */
+#define SANA2LOOP_CONFIG_MAX_MTU (SANA2LOOP_MAX_PACKET - SANA2LOOP_RAW_HDR_SIZE)
+/* Sanity ceiling on the rxqueue convenience knob -- not a spec
+ * requirement, just a guard against a typo'd huge value exhausting real
+ * 1.3's limited chip/fast memory pool via runaway EchoPacket queuing. */
+#define SANA2LOOP_CONFIG_MAX_RXQUEUE 64
+
+struct UnitConfig {
+    ULONG mtu;
+    ULONG rxqueue;
+};
+
+static char CONFIG_ENV_PREFIX[] = "ENV:sana2loop/unit";
+static char CONFIG_S_PREFIX[]   = "S:sana2loop/unit";
+static char CONFIG_SUFFIX[]     = ".config";
+
+/* Builds "<prefix><unit_index>.config" into buf by hand (no sprintf/
+ * strcpy/strcat -- this is a -nostdlib freestanding build with no libc).
+ * unit_index is always a single digit (SANA2LOOP_NUM_UNITS is 4), so one
+ * character substitution suffices. */
+static void build_config_path(char *buf, const char *prefix, UBYTE unit_index)
+{
+    int i = 0, k;
+    for (k = 0; prefix[k]; k++)
+        buf[i++] = prefix[k];
+    buf[i++] = (char)('0' + unit_index);
+    for (k = 0; CONFIG_SUFFIX[k]; k++)
+        buf[i++] = CONFIG_SUFFIX[k];
+    buf[i] = 0;
+}
+
+/* Decimal-digits-only parser (no sign, no leading/trailing whitespace
+ * tolerance -- this is a strict format, not a forgiving one, matching the
+ * "fail-fast on anything unexpected" design: a config typo should be
+ * loud, not silently ignored or silently reinterpreted). Only needs
+ * multiply-and-add, never division, so -- unlike the percentage-threshold
+ * math a later fault-injection milestone will want -- this doesn't force
+ * the -lgcc-vs-local-div-helpers decision docs/PLAN.md flags as an M5
+ * risk; that decision stays deferred until something actually needs
+ * 32-bit division. */
+static BOOL parse_ulong(const char *s, const char *end, ULONG *out)
+{
+    ULONG v = 0;
+    if (s >= end)
+        return FALSE;
+    for (; s < end; s++) {
+        if (*s < '0' || *s > '9')
+            return FALSE;
+        v = v * 10 + (ULONG)(*s - '0');
+    }
+    *out = v;
+    return TRUE;
+}
+
+/* Compares the byte range [key, key_end) against a NUL-terminated literal
+ * -- this file's own hand-rolled strcmp/strncmp-alike, for the same
+ * no-libc reason as parse_ulong() above. */
+static BOOL key_matches(const char *key, const char *key_end, const char *name)
+{
+    int i;
+    for (i = 0; key + i < key_end; i++) {
+        if (name[i] == 0 || key[i] != name[i])
+            return FALSE;
+    }
+    return name[i] == 0;
+}
+
+/* Parses one already-isolated "key=value" line (no surrounding whitespace
+ * tolerance). Blank lines and '#' comments are filtered out by the caller
+ * before a line ever reaches here. Returns FALSE on anything not
+ * recognized -- an unknown key is exactly as fatal as a malformed one,
+ * per the fail-fast design. */
+static BOOL parse_config_line(struct UnitConfig *cfg, const char *line, const char *line_end)
+{
+    const char *eq = NULL;
+    const char *p;
+    ULONG value;
+
+    for (p = line; p < line_end; p++) {
+        if (*p == '=') {
+            eq = p;
+            break;
+        }
+    }
+    if (!eq || eq == line || eq + 1 >= line_end)
+        return FALSE; /* no '=', empty key, or empty value */
+
+    if (key_matches(line, eq, "mtu")) {
+        if (!parse_ulong(eq + 1, line_end, &value))
+            return FALSE;
+        if (value < 1 || value > SANA2LOOP_CONFIG_MAX_MTU)
+            return FALSE;
+        cfg->mtu = value;
+        return TRUE;
+    }
+    if (key_matches(line, eq, "rxqueue")) {
+        if (!parse_ulong(eq + 1, line_end, &value))
+            return FALSE;
+        if (value > SANA2LOOP_CONFIG_MAX_RXQUEUE)
+            return FALSE;
+        cfg->rxqueue = value;
+        return TRUE;
+    }
+    return FALSE; /* unrecognized key -- fail-fast, not silently ignored */
+}
+
+/* Splits `buf` (length `len`; Read() does NOT NUL-terminate it) into
+ * lines on '\n', trims one trailing '\r' per line (so CRLF-authored files
+ * read fine too), skips blank lines and '#'-led comments, and feeds
+ * everything else to parse_config_line(). Returns FALSE (fail-fast) on
+ * the first line it can't make sense of. */
+static BOOL parse_config_buffer(struct UnitConfig *cfg, const char *buf, LONG len)
+{
+    const char *p = buf;
+    const char *end = buf + len;
+
+    while (p < end) {
+        const char *line = p;
+        const char *line_end;
+        while (p < end && *p != '\n')
+            p++;
+        line_end = p;
+        if (line_end > line && line_end[-1] == '\r')
+            line_end--;
+        if (p < end)
+            p++; /* skip the '\n' itself */
+
+        if (line_end > line && *line != '#') {
+            if (!parse_config_line(cfg, line, line_end))
+                return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+/* Reads and parses ENV:sana2loop/unit<N>.config, falling back to
+ * S:sana2loop/unit<N>.config if that doesn't exist. Neither existing is
+ * NOT an error -- most units on most systems have no config file at all,
+ * and compiled-in defaults apply. Only a file that EXISTS but fails to
+ * parse is a fail-fast error: returns FALSE (caller must fail the open),
+ * TRUE otherwise (including "no config file found anywhere").
+ *
+ * The caller gates this on the opener being a real Process (checked
+ * BEFORE this is ever reached, in open()): dos.library's Open()/Read()/
+ * Close() need process-level context (current directory, IoErr()
+ * scoping, ...) a bare Task doesn't have. This is the first and only
+ * place this device touches dos.library at all -- per docs/PLAN.md's M5
+ * risk note ("DOS I/O breaking Forbid inside open() on real 1.3"), that
+ * makes this the on-target proof of whether open() actually runs in a
+ * state hostile to dos.library I/O (which can legitimately Wait()
+ * internally) or not; see open()'s own comment for what was found.
+ *
+ * Debugging note: an on-target run of this on this project's own minimal
+ * boot ADF (deliberately no `Assign ENV:` at all -- see CLAUDE.md) hung
+ * indefinitely inside Open("ENV:...") specifically (confirmed via
+ * temporary inline-RawPutChar tracing, since the hang happens inside
+ * OpenDevice() itself, before any IORequest completes for the usual
+ * ios2_WireError-leak debugging trick to work). DOS treats an
+ * unrecognized device/assign name as a possible removable-volume
+ * reference and puts up a blocking "please insert volume" requester --
+ * fine interactively, fatal headless, and not something to just tolerate
+ * as a test-environment quirk: ANY real caller whose ENV: happens to be
+ * unassigned would hang the exact same way. Fixed at the correct place --
+ * the process's `pr_WindowPtr`, the standard AmigaOS mechanism for
+ * "suppress DOS requesters for me, fail cleanly instead" -- not by
+ * special-casing the test ADF. */
+static BOOL read_unit_config(struct UnitConfig *cfg, UBYTE unit_index)
+{
+    static char path[40];
+    static char cfgbuf[SANA2LOOP_CONFIG_BUF_SIZE];
+    struct Process *proc;
+    APTR old_window_ptr;
+    BPTR file;
+    LONG len;
+
+    DOSBase = (struct DosLibrary *)OpenLibrary((STRPTR)"dos.library", 0);
+    if (!DOSBase)
+        return TRUE; /* can't even ask -- treat as "no config", not fatal */
+
+    /* Caller (open()) already confirmed FindTask(NULL) is NT_PROCESS
+     * before ever calling this, so this cast is safe. Restored
+     * unconditionally below -- this must never leak a suppressed
+     * requester state into the rest of the caller's own process. */
+    proc = (struct Process *)FindTask(NULL);
+    old_window_ptr = proc->pr_WindowPtr;
+    proc->pr_WindowPtr = (APTR)-1L;
+
+    build_config_path(path, CONFIG_ENV_PREFIX, unit_index);
+    file = Open((STRPTR)path, MODE_OLDFILE);
+    if (!file) {
+        build_config_path(path, CONFIG_S_PREFIX, unit_index);
+        file = Open((STRPTR)path, MODE_OLDFILE);
+    }
+
+    proc->pr_WindowPtr = old_window_ptr;
+
+    if (!file) {
+        CloseLibrary((struct Library *)DOSBase);
+        DOSBase = NULL;
+        return TRUE; /* no config file anywhere -- defaults apply */
+    }
+
+    len = Read(file, cfgbuf, sizeof(cfgbuf));
+    Close(file);
+    CloseLibrary((struct Library *)DOSBase);
+    DOSBase = NULL;
+
+    if (len < 0)
+        return FALSE; /* a real I/O error reading a file that DID exist */
+
+    return parse_config_buffer(cfg, cfgbuf, len);
+}
 
 /* One echoed packet, queued either waiting for a CMD_READ (su_PendingData)
  * or consumed immediately by one already queued (su_PendingReads holds
@@ -626,9 +877,29 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
         return;
 
     unit = &sld->sld_Units[unitnum];
-    if (unit->su_Unit.unit_OpenCnt == 0)
+    if (unit->su_Unit.unit_OpenCnt == 0) {
         reset_unit(unit); /* first opener of an idle unit starts clean --
                               see reset_unit()'s comment */
+
+        /* M5 config: only from a real Process (see read_unit_config()'s
+         * comment for why) -- a plain Task opener just gets the compiled-in
+         * defaults reset_unit() already set, no dos.library touched at
+         * all. A file that exists but fails to parse fails the WHOLE open
+         * (fail-fast, per docs/PLAN.md) -- reset_unit() has already run,
+         * so the unit itself is left in a valid default state regardless;
+         * only this caller's open attempt is rejected. */
+        if (FindTask(NULL)->tc_Node.ln_Type == NT_PROCESS) {
+            struct UnitConfig cfg;
+            cfg.mtu     = unit->su_MTU;
+            cfg.rxqueue = unit->su_RxQueueMax;
+            if (!read_unit_config(&cfg, unit->su_Index)) {
+                io->io_Error = S2ERR_BAD_ARGUMENT;
+                return;
+            }
+            unit->su_MTU        = cfg.mtu;
+            unit->su_RxQueueMax = cfg.rxqueue;
+        }
+    }
 
     slo = AllocMem(sizeof(struct Sana2LoopOpen), MEMF_CLEAR);
     if (!slo) {

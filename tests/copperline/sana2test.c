@@ -103,6 +103,7 @@ static char NAME_BROADCAST[]      = "broadcast";
 static char NAME_MULTICAST[]      = "multicast";
 static char NAME_MULTICASTADDR[]  = "multicastaddress";
 static char NAME_RAW[]            = "raw";
+static char NAME_CONFIG[]         = "config";
 static char DBG_CHECKIO_NULL[]    = "DBG_CHECKIO_NULL=";
 
 /* _start must be the very first thing in the file and contain no data of
@@ -841,6 +842,64 @@ static int test_main(void)
                 }
 
         report(NAME_RAW, ok, &fails);
+    }
+
+    /* --- config: M5's config-file infrastructure. Units 1 and 2 are
+     * fresh here (no earlier sub-test ever opens them) and each get their
+     * own s/sana2loop/unitN.config on the boot ADF (see run.sh) -- unit 0
+     * (used by every earlier sub-test) deliberately has NO config file at
+     * all, so its own devicequery sub-test already covers "no config file
+     * -> compiled-in defaults" implicitly. Both fixtures live under S:,
+     * not ENV: -- this minimal boot ADF has no ENV: assign at all, so
+     * every lookup here naturally exercises the S: fallback path, not
+     * just the ENV: primary one.
+     * (a) unit 1's config sets mtu=1400 -- S2_DEVICEQUERY must report it.
+     * (b) unit 2's config has an unrecognized key -- OpenDevice() itself
+     *     must fail S2ERR_BAD_ARGUMENT (fail-fast, not silently
+     *     ignored). --- */
+    {
+        BOOL ok = TRUE;
+        struct MsgPort *port3 = make_port();
+        struct IOSana2Req *io3 = port3 ? make_io(port3) : NULL;
+
+        if (io3 && OpenDevice((STRPTR)DEVICE_NAME, 1, (struct IORequest *)io3, 0) == 0) {
+            struct Sana2DeviceQuery dq3;
+            dq3.SizeAvailable = sizeof(dq3);
+            io3->ios2_Req.io_Command = S2_DEVICEQUERY;
+            io3->ios2_StatData = &dq3;
+            do_io(io3);
+            ok = (io3->ios2_Req.io_Error == 0) && (dq3.MTU == 1400);
+            CloseDevice((struct IORequest *)io3);
+        } else {
+            ok = FALSE;
+        }
+        if (io3)
+            FreeMem(io3, sizeof(struct IOSana2Req));
+        if (port3) {
+            FreeSignal(port3->mp_SigBit);
+            FreeMem(port3, sizeof(struct MsgPort));
+        }
+
+        {
+            struct MsgPort *port4 = make_port();
+            struct IOSana2Req *io4 = port4 ? make_io(port4) : NULL;
+            BOOL bad_ok = FALSE;
+
+            if (io4) {
+                LONG err = OpenDevice((STRPTR)DEVICE_NAME, 2, (struct IORequest *)io4, 0);
+                bad_ok = (err != 0) && (io4->ios2_Req.io_Error == S2ERR_BAD_ARGUMENT);
+                if (err == 0) /* shouldn't happen, but don't leak if it does */
+                    CloseDevice((struct IORequest *)io4);
+                FreeMem(io4, sizeof(struct IOSana2Req));
+            }
+            if (port4) {
+                FreeSignal(port4->mp_SigBit);
+                FreeMem(port4, sizeof(struct MsgPort));
+            }
+            ok = ok && bad_ok;
+        }
+
+        report(NAME_CONFIG, ok, &fails);
     }
 
     CloseDevice((struct IORequest *)io1);

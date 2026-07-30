@@ -188,6 +188,80 @@ otherwise**, especially in hand-written inline asm, where AROS's emulation
 may simply be more forgiving of an incomplete clobber list than real
 hardware/ROM timing.
 
+## Config-file infrastructure (M5)
+
+`ENV:sana2loop/unit<N>.config`, falling back to `S:sana2loop/unit<N>.config`
+if that doesn't exist -- read once at first-open (`unit_OpenCnt` 0->1, the
+same trigger `reset_unit()` already uses), and only when the opener is a
+real Process (`FindTask(NULL)->tc_Node.ln_Type == NT_PROCESS`), never from
+a bare Task, since dos.library's `Open()`/`Read()`/`Close()` need
+process-level context (current directory, `IoErr()` scoping, ...) a Task
+doesn't have. Line-based `key=value`, `#`-led comments, blank lines
+skipped, no whitespace tolerance around the `=` -- a strict format on
+purpose (matches the fail-fast philosophy below). Neither `ENV:` nor `S:`
+having the file at all is **not** an error -- most units on most systems
+have no config file, and compiled-in defaults apply -- but a file that
+**exists** and fails to parse fails the whole `OpenDevice()` call with
+`S2ERR_BAD_ARGUMENT` (an unrecognized key is exactly as fatal as a
+malformed line: silent typo-tolerance is wrong for a test tool).
+
+Only `mtu` and `rxqueue` are recognized right now -- the only two per-unit
+knobs that already exist as real device state. The proposal's full config
+vocabulary (`mode`/`peer` for M6 crossover; `seed`/`droppct`/`duppct`/
+`reorder`/`truncate`/`oversilent`/`offlineafter`/`onlineafter` for M7 fault
+injection; `replay`/`record`/`replaymode`/`recordmax` for M8-M9) has
+nothing to configure yet -- each key lands with the milestone that actually
+consumes it, not before (a recognized key with no backing feature would be
+dead code). `mtu` is bounded above by `SANA2LOOP_MAX_PACKET -
+SANA2LOOP_RAW_HDR_SIZE` (1500) -- a configured MTU above that would let a
+RAW write's relaxed size check (M4) exceed the fixed `EchoPacket` buffer's
+actual capacity. `rxqueue` is bounded by a sanity ceiling (64), not a spec
+requirement -- just a guard against a typo'd huge value exhausting real
+1.3's limited memory pool. Parsing needs only multiply-and-add (`v = v*10
++ digit`), never division, so this milestone didn't end up forcing the
+`-lgcc`-vs-local-div-helpers decision docs/PLAN.md flags as an M5 risk --
+that stays deferred until a later milestone's percentage-threshold math
+(M7) actually needs 32-bit division.
+
+### Two real on-target findings from proving the M5 risk note
+
+docs/PLAN.md flagged "DOS I/O breaking Forbid inside `open()` on real 1.3"
+as a risk to verify at first touch. What was actually found, on-target, on
+both bundled AROS and real Kickstart 1.3:
+
+1. **The real hazard wasn't `open()`'s calling context at all -- it was
+   `ENV:` not being assigned.** This project's own minimal boot ADF
+   deliberately has no `Assign ENV:` (see CLAUDE.md's "Use a minimal
+   from-scratch bootable ADF"). `Open("ENV:...")` against an unrecognized
+   device/assign name hung indefinitely rather than failing cleanly --
+   confirmed via temporary inline-`RawPutChar` tracing added directly to
+   the device (the usual "leak a value through `ios2_WireError`"
+   debugging trick doesn't work here, since the hang happens inside
+   `OpenDevice()` itself, before any `IORequest` ever completes). DOS
+   treats an unrecognized name as a possible removable-volume reference
+   and puts up a blocking "please insert volume" requester -- fine
+   interactively, fatal headless, and **not** something to special-case
+   away for the test ADF specifically: any real deployment where `ENV:`
+   happens to be unassigned would hang a caller's task the exact same way.
+   Fixed at the right layer: the calling process's `pr_WindowPtr`, the
+   standard AmigaOS mechanism for "suppress DOS requesters for me, fail
+   cleanly instead of prompting" -- set to `(APTR)-1` for the duration of
+   the `Open()` attempts in `read_unit_config()`, then restored
+   unconditionally (both existing-file and no-file-at-all paths) so the
+   suppression never leaks into the caller's own later DOS operations.
+2. **Once that was fixed, dos.library I/O from inside `open()` worked
+   correctly on both targets with no other special handling needed** --
+   no Forbid()-related deadlock, no corruption. Real Kickstart 1.3 turned
+   out measurably *slower* at this than AROS, though: `tests/copperline/
+   run.sh`'s `KICK=` benchmark default needed raising (10s -> 30s,
+   confirmed reliable across repeated runs) once M5's real dos.library
+   file reads landed, while the AROS default was untouched. Plausible
+   explanation (not proven by cycle-level profiling): Kickstart 1.3's
+   filesystem (OFS) is a genuinely unoptimized implementation by later
+   standards -- linear directory scans, minimal buffering -- and AROS's
+   modern reimplementation was never built to be cycle-faithful to that,
+   just functionally compatible.
+
 ## `S2_DEVICEQUERY` convention (easy to get backwards)
 
 The caller pre-sets `ios2_StatData->SizeAvailable` to the size of *its own*

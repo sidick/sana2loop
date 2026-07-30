@@ -19,7 +19,11 @@
 #                                  (can't validate 1.3-specific behavior) but
 #                                  needs no licensed asset, so this is what
 #                                  public CI runs. AROS boots slower, hence
-#                                  the bigger default BENCH below.
+#                                  the bigger default BENCH below (real 1.3's
+#                                  own dos.library file I/O -- M5's config
+#                                  read -- is measurably SLOWER than AROS's,
+#                                  which is why the KICK= default needed
+#                                  raising too once that landed).
 #
 # A plain released `copperline` (e.g. `brew install copperline`, or the
 # AppImage in CI) is sufficient for both modes -- this test only ever boots
@@ -43,7 +47,7 @@ KICK=${KICK:-}
 XDFTOOL=${XDFTOOL:-xdftool}
 DEVICE=${SANA2LOOP_DEVICE:-$ROOT/build/loopback.device}
 BIN=${SANA2TEST_M68K:-$ROOT/build/sana2test}
-BENCH=${BENCH:-$([ -n "$KICK" ] && echo 10 || echo 40)}
+BENCH=${BENCH:-$([ -n "$KICK" ] && echo 30 || echo 40)}
 ADF="$HERE/minimal-boot.adf"
 
 [ -e "$DEVICE" ] || { echo "FAIL: missing $DEVICE (run make device)" >&2; exit 2; }
@@ -56,10 +60,12 @@ command -v "$XDFTOOL" >/dev/null || { echo "FAIL: $XDFTOOL not found (pip instal
 rm -f "$ADF"
 "$XDFTOOL" "$ADF" format 'S2LTest' ofs + \
     boot install boot1x + \
-    makedir c + makedir s + makedir devs + \
+    makedir c + makedir s + makedir devs + makedir s/sana2loop + \
     write "$DEVICE" devs/loopback.device + \
     write "$BIN" c/sana2test + \
-    write "$HERE/adf-startup-sequence.txt" s/startup-sequence \
+    write "$HERE/adf-startup-sequence.txt" s/startup-sequence + \
+    write "$HERE/fixtures/unit1.config" s/sana2loop/unit1.config + \
+    write "$HERE/fixtures/unit2.config" s/sana2loop/unit2.config \
     > /dev/null
 
 OUT=$(mktemp)
@@ -79,7 +85,7 @@ grep -q '^END' "$OUT" 2>/dev/null || { echo "FAIL: no END marker (raise BENCH?)"
 # just the aggregate RESULT= -- so a regression in one milestone's check
 # names itself instead of being buried in one pass/fail bit. Keep this list
 # in sync with the NAME_* constants in sana2test.c as milestones add more.
-SUBTESTS="online devicequery stationaddress echo offline onevent oneventnow abortio cmdflush bufferhooks delivery configinterface tracktype broadcast multicast multicastaddress raw"
+SUBTESTS="online devicequery stationaddress echo offline onevent oneventnow abortio cmdflush bufferhooks delivery configinterface tracktype broadcast multicast multicastaddress raw config"
 fails=0
 for s in $SUBTESTS; do
     grep -q "^SUB=${s}=PASS$" "$OUT" 2>/dev/null || {

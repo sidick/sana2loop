@@ -32,7 +32,7 @@ they may require Kickstart 2.0+ where convenient (documented per-tool).
 ## Current state
 
 Working through `docs/PLAN.md`'s milestones (M0-M12: spec-correctness
-backfill, then Phases 2-4). **M0-M4 done**, each validated on-target under
+backfill, then Phases 2-4). **M0-M5 done**, each validated on-target under
 Copperline against both bundled AROS (CI) and a real Kickstart 1.3 ROM
 (`make copperline-smoke` / `KICK=... make copperline-smoke`,
 see `tests/copperline/`) before being considered complete.
@@ -86,14 +86,36 @@ see `tests/copperline/`) before being considered complete.
     amiga.lib). See `docs/sana2-notes.md`'s M4 section for the full story,
     including a real real-1.3-only hang that turned out to be a missing
     `a1` clobber in that inline asm, not an emulator quirk.
+  - **M5**: config-file infrastructure -- `ENV:sana2loop/unit<N>.config`,
+    falling back to `S:sana2loop/unit<N>.config`, read once at first-open
+    (same 0->1 trigger as `reset_unit()`) and only from a real Process
+    opener (a bare Task gets compiled-in defaults, no dos.library touched
+    at all). Only `mtu`/`rxqueue` are recognized so far -- the only two
+    per-unit knobs that already exist as real device state; the rest of
+    the proposal's key vocabulary lands with the milestones that actually
+    consume it (M6-M9). Fail-fast: an unrecognized key or malformed line
+    in a file that DOES exist fails the whole `OpenDevice()` call with
+    `S2ERR_BAD_ARGUMENT` -- a missing file entirely is not an error.
+    Surfaced two real on-target findings while proving docs/PLAN.md's
+    "DOS I/O under Forbid in open()" risk: `Open("ENV:...")` hangs
+    indefinitely (not a clean failure) when `ENV:` isn't assigned --
+    exactly this project's own minimal boot ADF, and any real deployment
+    where `ENV:` happens to be unassigned -- fixed via the process's
+    `pr_WindowPtr = (APTR)-1` (the standard AmigaOS "suppress DOS
+    requesters, fail cleanly" mechanism), not by special-casing the test
+    ADF; and real Kickstart 1.3's dos.library file I/O is measurably
+    slower than AROS's (`tests/copperline/run.sh`'s `KICK=` benchmark
+    default needed raising, 10s -> 30s). See `docs/sana2-notes.md`'s M5
+    section for the full story.
   - 4 units pre-allocated in the device base (unit 0 wired for echo; units
     1-3 exist for Phase 2 crossover pairs but aren't dispatched differently
     yet). A unit fully resets (`reset_unit()`: offline, factory address,
     stats zeroed, `rxqueue` back to 0) the moment its open count goes
-    0->1 -- this is what "config re-read on next open" (M5) will mean.
-    No separate unit task -- echo completes synchronously inside `BeginIO`
-    on the calling task (no dos.library access needed at that point, so
-    nothing about that violates the 1.3 rule).
+    0->1, then (M5) has its config file read -- "config re-read on next
+    open" now means exactly this. No separate unit task -- echo completes
+    synchronously inside `BeginIO` on the calling task; that path itself
+    still never touches dos.library (only `open()`'s M5 config read
+    does), so the echo/delivery path's own 1.3 compliance is unchanged.
 - `src/sanainfo.c` -- `SanaInfo`, the Phase 1 validation tool: opens a unit,
   optionally issues `S2_ONLINE`/`S2_OFFLINE`, prints `S2_DEVICEQUERY` +
   station address. Normal clib2 CLI program (V36+ Exec calls -- see the
@@ -106,9 +128,7 @@ see `tests/copperline/`) before being considered complete.
   top for a real on-target bug this tripped over and how it was found.
 
 Not yet done: crossover pairs, fault injection knobs, pcap replay/record,
-`SanaDump`/`SanaSend`, `ENV:sana2loop/unitN.config` (units currently use a
-hardcoded 1500-byte MTU -- see the "Config via ENV" section of the
-proposal for the target design).
+`SanaDump`/`SanaSend`.
 
 ## Architecture
 
@@ -169,7 +189,7 @@ pinned `ghcr.io/reinauer/container-amiga-gcc` image narrator.wyoming uses
 
 `make docker` has been run successfully in this environment (both binaries
 build clean), and `make copperline-smoke` has confirmed every sub-test
-through M4 on-target against both bundled AROS and real Kickstart 1.3 (see
+through M5 on-target against both bundled AROS and real Kickstart 1.3 (see
 "Testing under Copperline" below and `tests/copperline/sana2test.c`'s
 `SUB=` list).
 
