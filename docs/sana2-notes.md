@@ -35,7 +35,10 @@ should be zeroed, not left as garbage, when a driver fills an address.
 | `CMD_WRITE` | 3 | caller sends a packet | echo: swaps into a queued/pending read via `deliver_packet()` |
 | `CMD_FLUSH` | 8 | caller | aborts queued `CMD_READ`/`S2_READORPHAN` with `IOERR_ABORTED` |
 | `S2_DEVICEQUERY` | `CMD_NONSTD+0` | caller | fills `struct Sana2DeviceQuery` via `ios2_StatData` (NULL-checked) |
-| `S2_GETSTATIONADDRESS` | `CMD_NONSTD+1` | caller | fills both `ios2_SrcAddr`/`ios2_DstAddr` with the current address (no `S2_CONFIGINTERFACE` yet to make them diverge -- M3) |
+| `S2_GETSTATIONADDRESS` | `CMD_NONSTD+1` | caller | `ios2_SrcAddr` = current address, `ios2_DstAddr` = factory/default address (may diverge once `S2_CONFIGINTERFACE` has run) |
+| `S2_CONFIGINTERFACE` | `CMD_NONSTD+2` | caller | first call adopts `ios2_SrcAddr`'s low 6 bytes as the current station address; a second call fails `S2ERR_BAD_STATE`/`S2WERR_IS_CONFIGURED` |
+| `S2_TRACKTYPE` / `S2_UNTRACKTYPE` | `CMD_NONSTD+9/10` | caller | fixed 8-slot per-unit table keyed on `ios2_PacketType`; duplicate track / untrack-when-absent both fail `S2ERR_BAD_STATE` (`S2WERR_ALREADY_TRACKED`/`S2WERR_NOT_TRACKED`); table-full fails `S2ERR_NO_RESOURCES` |
+| `S2_GETTYPESTATS` | `CMD_NONSTD+11` | caller | fills `struct Sana2PacketTypeStats` via `ios2_StatData` for a tracked `ios2_PacketType`; `S2ERR_BAD_STATE`/`S2WERR_NOT_TRACKED` if that type isn't tracked |
 | `S2_ONLINE` / `S2_OFFLINE` | `CMD_NONSTD+16/17` | caller | flips unit state, fires queued `S2_ONEVENT`s |
 | `S2_ONEVENT` | `CMD_NONSTD+14` | caller | see below |
 | `S2_GETGLOBALSTATS` | `CMD_NONSTD+13` | caller | copies `struct Sana2DeviceStats` whole (no `SizeAvailable`/`SizeSupplied` negotiation, unlike `S2_DEVICEQUERY`) |
@@ -61,9 +64,46 @@ default. This means callers must queue a `CMD_READ` (via `SendIO`, not
 on-target test harness does exactly this.
 
 Deferred to later phases (accepted-but-unimplemented -> `IOERR_NOCMD` for
-now): `S2_CONFIGINTERFACE`, `S2_ADD/DELMULTICASTADDRESS`, `S2_MULTICAST`/
-`S2_BROADCAST` (send flags), `S2_TRACKTYPE`/`S2_UNTRACKTYPE`,
-`S2_GETTYPESTATS`.
+now): `S2_ADD/DELMULTICASTADDRESS`, `S2_MULTICAST`/`S2_BROADCAST` (send
+flags) -- M4.
+
+## `S2_CONFIGINTERFACE` and the current-vs-factory station address split (M3)
+
+`struct IOSana2Req` has only one `ios2_SrcAddr`/`ios2_DstAddr` pair, reused
+by convention (not enforced by the struct) for `S2_GETSTATIONADDRESS`:
+`ios2_SrcAddr` = the **current** station address, `ios2_DstAddr` = the
+**factory/default** address. They start identical (both set by
+`reset_unit()`); `S2_CONFIGINTERFACE` is the only thing that can make them
+diverge, by adopting `ios2_SrcAddr`'s low 6 bytes as the new current
+address. A second `S2_CONFIGINTERFACE` on an already-configured unit fails
+`S2ERR_BAD_STATE`/`S2WERR_IS_CONFIGURED` -- configuring is a one-shot
+action per unit lifetime, not a "last write wins" setter.
+
+Deliberately **not** cross-gated with `S2_ONLINE`: some real drivers refuse
+to go online before being configured (`S2WERR_NOT_CONFIGURED` exists in the
+header for exactly that), but `loopback.device` already hands out a usable
+factory address at `reset_unit()` specifically so the tool works with zero
+setup -- requiring `S2_CONFIGINTERFACE` first would only get in the way of
+that goal.
+
+## `S2_TRACKTYPE`/`S2_UNTRACKTYPE`/`S2_GETTYPESTATS` (M3)
+
+A fixed 8-slot per-unit table (`SANA2LOOP_MAX_TRACKED_TYPES`), consistent
+with this device's fixed-capacity-everywhere approach (rxqueue=0 default,
+fixed-size `EchoPacket`) -- a caller wanting more than 8 simultaneously
+tracked types gets `S2ERR_NO_RESOURCES`, the same error any other
+fixed-capacity resource here returns when exhausted. `S2_TRACKTYPE` on an
+already-tracked type, or `S2_UNTRACKTYPE`/`S2_GETTYPESTATS` on a type not
+currently tracked, both fail `S2ERR_BAD_STATE` with the matching
+`S2WERR_ALREADY_TRACKED`/`S2WERR_NOT_TRACKED`.
+
+Once tracked, a type's `struct Sana2PacketTypeStats` (`PacketsSent`,
+`PacketsReceived`, `BytesSent`, `BytesReceived`, `PacketsDropped`) is
+updated from real traffic, not left at zero: `CMD_WRITE` bumps
+`PacketsSent`/`BytesSent`, and `deliver_packet()` bumps
+`PacketsReceived`/`BytesReceived` on either outcome that keeps the packet
+alive (immediate delivery or acceptance into the `rxqueue`), reserving
+`PacketsDropped` for the one outcome that's an actual loss.
 
 ## `S2_DEVICEQUERY` convention (easy to get backwards)
 

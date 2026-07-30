@@ -32,7 +32,7 @@ they may require Kickstart 2.0+ where convenient (documented per-tool).
 ## Current state
 
 Working through `docs/PLAN.md`'s milestones (M0-M12: spec-correctness
-backfill, then Phases 2-4). **M0-M2 done**, each validated on-target under
+backfill, then Phases 2-4). **M0-M3 done**, each validated on-target under
 Copperline against both bundled AROS (CI) and a real Kickstart 1.3 ROM
 (`make copperline-smoke` / `KICK=... make copperline-smoke`,
 see `tests/copperline/`) before being considered complete.
@@ -52,13 +52,21 @@ see `tests/copperline/`) before being considered complete.
     `ios2_BufferManagement` with a per-open cookie every subsequent request
     must carry -- every packet-payload copy goes through the completing
     request's own hooks (`CopyMem`-based defaults if none supplied).
-  - `S2_DEVICEQUERY`, `S2_GETSTATIONADDRESS`, `S2_ONLINE`/`S2_OFFLINE`,
+  - `S2_DEVICEQUERY`, `S2_GETSTATIONADDRESS` (current in `ios2_SrcAddr`,
+    factory/default in `ios2_DstAddr` -- M3), `S2_ONLINE`/`S2_OFFLINE`,
     `S2_ONEVENT` (completes **immediately** if the requested state already
     holds, else waits for the next transition -- corrected from an earlier,
     wrong "always edge-triggered" assumption after cross-checking a real
     driver, plipbox), `S2_GETGLOBALSTATS`, `S2_GETSPECIALSTATS` (zero-record
     stub), `CMD_FLUSH`, `AbortIO` (covers pending reads, orphan reads, and
     event waits).
+  - **M3**: `S2_CONFIGINTERFACE` (one-shot per unit lifetime -- adopts
+    `ios2_SrcAddr` as the current station address; a second attempt fails
+    `S2ERR_BAD_STATE`/`S2WERR_IS_CONFIGURED`; deliberately *not* cross-gated
+    with `S2_ONLINE` either direction, since the factory address already
+    makes the unit usable with zero setup) and `S2_TRACKTYPE`/
+    `S2_UNTRACKTYPE`/`S2_GETTYPESTATS` (fixed 8-slot per-unit table, real
+    counts fed from `CMD_WRITE`/`deliver_packet()` traffic, not a stub).
   - 4 units pre-allocated in the device base (unit 0 wired for echo; units
     1-3 exist for Phase 2 crossover pairs but aren't dispatched differently
     yet). A unit fully resets (`reset_unit()`: offline, factory address,
@@ -78,11 +86,11 @@ see `tests/copperline/`) before being considered complete.
   reason specific to itself (not the device): see the comment block at its
   top for a real on-target bug this tripped over and how it was found.
 
-Not yet done: crossover pairs, fault injection knobs, pcap replay/record,
-`SanaDump`/`SanaSend`, `ENV:sana2loop/unitN.config` (units currently use a
-hardcoded 1500-byte MTU and a fixed fake station address -- see the
-"Config via ENV" section of the proposal for the target design), and
-on-target coverage of `S2_OFFLINE`/`S2_ONEVENT`/`AbortIO`/`CMD_FLUSH`.
+Not yet done: broadcast/multicast/`SANA2IOF_RAW` (M4), crossover pairs,
+fault injection knobs, pcap replay/record, `SanaDump`/`SanaSend`,
+`ENV:sana2loop/unitN.config` (units currently use a hardcoded 1500-byte
+MTU -- see the "Config via ENV" section of the proposal for the target
+design).
 
 ## Architecture
 
@@ -142,10 +150,10 @@ pinned `ghcr.io/reinauer/container-amiga-gcc` image narrator.wyoming uses
 - `make device` / `make tools` -- build just one or the other.
 
 `make docker` has been run successfully in this environment (both binaries
-build clean), and `make copperline-smoke` has confirmed the echo/query
-logic on-target against real Kickstart 1.3 (see "Testing under Copperline"
-below) -- `S2_OFFLINE`/`S2_ONEVENT`/`AbortIO`/`CMD_FLUSH` are not yet
-covered by that test.
+build clean), and `make copperline-smoke` has confirmed every sub-test
+through M3 on-target against both bundled AROS and real Kickstart 1.3 (see
+"Testing under Copperline" below and `tests/copperline/sana2test.c`'s
+`SUB=` list).
 
 No release/versioning/Aminet packaging infrastructure yet -- that's Phase 4
 per the proposal; `version.mk` exists now only so the device's `$VER`

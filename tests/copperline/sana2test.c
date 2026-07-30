@@ -97,6 +97,8 @@ static char NAME_CMDFLUSH[]       = "cmdflush";
 static char NAME_BUFFERHOOKS[]    = "bufferhooks";
 static char NAME_ONEVENTNOW[]     = "oneventnow";
 static char NAME_DELIVERY[]       = "delivery";
+static char NAME_CONFIGINTERFACE[] = "configinterface";
+static char NAME_TRACKTYPE[]      = "tracktype";
 static char DBG_CHECKIO_NULL[]    = "DBG_CHECKIO_NULL=";
 
 /* _start must be the very first thing in the file and contain no data of
@@ -540,6 +542,107 @@ static int test_main(void)
         }
 
         report(NAME_DELIVERY, ok, &fails);
+    }
+
+    /* --- configinterface: first S2_CONFIGINTERFACE adopts a new CURRENT
+     * station address (S2_GETSTATIONADDRESS's ios2_SrcAddr) while the
+     * FACTORY address (ios2_DstAddr) stays put; a second attempt on the
+     * same (now-configured) unit must fail
+     * S2ERR_BAD_STATE/S2WERR_IS_CONFIGURED. --- */
+    {
+        BOOL ok = TRUE;
+        UBYTE factory_before[6];
+        int i;
+
+        io1->ios2_Req.io_Command = S2_GETSTATIONADDRESS;
+        do_io(io1);
+        for (i = 0; i < 6; i++)
+            factory_before[i] = io1->ios2_DstAddr[i];
+
+        io1->ios2_Req.io_Command = S2_CONFIGINTERFACE;
+        for (i = 0; i < SANA2_MAX_ADDR_BYTES; i++)
+            io1->ios2_SrcAddr[i] = (i < 6) ? (UBYTE)(0x10 + i) : 0;
+        do_io(io1);
+        ok = ok && (io1->ios2_Req.io_Error == 0);
+
+        io1->ios2_Req.io_Command = S2_GETSTATIONADDRESS;
+        do_io(io1);
+        ok = ok && (io1->ios2_Req.io_Error == 0);
+        for (i = 0; i < 6; i++) {
+            if (io1->ios2_SrcAddr[i] != (UBYTE)(0x10 + i))
+                ok = FALSE;
+            if (io1->ios2_DstAddr[i] != factory_before[i])
+                ok = FALSE;
+        }
+
+        io1->ios2_Req.io_Command = S2_CONFIGINTERFACE; /* second attempt -- must fail */
+        do_io(io1);
+        ok = ok && (io1->ios2_Req.io_Error == S2ERR_BAD_STATE) &&
+             (io1->ios2_WireError == S2WERR_IS_CONFIGURED);
+
+        report(NAME_CONFIGINTERFACE, ok, &fails);
+    }
+
+    /* --- tracktype: S2_TRACKTYPE/S2_GETTYPESTATS/S2_UNTRACKTYPE against a
+     * packet type untouched by any earlier sub-test -- proves the fixed
+     * 8-slot table actually accumulates real traffic counts (not just
+     * recorded and ignored), and that the duplicate/not-tracked error
+     * paths work. --- */
+    {
+        BOOL ok = TRUE;
+        struct Sana2PacketTypeStats stats;
+        int i;
+
+        io1->ios2_Req.io_Command = S2_TRACKTYPE;
+        io1->ios2_PacketType = 0x9999;
+        do_io(io1);
+        ok = ok && (io1->ios2_Req.io_Error == 0);
+
+        io1->ios2_Req.io_Command = S2_TRACKTYPE; /* duplicate -- must fail */
+        do_io(io1);
+        ok = ok && (io1->ios2_Req.io_Error == S2ERR_BAD_STATE) &&
+             (io1->ios2_WireError == S2WERR_ALREADY_TRACKED);
+
+        /* One echo exchange of the tracked type: io1 reads, io2 writes. */
+        io1->ios2_Req.io_Command = CMD_READ;
+        io1->ios2_Data = readbuf;
+        io1->ios2_PacketType = 0x9999;
+        io1->ios2_Req.io_Flags = 0;
+        send_io(io1);
+
+        io2->ios2_Req.io_Command = CMD_WRITE;
+        for (i = 0; i < SANA2_MAX_ADDR_BYTES; i++)
+            io2->ios2_DstAddr[i] = (i < 6) ? (UBYTE)(0xFF - i) : 0;
+        io2->ios2_PacketType = 0x9999;
+        io2->ios2_DataLength = sizeof(PAYLOAD) - 1;
+        io2->ios2_Data = (APTR)PAYLOAD;
+        do_io(io2);
+
+        WaitIO((struct IORequest *)io1);
+        ok = ok && (io1->ios2_Req.io_Error == 0) && (io2->ios2_Req.io_Error == 0);
+
+        io1->ios2_Req.io_Command = S2_GETTYPESTATS;
+        io1->ios2_PacketType = 0x9999;
+        io1->ios2_StatData = &stats;
+        do_io(io1);
+        ok = ok && (io1->ios2_Req.io_Error == 0) &&
+             stats.PacketsSent == 1 && stats.PacketsReceived == 1 &&
+             stats.BytesSent == sizeof(PAYLOAD) - 1 &&
+             stats.BytesReceived == sizeof(PAYLOAD) - 1 &&
+             stats.PacketsDropped == 0;
+
+        io1->ios2_Req.io_Command = S2_UNTRACKTYPE;
+        io1->ios2_PacketType = 0x9999;
+        do_io(io1);
+        ok = ok && (io1->ios2_Req.io_Error == 0);
+
+        io1->ios2_Req.io_Command = S2_GETTYPESTATS; /* no longer tracked -- must fail */
+        io1->ios2_StatData = &stats;
+        do_io(io1);
+        ok = ok && (io1->ios2_Req.io_Error == S2ERR_BAD_STATE) &&
+             (io1->ios2_WireError == S2WERR_NOT_TRACKED);
+
+        report(NAME_TRACKTYPE, ok, &fails);
     }
 
     CloseDevice((struct IORequest *)io1);

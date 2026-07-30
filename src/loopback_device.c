@@ -64,6 +64,12 @@
  * ENV:sana2loop/unitN.config) is a later phase; for now this is also the
  * hard cap enforced against ios2_DataLength. */
 #define SANA2LOOP_MAX_PACKET  1500
+/* S2_TRACKTYPE table size: fixed, not dynamically grown -- consistent with
+ * this device's "no hidden buffers/allocations behind the caller's back"
+ * ethos elsewhere (rxqueue=0 default, fixed-size EchoPacket). A caller that
+ * needs more simultaneously-tracked types gets S2ERR_NO_RESOURCES, same as
+ * any other fixed-capacity resource here. */
+#define SANA2LOOP_MAX_TRACKED_TYPES 8
 
 /* SysBase -- the one file-scope global this file needs. Safe here: this is
  * a plain -nostdlib freestanding build (no -fbaserel), so globals use
@@ -88,7 +94,18 @@ struct EchoPacket {
 struct Sana2LoopUnit {
     struct Unit su_Unit;              /* standard exec unit header -- must be first */
     UBYTE       su_Index;             /* this unit's number, for reset_unit() */
-    UBYTE       su_Station[6];        /* fake ethernet station address */
+    UBYTE       su_Station[6];        /* CURRENT station address -- what
+                                          S2_GETSTATIONADDRESS's ios2_SrcAddr
+                                          reports; S2_CONFIGINTERFACE may
+                                          change this once per unit lifetime */
+    UBYTE       su_FactoryStation[6]; /* FACTORY/default address -- fixed for
+                                          the unit's lifetime (until the next
+                                          reset_unit()); surfaced via
+                                          S2_GETSTATIONADDRESS's ios2_DstAddr */
+    BOOL        su_Configured;        /* TRUE once S2_CONFIGINTERFACE has
+                                          succeeded once -- a second attempt
+                                          fails S2ERR_BAD_STATE/
+                                          S2WERR_IS_CONFIGURED */
     ULONG       su_MTU;
     BOOL        su_Online;
     ULONG       su_RxQueueMax;        /* bounded pending-data depth; 0 = strict
@@ -96,6 +113,12 @@ struct Sana2LoopUnit {
                                           M5's config knob overrides this) */
     ULONG       su_PendingDataCount;  /* current su_PendingData depth */
     struct Sana2DeviceStats su_Stats;
+    /* S2_TRACKTYPE table: fixed SANA2LOOP_MAX_TRACKED_TYPES slots, shared
+     * unit-wide state (any open can track/untrack/query any type) --
+     * su_TypeInUse[i] gates whether slot i holds a live entry at all. */
+    BOOL        su_TypeInUse[SANA2LOOP_MAX_TRACKED_TYPES];
+    ULONG       su_TypeTracked[SANA2LOOP_MAX_TRACKED_TYPES];
+    struct Sana2PacketTypeStats su_TypeStats[SANA2LOOP_MAX_TRACKED_TYPES];
     struct List su_PendingReads;      /* queued, TYPED CMD_READ IORequests */
     struct List su_OrphanReads;       /* queued S2_READORPHAN IORequests (untyped) */
     struct List su_PendingData;       /* packets awaiting a CMD_READ/S2_READORPHAN,
@@ -260,6 +283,21 @@ static void apply_buffer_mgmt_tags(struct Sana2LoopOpen *slo, struct TagItem *ta
     }
 }
 
+/* Looks up a tracked S2_TRACKTYPE entry by packet type; returns NULL if
+ * `type` isn't currently tracked. The table is shared unit-wide state (any
+ * open can S2_TRACKTYPE/S2_UNTRACKTYPE/S2_GETTYPESTATS it, and CMD_WRITE/
+ * deliver_packet() update counts as traffic flows), so -- like the
+ * pending-read/pending-data lists -- every access, lookup or mutation, must
+ * run under Disable(); this function assumes the caller already holds it. */
+static struct Sana2PacketTypeStats *find_tracked_locked(struct Sana2LoopUnit *unit, ULONG type)
+{
+    int i;
+    for (i = 0; i < SANA2LOOP_MAX_TRACKED_TYPES; i++)
+        if (unit->su_TypeInUse[i] && unit->su_TypeTracked[i] == type)
+            return &unit->su_TypeStats[i];
+    return NULL;
+}
+
 /* Aborts any request still queued (reads or event waits) under a cookie
  * that's about to be freed -- a well-behaved consumer closes with nothing
  * outstanding, but a test device should survive one that doesn't rather
@@ -375,22 +413,41 @@ static void drain_unit(struct Sana2LoopUnit *unit)
  * disturbed, but a fully-idle one starts fresh for whoever opens it next. */
 static void reset_unit(struct Sana2LoopUnit *unit)
 {
+    int i;
+
     unit->su_MTU         = SANA2LOOP_DEFAULT_MTU;
     unit->su_Online      = FALSE;
     unit->su_RxQueueMax  = 0; /* strict drop by default -- see docs/PLAN.md M2 */
     unit->su_PendingDataCount = 0;
+    unit->su_Configured  = FALSE;
 
     /* Locally-administered (bit set in the first octet) fake address,
      * spelling "S2L" in the middle bytes so it's recognisable in a packet
      * dump; last byte is the unit number. This is the FACTORY default --
-     * once S2_CONFIGINTERFACE (M3) can change the current address, this
-     * reset is what restores it. */
-    unit->su_Station[0] = 0x02;
-    unit->su_Station[1] = 0x53;
-    unit->su_Station[2] = 0x32;
-    unit->su_Station[3] = 0x4C;
-    unit->su_Station[4] = 0x00;
-    unit->su_Station[5] = unit->su_Index;
+     * su_Station (current) starts equal to it, but S2_CONFIGINTERFACE (M3)
+     * may change su_Station away from it; su_FactoryStation itself never
+     * changes until the next reset_unit(). */
+    unit->su_FactoryStation[0] = 0x02;
+    unit->su_FactoryStation[1] = 0x53;
+    unit->su_FactoryStation[2] = 0x32;
+    unit->su_FactoryStation[3] = 0x4C;
+    unit->su_FactoryStation[4] = 0x00;
+    unit->su_FactoryStation[5] = unit->su_Index;
+    /* Explicit field-by-field, not a loop: a plain fixed-count
+     * array-to-array copy loop is exactly the idiom GCC's -O2 loop
+     * recognition replaces with a `memmove` call, which doesn't exist in
+     * this -nostdlib freestanding build (found the hard way -- linker
+     * error in a function that doesn't otherwise call anything struct-copy
+     * related; see S2_CONFIGINTERFACE's matching comment below). */
+    unit->su_Station[0] = unit->su_FactoryStation[0];
+    unit->su_Station[1] = unit->su_FactoryStation[1];
+    unit->su_Station[2] = unit->su_FactoryStation[2];
+    unit->su_Station[3] = unit->su_FactoryStation[3];
+    unit->su_Station[4] = unit->su_FactoryStation[4];
+    unit->su_Station[5] = unit->su_FactoryStation[5];
+
+    for (i = 0; i < SANA2LOOP_MAX_TRACKED_TYPES; i++)
+        unit->su_TypeInUse[i] = FALSE;
 
     unit->su_Stats.PacketsReceived      = 0;
     unit->su_Stats.PacketsSent          = 0;
@@ -582,6 +639,22 @@ static void deliver_packet(struct Sana2LoopUnit *unit, struct EchoPacket *pkt)
         }
         if (!waiting && !queued)
             unit->su_Stats.UnknownTypesReceived++;
+
+        /* S2_TRACKTYPE accounting: PacketsReceived/BytesReceived count the
+         * packet arriving at this interface at all (delivered immediately
+         * OR accepted into the rxqueue for later reading) -- PacketsDropped
+         * is reserved for the one outcome that's genuinely a loss. */
+        {
+            struct Sana2PacketTypeStats *ts = find_tracked_locked(unit, pkt->ep_PacketType);
+            if (ts) {
+                if (waiting || queued) {
+                    ts->PacketsReceived++;
+                    ts->BytesReceived += pkt->ep_Length;
+                } else {
+                    ts->PacketsDropped++;
+                }
+            }
+        }
     }
     Enable();
 
@@ -649,7 +722,16 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
             break;
         }
 
+        Disable();
         unit->su_Stats.PacketsSent++;
+        {
+            struct Sana2PacketTypeStats *ts = find_tracked_locked(unit, pkt->ep_PacketType);
+            if (ts) {
+                ts->PacketsSent++;
+                ts->BytesSent += pkt->ep_Length;
+            }
+        }
+        Enable();
         deliver_packet(unit, pkt);
         break;
     }
@@ -759,10 +841,164 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
     }
 
     case S2_GETSTATIONADDRESS: {
+        /* Convention (not enforced by the struct itself, since IOSana2Req
+         * only has the one SrcAddr/DstAddr pair to reuse): ios2_SrcAddr =
+         * CURRENT address, ios2_DstAddr = FACTORY/default address -- so a
+         * caller can always tell whether S2_CONFIGINTERFACE has changed
+         * anything without a separate query. */
         int k;
         for (k = 0; k < SANA2_MAX_ADDR_BYTES; k++) {
             io->ios2_SrcAddr[k] = (k < 6) ? unit->su_Station[k] : 0;
-            io->ios2_DstAddr[k] = (k < 6) ? unit->su_Station[k] : 0;
+            io->ios2_DstAddr[k] = (k < 6) ? unit->su_FactoryStation[k] : 0;
+        }
+        break;
+    }
+
+    case S2_CONFIGINTERFACE: {
+        /* First S2_CONFIGINTERFACE on a freshly-reset unit adopts
+         * ios2_SrcAddr's low 6 bytes as the CURRENT station address
+         * (su_FactoryStation never changes because of this). A second
+         * attempt on an already-configured unit fails
+         * S2ERR_BAD_STATE/S2WERR_IS_CONFIGURED -- SANA-II's documented way
+         * of saying an interface only gets configured once per open cycle,
+         * not a limitation specific to this device.
+         *
+         * Deliberately NOT gated on su_Online, and S2_ONLINE is NOT gated
+         * on su_Configured: unlike a real wire, this device already hands
+         * out a usable factory address at reset, precisely so the tool
+         * works with zero setup -- requiring S2_CONFIGINTERFACE first
+         * would only get in the way of that. */
+        BOOL already;
+
+        Disable();
+        already = unit->su_Configured;
+        if (!already) {
+            /* Explicit field-by-field, not a loop -- see reset_unit()'s
+             * matching comment: a plain fixed-count array-copy loop here
+             * got recognized by -O2 and replaced with a call to `memmove`,
+             * which doesn't exist in this freestanding build (the actual
+             * link failure surfaced in init_device()/open(), not here,
+             * because reset_unit() is small enough to get inlined into
+             * both callers -- worth remembering next time a linker error
+             * blames an innocent-looking function). */
+            unit->su_Station[0] = io->ios2_SrcAddr[0];
+            unit->su_Station[1] = io->ios2_SrcAddr[1];
+            unit->su_Station[2] = io->ios2_SrcAddr[2];
+            unit->su_Station[3] = io->ios2_SrcAddr[3];
+            unit->su_Station[4] = io->ios2_SrcAddr[4];
+            unit->su_Station[5] = io->ios2_SrcAddr[5];
+            unit->su_Configured = TRUE;
+            unit->su_Stats.Reconfigurations++;
+        }
+        Enable();
+
+        if (already) {
+            io0->io_Error = S2ERR_BAD_STATE;
+            io->ios2_WireError = S2WERR_IS_CONFIGURED;
+        }
+        break;
+    }
+
+    case S2_TRACKTYPE: {
+        /* Fixed SANA2LOOP_MAX_TRACKED_TYPES-slot table -- see its #define
+         * for why fixed-size, not dynamically grown. */
+        int i, slot = -1;
+        BOOL already = FALSE;
+
+        Disable();
+        for (i = 0; i < SANA2LOOP_MAX_TRACKED_TYPES; i++) {
+            if (unit->su_TypeInUse[i] && unit->su_TypeTracked[i] == io->ios2_PacketType) {
+                already = TRUE;
+                break;
+            }
+        }
+        if (!already) {
+            for (i = 0; i < SANA2LOOP_MAX_TRACKED_TYPES; i++) {
+                if (!unit->su_TypeInUse[i]) {
+                    slot = i;
+                    break;
+                }
+            }
+            if (slot >= 0) {
+                unit->su_TypeInUse[slot]   = TRUE;
+                unit->su_TypeTracked[slot] = io->ios2_PacketType;
+                unit->su_TypeStats[slot].PacketsSent     = 0;
+                unit->su_TypeStats[slot].PacketsReceived = 0;
+                unit->su_TypeStats[slot].BytesSent       = 0;
+                unit->su_TypeStats[slot].BytesReceived   = 0;
+                unit->su_TypeStats[slot].PacketsDropped  = 0;
+            }
+        }
+        Enable();
+
+        if (already) {
+            io0->io_Error = S2ERR_BAD_STATE;
+            io->ios2_WireError = S2WERR_ALREADY_TRACKED;
+        } else if (slot < 0) {
+            /* Table full. The real header has no dedicated S2WERR_* for
+             * this specific case -- S2ERR_NO_RESOURCES is the closest
+             * documented fit ("driver couldn't allocate what this request
+             * needed"), same as an AllocMem() failure elsewhere. */
+            io0->io_Error = S2ERR_NO_RESOURCES;
+        }
+        break;
+    }
+
+    case S2_UNTRACKTYPE: {
+        int i;
+        BOOL found = FALSE;
+
+        Disable();
+        for (i = 0; i < SANA2LOOP_MAX_TRACKED_TYPES; i++) {
+            if (unit->su_TypeInUse[i] && unit->su_TypeTracked[i] == io->ios2_PacketType) {
+                unit->su_TypeInUse[i] = FALSE;
+                found = TRUE;
+                break;
+            }
+        }
+        Enable();
+
+        if (!found) {
+            io0->io_Error = S2ERR_BAD_STATE;
+            io->ios2_WireError = S2WERR_NOT_TRACKED;
+        }
+        break;
+    }
+
+    case S2_GETTYPESTATS: {
+        struct Sana2PacketTypeStats *dst = (struct Sana2PacketTypeStats *)io->ios2_StatData;
+        int i;
+        BOOL found = FALSE;
+
+        if (!dst) {
+            io0->io_Error = S2ERR_BAD_ARGUMENT;
+            io->ios2_WireError = S2WERR_NULL_POINTER;
+            break;
+        }
+
+        Disable();
+        for (i = 0; i < SANA2LOOP_MAX_TRACKED_TYPES; i++) {
+            if (unit->su_TypeInUse[i] && unit->su_TypeTracked[i] == io->ios2_PacketType) {
+                /* Field-by-field, not a struct assignment: on this
+                 * freestanding -nostdlib build a `*dst = ...[i]` struct
+                 * copy through a variably-indexed array compiled to a call
+                 * to `memmove`, which doesn't exist without libc -- same
+                 * reasoning as this file's own default_copy()/CopyMem use
+                 * for packet payloads, just discovered here instead. */
+                dst->PacketsSent     = unit->su_TypeStats[i].PacketsSent;
+                dst->PacketsReceived = unit->su_TypeStats[i].PacketsReceived;
+                dst->BytesSent       = unit->su_TypeStats[i].BytesSent;
+                dst->BytesReceived   = unit->su_TypeStats[i].BytesReceived;
+                dst->PacketsDropped  = unit->su_TypeStats[i].PacketsDropped;
+                found = TRUE;
+                break;
+            }
+        }
+        Enable();
+
+        if (!found) {
+            io0->io_Error = S2ERR_BAD_STATE;
+            io->ios2_WireError = S2WERR_NOT_TRACKED;
         }
         break;
     }
@@ -826,9 +1062,8 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
         break;
     }
 
-    /* Later phases: S2_CONFIGINTERFACE, S2_ADD/DELMULTICASTADDRESS,
-     * S2_MULTICAST/BROADCAST send flags, S2_TRACKTYPE/UNTRACKTYPE,
-     * S2_GETTYPESTATS. */
+    /* Later phases: S2_ADD/DELMULTICASTADDRESS, S2_MULTICAST/BROADCAST send
+     * flags (M4). */
     default:
         io0->io_Error = IOERR_NOCMD;
         break;
