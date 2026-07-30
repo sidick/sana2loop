@@ -23,27 +23,41 @@ The device stays on its hard constraints: 68000/KS1.3 baseline, no utility.libra
 
 ## Milestones (each = one commit; gate = `make copperline-smoke` green on bundled AROS **and** locally vs real KS1.3)
 
-| # | Work | Files |
-|---|---|---|
-| M0 | Test backfill, no device change: S2_OFFLINE (write→`S2ERR_OUTOFSERVICE`), S2_ONEVENT edge-trigger (SendIO+CheckIO), AbortIO on pending read, CMD_FLUSH. Convert echo test to pre-queue-read pattern (ready for M2's strict drop). Add `SUB=` protocol to harness + `run.sh` | `tests/copperline/sana2test.c`, `run.sh` |
-| M1 | Per-open cookie + buffer hooks: tag walk (incl. TAG_MORE/SKIP/IGNORE), default CopyMem hooks, hook-failure path (`S2ERR_NO_RESOURCES`+`S2WERR_BUFF_ERROR`), defensive close-abort of the dying cookie's queued requests. **Verify by objdump** that bebbo gcc honors register annotations on calls through function pointers (fallback: asm thunk). Fix `docs/sana2-notes.md` hook stance | `src/loopback_device.c`, `docs/sana2-notes.md`, harness (hook-tag test via TAG_MORE chain + counters) |
-| M2 | `deliver_packet()` refactor: typed reads, `S2_READORPHAN`, strict-drop default + `rxqueue` bound, `S2_GETGLOBALSTATS`, zero-record `S2_GETSPECIALSTATS`, NULL-`ios2_StatData` guard, no delivery while offline, unit reset at first-open | `src/loopback_device.c`, harness (type-mismatch stays pending; orphan catches it; `UnknownTypesReceived` asserted) |
-| M3 | `S2_CONFIGINTERFACE` (second → `S2ERR_BAD_STATE`+`S2WERR_IS_CONFIGURED`), `S2_GETSTATIONADDRESS` current-vs-factory split, `S2_TRACKTYPE`/`UNTRACKTYPE`/`GETTYPESTATS` (8 fixed slots) | `src/loopback_device.c`, harness |
-| M4 | `S2_BROADCAST`/`S2_MULTICAST` writes, `S2_ADD/DELMULTICASTADDRESS` (refcounted, fixed slots), `SANA2IOF_RAW` (buffer → MTU+14), BCAST/MCAST read flags | `src/loopback_device.c`, harness |
-| M5 | Config infra: parser, ENV:/S: read at first-open, latch semantics; decide `-lgcc` vs local div helpers; prove DOS-under-Forbid open on real 1.3 | `src/loopback_device.c`, `Makefile`, `run.sh` (config on ADF: `mtu=1400` → DQ reports 1400; malformed → open fails) |
-| M6 | Crossover: config-driven `mode`/`peer` (defaults: units 0–1 echo, 2↔3 crossover), pair validation at first-open, unswapped addressing, receive filtering (station/bcast/mcast/PROM) | `src/loopback_device.c`, `run.sh`, harness (SendIO read on 3 + write on 2; wrong-dst filtered unless PROM) |
-| M7 | Fault injection: xorshift32 + full pipeline + forced offline/online events + PMTUD black hole | `src/loopback_device.c`, harness (droppct=100 never completes; duppct=100 → 2 reads; fixed-seed reorder → assert exact permutation) |
-| M8 | pcap core (`src/pcap.h`, both endians) + consume-mode replay; commit fixture bytes | `src/pcap.h`, `src/loopback_device.c`, `fixtures/`, harness |
-| M9 | VBlank tick server, tick-scheduled replay, RAM record + close-flush, interrupt-context-hook knob, 68000 per-packet overhead measurement (VBlank-count bracketing, tracked not gated). Record test: `run.sh` extracts written pcap off the ADF post-run via xdftool and byte-compares — **verify early that Copperline persists floppy writes to the image** | `src/loopback_device.c`, `run.sh` |
-| M10 | Docs pass: teaching-reference comments through the source, README, sana2-notes refresh | all sources, `docs/` |
-| M11 | Tools: `src/tools/pcapio.c`, `sana2open.c`, `SanaDump`, `SanaSend`; `host/make_fixtures.py` + `host/lint_pcap.py` (scapy); canonical corpus (ARP, DHCP, TCP handshake) | new `src/tools/*`, `host/*`, `fixtures/`, `Makefile` |
-| M12 | Aminet packaging + release flow (adopt narrator.wyoming's version.mk/release-tag pattern), `.readme`, final full-suite + real-1.3 gate | `Makefile`, release docs |
+Status is kept current here as each milestone lands — see CLAUDE.md's
+"Current state" for the fuller prose account and `docs/sana2-notes.md` for
+the technical detail behind each one.
+
+| # | Status | Work | Files |
+|---|---|---|---|
+| M0 | ✅ Done | Test backfill, no device change: S2_OFFLINE (write→`S2ERR_OUTOFSERVICE`), S2_ONEVENT edge-trigger (SendIO+CheckIO), AbortIO on pending read, CMD_FLUSH. Convert echo test to pre-queue-read pattern (ready for M2's strict drop). Add `SUB=` protocol to harness + `run.sh` | `tests/copperline/sana2test.c`, `run.sh` |
+| M1 | ✅ Done | Per-open cookie + buffer hooks: tag walk (incl. TAG_MORE/SKIP/IGNORE), default CopyMem hooks, hook-failure path (`S2ERR_NO_RESOURCES`+`S2WERR_BUFF_ERROR`), defensive close-abort of the dying cookie's queued requests. **Verify by objdump** that bebbo gcc honors register annotations on calls through function pointers (fallback: asm thunk). Fix `docs/sana2-notes.md` hook stance | `src/loopback_device.c`, `docs/sana2-notes.md`, harness (hook-tag test via TAG_MORE chain + counters) |
+| M2 | ✅ Done | `deliver_packet()` refactor: typed reads, `S2_READORPHAN`, strict-drop default + `rxqueue` bound, `S2_GETGLOBALSTATS`, zero-record `S2_GETSPECIALSTATS`, NULL-`ios2_StatData` guard, no delivery while offline, unit reset at first-open | `src/loopback_device.c`, harness (type-mismatch stays pending; orphan catches it; `UnknownTypesReceived` asserted) |
+| M3 | ✅ Done | `S2_CONFIGINTERFACE` (second → `S2ERR_BAD_STATE`+`S2WERR_IS_CONFIGURED`), `S2_GETSTATIONADDRESS` current-vs-factory split, `S2_TRACKTYPE`/`UNTRACKTYPE`/`GETTYPESTATS` (8 fixed slots) | `src/loopback_device.c`, harness |
+| M4 | ✅ Done | `S2_BROADCAST`/`S2_MULTICAST` writes, `S2_ADD/DELMULTICASTADDRESS` (refcounted, fixed slots), `SANA2IOF_RAW` (buffer → MTU+14), BCAST/MCAST read flags | `src/loopback_device.c`, harness |
+| M5 | ✅ Done | Config infra: parser, ENV:/S: read at first-open, latch semantics; decide `-lgcc` vs local div helpers; prove DOS-under-Forbid open on real 1.3 | `src/loopback_device.c`, `Makefile`, `run.sh` (config on ADF: `mtu=1400` → DQ reports 1400; malformed → open fails) |
+| M6 | ⏳ Next | Crossover: config-driven `mode`/`peer` (defaults: units 0–1 echo, 2↔3 crossover), pair validation at first-open, unswapped addressing, receive filtering (station/bcast/mcast/PROM) | `src/loopback_device.c`, `run.sh`, harness (SendIO read on 3 + write on 2; wrong-dst filtered unless PROM) |
+| M7 | | Fault injection: xorshift32 + full pipeline + forced offline/online events + PMTUD black hole | `src/loopback_device.c`, harness (droppct=100 never completes; duppct=100 → 2 reads; fixed-seed reorder → assert exact permutation) |
+| M8 | | pcap core (`src/pcap.h`, both endians) + consume-mode replay; commit fixture bytes | `src/pcap.h`, `src/loopback_device.c`, `fixtures/`, harness |
+| M9 | | VBlank tick server, tick-scheduled replay, RAM record + close-flush, interrupt-context-hook knob, 68000 per-packet overhead measurement (VBlank-count bracketing, tracked not gated). Record test: `run.sh` extracts written pcap off the ADF post-run via xdftool and byte-compares — **verify early that Copperline persists floppy writes to the image** | `src/loopback_device.c`, `run.sh` |
+| M10 | | Docs pass: teaching-reference comments through the source, README, sana2-notes refresh | all sources, `docs/` |
+| M11 | | Tools: `src/tools/pcapio.c`, `sana2open.c`, `SanaDump`, `SanaSend`; `host/make_fixtures.py` + `host/lint_pcap.py` (scapy); canonical corpus (ARP, DHCP, TCP handshake) | new `src/tools/*`, `host/*`, `fixtures/`, `Makefile` |
+| M12 | | Aminet packaging + release flow (adopt narrator.wyoming's version.mk/release-tag pattern), `.readme`, final full-suite + real-1.3 gate | `Makefile`, release docs |
 
 ## Risks to verify at first touch
 
-- Register-annotated calls through function pointers under bebbo gcc (M1, objdump before trusting).
-- DOS I/O breaking Forbid inside `open()` on real 1.3 (M5's first on-target test).
-- `-lgcc` linked into the freestanding device (M5, only if chosen).
+- ~~Register-annotated calls through function pointers under bebbo gcc~~ --
+  **resolved at M1**: confirmed correct by objdump before trusting it.
+- ~~DOS I/O breaking Forbid inside `open()` on real 1.3~~ -- **resolved at
+  M5**: `open()` itself was never the hazard. `Open("ENV:...")` hangs
+  indefinitely (not a clean failure) when `ENV:` isn't assigned, on both
+  AROS and real 1.3 alike -- fixed via `pr_WindowPtr = (APTR)-1`. With
+  that fixed, dos.library I/O from `open()` works correctly on both
+  targets; real 1.3 is just measurably slower at it than AROS (see
+  `docs/sana2-notes.md`'s M5 section).
+- `-lgcc` linked into the freestanding device -- **still deferred, not
+  decided**: M5's own parsing needed only multiply-and-add, never
+  division, so this stays open until M7's percentage-threshold math
+  actually forces the question.
 - ReplyMsg + consumer hooks from a VBlank server on real 1.3 (M9).
 - Copperline floppy write-back persistence (M9's record assertion depends on it).
 
