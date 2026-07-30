@@ -66,16 +66,56 @@ offline and back online again -- it is a wait-for-change primitive, not a
 status poll (`S2_DEVICEQUERY`, and later `S2_GETGLOBALSTATS`, are the
 status-poll path).
 
-## Buffer management hook (`ios2_BufferManagement`)
+## Buffer management hook (`ios2_BufferManagement`) -- implemented since M1
 
-On real hardware, `CMD_READ`/`CMD_WRITE` copy through a caller-supplied
-function pointer (so the copy can happen from the right context -- e.g. an
-interrupt copying out of a hardware FIFO). `loopback.device` has no
-hardware and no interrupt-context copy to honor, so Phase 1 copies directly
-via `CopyMem()`. The proposal calls out implementing the hook protocol
-properly, as an *opt-in* fault-testing feature (so consumers can be tested
-against real interrupt-context copy discipline) -- that's later-phase work,
-not a Phase 1 gap.
+**Correction from an earlier version of this doc**, which called this an
+opt-in fault-testing feature deferrable past Phase 1. It isn't optional:
+`ios2_BufferManagement` is the mechanism a real caller uses to tell the
+device *where its data actually lives* and how to copy it, and skipping it
+means real stacks (AmiTCP, Roadshow, TheWire13) simply cannot drive this
+device correctly -- CopyMem-ing straight to/from `ios2_Data` happens to work
+for a raw test harness that never sets the field, but is spec-incorrect in
+general.
+
+The protocol (from `devices/sana2.h`, `utility/tagitem.h`):
+
+1. Before `OpenDevice()`, the caller may point `ios2_BufferManagement` at a
+   `struct TagItem` array containing `S2_CopyToBuff`/`S2_CopyFromBuff`
+   (function pointers, ABI below) and/or `S2_PacketFilter` (a `struct
+   Hook *`, recorded but not yet dispatched by this device). `NULL` means
+   "no tags" -- install defaults.
+2. The device's `Open()` parses that list with a **local tag walk**
+   (`FindTagItem()` needs utility.library, absent on 1.3) that must handle
+   the control tags correctly: `TAG_DONE` ends the list, `TAG_IGNORE` skips
+   one item, `TAG_MORE` jumps to a chained array (and does **not** advance
+   past the jump -- the chained array is now "the current array"),
+   `TAG_SKIP` skips `ti_Data` extra items. Getting this wrong is exactly
+   the class of bug `FindTagItem()` normally hides from a caller who never
+   thinks about it.
+3. `Open()` then **replaces** `ios2_BufferManagement` with its own per-open
+   cookie. The caller is contractually required to copy that cookie into
+   every subsequent `IOSana2Req` it submits on this open -- which is why a
+   queued `CMD_READ` already carries the identity of the opener that will
+   eventually consume it, with no side table needed.
+4. Hook ABI (spec-fixed, not the device's choice): `BOOL Copy*Buff(APTR to
+   [a0], APTR from [a1], ULONG size [d0])`. Verified empirically that
+   bebbo's gcc honors `asm("a0")`-style register annotations on a
+   function-pointer *type* at the call site (not just on a function
+   definition) -- confirmed via `objdump` on an isolated test before
+   wiring this into the device, since a wrong ABI here would corrupt
+   memory silently rather than fault cleanly.
+5. Address/type/length fields (`ios2_SrcAddr`/`DstAddr`/`PacketType`/
+   `DataLength`) are always written directly by the driver -- only the
+   packet *payload* goes through the hook.
+6. Hook failure (returns `FALSE`) fails that specific I/O with
+   `S2ERR_NO_RESOURCES` / `ios2_WireError = S2WERR_BUFF_ERROR`, not a
+   crash or a silently-wrong copy.
+
+Genuinely later-phase, and not implemented yet: **invoking these hooks from
+interrupt context** as an opt-in fault knob (SANA-II requires hooks to be
+interrupt-safe; testing that a consumer's hooks actually are is real
+value), and the `S2_CopyTo/FromBuff16/32`/`S2_DMACopyTo/FromBuff32` Rev 7
+variants (recorded nowhere -- no consumer of them exists in this device).
 
 ## Error codes actually used
 

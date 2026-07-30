@@ -38,9 +38,16 @@
 #include <exec/memory.h>
 #include <exec/execbase.h>
 #include <devices/sana2.h>
+#include <utility/tagitem.h>
 #include <proto/exec.h>
 
 struct ExecBase *SysBase;
+
+/* Invocation counters for the bufferhooks sub-test's registered hooks.
+ * Plain globals: safe here for the same reason as SysBase above (this is
+ * -nostdlib, no -fbaserel small-data model to violate). */
+static ULONG g_HookToCount;
+static ULONG g_HookFromCount;
 
 /* Every message as a NAMED array, never a raw string literal passed
  * directly to raw_str(). Root cause of an on-target "task held" Guru that
@@ -87,6 +94,7 @@ static char NAME_OFFLINE[]        = "offline";
 static char NAME_ONEVENT[]        = "onevent";
 static char NAME_ABORTIO[]        = "abortio";
 static char NAME_CMDFLUSH[]       = "cmdflush";
+static char NAME_BUFFERHOOKS[]    = "bufferhooks";
 static char DBG_CHECKIO_NULL[]    = "DBG_CHECKIO_NULL=";
 
 /* _start must be the very first thing in the file and contain no data of
@@ -106,6 +114,8 @@ static void raw_hex_byte(unsigned char b);
 static void report(const char *name, BOOL ok, int *fails);
 static struct MsgPort *make_port(void);
 static struct IOSana2Req *make_io(struct MsgPort *port);
+static BOOL counting_copy_to(APTR to asm("a0"), APTR from asm("a1"), ULONG size asm("d0"));
+static BOOL counting_copy_from(APTR to asm("a0"), APTR from asm("a1"), ULONG size asm("d0"));
 static BOOL open_unit0(struct IOSana2Req *io);
 static void send_io(struct IOSana2Req *io);
 static void do_io(struct IOSana2Req *io);
@@ -320,6 +330,71 @@ static int test_main(void)
         report(NAME_CMDFLUSH, ok, &fails);
     }
 
+    /* --- bufferhooks: a real S2_CopyToBuff/S2_CopyFromBuff tag pair
+     * (chained via TAG_MORE, to exercise that control tag specifically)
+     * must be invoked for both directions of a write+read round trip, and
+     * the data must still arrive correctly through them -- proving the
+     * hooks are wired into the real data path, not just recorded. A
+     * separate third open (io3/port3), since io1/io2 already have default
+     * hooks installed from OpenDevice and hooks are fixed for the life of
+     * an open. */
+    {
+        struct MsgPort *port3 = make_port();
+        struct IOSana2Req *io3 = port3 ? make_io(port3) : NULL;
+        BOOL ok = FALSE;
+
+        if (io3) {
+            struct TagItem tags2[2];
+            struct TagItem tags1[2];
+
+            tags2[0].ti_Tag  = S2_CopyFromBuff;
+            tags2[0].ti_Data = (ULONG)counting_copy_from;
+            tags2[1].ti_Tag  = TAG_DONE;
+            tags2[1].ti_Data = 0;
+            tags1[0].ti_Tag  = S2_CopyToBuff;
+            tags1[0].ti_Data = (ULONG)counting_copy_to;
+            tags1[1].ti_Tag  = TAG_MORE;
+            tags1[1].ti_Data = (ULONG)tags2;
+
+            io3->ios2_BufferManagement = tags1;
+            if (open_unit0(io3)) {
+                int i;
+                g_HookToCount = 0;
+                g_HookFromCount = 0;
+
+                io3->ios2_Req.io_Command = CMD_WRITE;
+                for (i = 0; i < SANA2_MAX_ADDR_BYTES; i++)
+                    io3->ios2_DstAddr[i] = (i < 6) ? (UBYTE)(0xBB + i) : 0;
+                io3->ios2_PacketType = 0x1234;
+                io3->ios2_DataLength = sizeof(PAYLOAD) - 1;
+                io3->ios2_Data = (APTR)PAYLOAD;
+                do_io(io3);
+
+                if (io3->ios2_Req.io_Error == 0) {
+                    io3->ios2_Req.io_Command = CMD_READ;
+                    io3->ios2_Data = readbuf;
+                    do_io(io3);
+
+                    ok = (io3->ios2_Req.io_Error == 0) &&
+                         g_HookToCount >= 1 && g_HookFromCount >= 1 &&
+                         io3->ios2_DataLength == sizeof(PAYLOAD) - 1;
+                    if (ok)
+                        for (i = 0; i < (int)io3->ios2_DataLength; i++)
+                            if (readbuf[i] != (UBYTE)PAYLOAD[i])
+                                ok = FALSE;
+                }
+                CloseDevice((struct IORequest *)io3);
+            }
+            FreeMem(io3, sizeof(struct IOSana2Req));
+        }
+        if (port3) {
+            FreeSignal(port3->mp_SigBit);
+            FreeMem(port3, sizeof(struct MsgPort));
+        }
+
+        report(NAME_BUFFERHOOKS, ok, &fails);
+    }
+
     CloseDevice((struct IORequest *)io1);
     CloseDevice((struct IORequest *)io2);
     FreeMem(io1, sizeof(struct IOSana2Req));
@@ -381,6 +456,26 @@ static BOOL open_unit0(struct IOSana2Req *io)
         raw_str(MSG_OPEN_FAIL);
         return FALSE;
     }
+    return TRUE;
+}
+
+/* Registered as S2_CopyToBuff/S2_CopyFromBuff for the bufferhooks
+ * sub-test. Real hooks, not no-ops -- they do the actual copy (so
+ * correctness proves the device's data path really runs through them, not
+ * just that they get called) and count invocations. Signature matches the
+ * SANA-II hook ABI exactly (a0=to, a1=from, d0=size) so the device can
+ * call them directly, the same way it calls its own default_copy(). */
+static BOOL counting_copy_to(APTR to asm("a0"), APTR from asm("a1"), ULONG size asm("d0"))
+{
+    CopyMem(from, to, size);
+    g_HookToCount++;
+    return TRUE;
+}
+
+static BOOL counting_copy_from(APTR to asm("a0"), APTR from asm("a1"), ULONG size asm("d0"))
+{
+    CopyMem(from, to, size);
+    g_HookFromCount++;
     return TRUE;
 }
 

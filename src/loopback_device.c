@@ -38,6 +38,7 @@
 #include <exec/devices.h>
 #include <exec/memory.h>
 #include <devices/sana2.h>
+#include <utility/tagitem.h>
 #include <proto/exec.h>
 
 #define STR(s)  #s
@@ -98,6 +99,36 @@ struct Sana2LoopDevice {
     struct Device         sld_Device;
     BPTR                  sld_SegList;   /* handed back to Exec by expunge() */
     struct Sana2LoopUnit  sld_Units[SANA2LOOP_NUM_UNITS];
+};
+
+/* SANA-II buffer-management calling convention (spec-fixed, not our
+ * choice): a0=to, a1=from, d0=size, result BOOL in d0. Consumer hooks are
+ * arbitrary compiled code, so the ABI has to be nailed down with explicit
+ * register annotations rather than trusting whatever convention bebbo's
+ * gcc would otherwise pick for a plain function-pointer call -- verified
+ * via objdump on an isolated test that the compiler really does load
+ * a0/a1/d0 immediately before the jsr when the pointer's type carries
+ * these annotations. */
+typedef BOOL (*Sana2CopyFunc)(APTR to asm("a0"), APTR from asm("a1"), ULONG size asm("d0"));
+
+#define SANA2LOOP_OPEN_MAGIC 0x53324C4F /* 'S2LO' */
+
+struct Hook; /* forward decl only -- recorded, not yet dispatched (later phase) */
+
+/* Per-OpenDevice() state. SANA-II's OpenDevice contract: the caller may
+ * point ios2_BufferManagement at a tag list (S2_CopyToBuff/S2_CopyFromBuff/
+ * S2_PacketFilter) before opening; the device parses it and REPLACES
+ * ios2_BufferManagement with its own per-open cookie, which the caller is
+ * then contractually required to copy into every subsequent IOSana2Req it
+ * submits. That means a queued request already carries its opener's
+ * identity -- no side table needed to find "whose hooks do I use to
+ * complete this read". */
+struct Sana2LoopOpen {
+    struct Sana2LoopUnit *slo_Unit;
+    ULONG                  slo_Magic;
+    Sana2CopyFunc          slo_CopyToBuff;
+    Sana2CopyFunc          slo_CopyFromBuff;
+    struct Hook           *slo_PacketFilter;  /* recorded; not yet dispatched */
 };
 
 /*-----------------------------------------------------------
@@ -166,13 +197,105 @@ static BOOL safe_unlink_if_queued(struct List *list, struct Node *target)
     return found;
 }
 
-static void fill_read_from_packet(struct IOSana2Req *io, struct EchoPacket *pkt)
+/* Installed when an opener supplies no S2_CopyToBuff/S2_CopyFromBuff tag
+ * (or no tag list at all) -- a plain CopyMem, but still through the exact
+ * hook ABI, so callers of fill_read_from_packet()/CMD_WRITE never need to
+ * know whether a real hook is installed or not: one call path, always. */
+static BOOL default_copy(APTR to asm("a0"), APTR from asm("a1"), ULONG size asm("d0"))
 {
+    CopyMem(from, to, size);
+    return TRUE;
+}
+
+/* Hand-rolled tag walk -- utility.library's FindTagItem() doesn't exist on
+ * Kickstart 1.3, so this is the local loop the proposal calls for. Must
+ * handle the control tags (TAG_DONE/IGNORE/MORE/SKIP) correctly or a real
+ * stack's chained tag list breaks silently; that handling is exactly what
+ * FindTagItem() normally hides from callers who never think about it. */
+static void apply_buffer_mgmt_tags(struct Sana2LoopOpen *slo, struct TagItem *tags)
+{
+    slo->slo_CopyToBuff   = default_copy;
+    slo->slo_CopyFromBuff = default_copy;
+    slo->slo_PacketFilter = NULL;
+
+    if (!tags)
+        return;
+
+    for (;;) {
+        switch (tags->ti_Tag) {
+        case TAG_DONE:
+            return;
+        case TAG_IGNORE:
+            break;
+        case TAG_MORE:
+            tags = (struct TagItem *)tags->ti_Data;
+            continue; /* TAG_MORE ends the current array -- no tags++ */
+        case TAG_SKIP:
+            tags += tags->ti_Data; /* + the common tags++ below = ti_Data+1 */
+            break;
+        case S2_CopyToBuff:
+            slo->slo_CopyToBuff = (Sana2CopyFunc)tags->ti_Data;
+            break;
+        case S2_CopyFromBuff:
+            slo->slo_CopyFromBuff = (Sana2CopyFunc)tags->ti_Data;
+            break;
+        case S2_PacketFilter:
+            slo->slo_PacketFilter = (struct Hook *)tags->ti_Data;
+            break;
+        /* S2_CopyTo/FromBuff16/32, S2_DMACopyTo/FromBuff32 (Rev 7 extras):
+         * no consumer of them exists in this device, so recorded nowhere;
+         * falling to default (ignored) here is correct, not a gap. */
+        default:
+            break;
+        }
+        tags++;
+    }
+}
+
+/* Aborts any request still queued (reads or event waits) under a cookie
+ * that's about to be freed -- a well-behaved consumer closes with nothing
+ * outstanding, but a test device should survive one that doesn't rather
+ * than hand a freed cookie's hooks to a later packet delivery. */
+static void abort_requests_for_open(struct Sana2LoopUnit *unit, struct Sana2LoopOpen *slo)
+{
+    struct List *lists[2];
+    int li;
+
+    lists[0] = &unit->su_PendingReads;
+    lists[1] = &unit->su_EventReqs;
+    for (li = 0; li < 2; li++) {
+        struct IOSana2Req *io, *next;
+        Disable();
+        for (io = (struct IOSana2Req *)lists[li]->lh_Head;
+             io->ios2_Req.io_Message.mn_Node.ln_Succ;
+             io = next) {
+            next = (struct IOSana2Req *)io->ios2_Req.io_Message.mn_Node.ln_Succ;
+            if ((struct Sana2LoopOpen *)io->ios2_BufferManagement == slo) {
+                Remove((struct Node *)io);
+                io->ios2_Req.io_Error = IOERR_ABORTED;
+                Enable();
+                ReplyMsg(&io->ios2_Req.io_Message);
+                Disable();
+            }
+        }
+        Enable();
+    }
+}
+
+/* Copies address/type/length directly (driver-owned fields, never subject
+ * to buffer-management hooks) and the packet payload through the
+ * completing reader's own CopyToBuff hook. Returns FALSE on hook failure
+ * so the caller can fail the read with S2ERR_NO_RESOURCES/S2WERR_BUFF_ERROR
+ * instead of claiming success over data that was never actually copied. */
+static BOOL fill_read_from_packet(struct IOSana2Req *io, struct EchoPacket *pkt)
+{
+    struct Sana2LoopOpen *slo = (struct Sana2LoopOpen *)io->ios2_BufferManagement;
+
     CopyMem(pkt->ep_SrcAddr, io->ios2_SrcAddr, SANA2_MAX_ADDR_BYTES);
     CopyMem(pkt->ep_DstAddr, io->ios2_DstAddr, SANA2_MAX_ADDR_BYTES);
     io->ios2_PacketType = pkt->ep_PacketType;
     io->ios2_DataLength = pkt->ep_Length;
-    CopyMem(pkt->ep_Data, io->ios2_Data, pkt->ep_Length);
+    return slo->slo_CopyToBuff(io->ios2_Data, pkt->ep_Data, pkt->ep_Length);
 }
 
 /* Complete any queued S2_ONEVENT request whose mask matches `event`.
@@ -302,6 +425,8 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
      ULONG unitnum asm("d0"), ULONG flags asm("d1"))
 {
     struct Sana2LoopDevice *sld = (struct Sana2LoopDevice *)dev;
+    struct IOSana2Req *io2 = (struct IOSana2Req *)io;
+    struct Sana2LoopOpen *slo;
 
     io->io_Error = S2ERR_BAD_ARGUMENT;
     io->io_Message.mn_Node.ln_Type = NT_REPLYMSG;
@@ -309,10 +434,24 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
     if (unitnum >= SANA2LOOP_NUM_UNITS)
         return;
 
+    slo = AllocMem(sizeof(struct Sana2LoopOpen), MEMF_CLEAR);
+    if (!slo) {
+        io->io_Error = S2ERR_NO_RESOURCES;
+        return;
+    }
+    slo->slo_Unit  = &sld->sld_Units[unitnum];
+    slo->slo_Magic = SANA2LOOP_OPEN_MAGIC;
+    /* ios2_BufferManagement arrives pointing at the caller's tag list (or
+     * NULL); apply_buffer_mgmt_tags() reads it before we overwrite the
+     * field below with our own cookie. */
+    apply_buffer_mgmt_tags(slo, (struct TagItem *)io2->ios2_BufferManagement);
+
     io->io_Device = (struct Device *)dev;
     io->io_Unit   = &sld->sld_Units[unitnum].su_Unit;
     io->io_Unit->unit_OpenCnt++;
     dev->lib_OpenCnt++;
+    io2->ios2_BufferManagement = slo; /* per SANA-II: the opener must copy
+                                          this into every future request */
     io->io_Error = 0;
     (void)flags; /* SANA2OPF_MINE / SANA2OPF_PROM: no exclusivity or
                     promiscuous distinction in a software loopback -- every
@@ -325,10 +464,16 @@ static BPTR __attribute__((used))
 close(struct Library *dev asm("a6"), struct IORequest *io asm("a1"))
 {
     struct Sana2LoopUnit *unit = (struct Sana2LoopUnit *)io->io_Unit;
+    struct IOSana2Req *io2 = (struct IOSana2Req *)io;
+    struct Sana2LoopOpen *slo = (struct Sana2LoopOpen *)io2->ios2_BufferManagement;
+
+    abort_requests_for_open(unit, slo);
 
     if (--unit->su_Unit.unit_OpenCnt == 0)
         drain_unit(unit);
 
+    FreeMem(slo, sizeof(struct Sana2LoopOpen));
+    io2->ios2_BufferManagement = NULL;
     io->io_Device = NULL;
     io->io_Unit   = NULL;
     dev->lib_OpenCnt--;
@@ -354,6 +499,7 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
     case CMD_WRITE: {
         struct EchoPacket *pkt;
         struct IOSana2Req *waiting;
+        struct Sana2LoopOpen *writer_slo = (struct Sana2LoopOpen *)io->ios2_BufferManagement;
 
         if (!unit->su_Online) {
             io0->io_Error = S2ERR_OUTOFSERVICE;
@@ -380,13 +526,22 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
             for (k = 0; k < SANA2_MAX_ADDR_BYTES; k++)
                 pkt->ep_DstAddr[k] = (k < 6) ? unit->su_Station[k] : 0;
         }
-        CopyMem(io->ios2_Data, pkt->ep_Data, pkt->ep_Length);
+        if (!writer_slo->slo_CopyFromBuff(pkt->ep_Data, io->ios2_Data, pkt->ep_Length)) {
+            FreeMem(pkt, sizeof(struct EchoPacket));
+            io0->io_Error = S2ERR_NO_RESOURCES;
+            io->ios2_WireError = S2WERR_BUFF_ERROR;
+            break;
+        }
 
         waiting = (struct IOSana2Req *)safe_rem_head(&unit->su_PendingReads);
         if (waiting) {
-            fill_read_from_packet(waiting, pkt);
+            if (fill_read_from_packet(waiting, pkt)) {
+                waiting->ios2_Req.io_Error = 0;
+            } else {
+                waiting->ios2_Req.io_Error = S2ERR_NO_RESOURCES;
+                waiting->ios2_WireError = S2WERR_BUFF_ERROR;
+            }
             FreeMem(pkt, sizeof(struct EchoPacket));
-            waiting->ios2_Req.io_Error = 0;
             if (!(waiting->ios2_Req.io_Flags & IOF_QUICK))
                 ReplyMsg(&waiting->ios2_Req.io_Message);
         } else {
@@ -398,7 +553,12 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
     case CMD_READ: {
         struct EchoPacket *pkt = (struct EchoPacket *)safe_rem_head(&unit->su_PendingData);
         if (pkt) {
-            fill_read_from_packet(io, pkt);
+            if (fill_read_from_packet(io, pkt)) {
+                io0->io_Error = 0;
+            } else {
+                io0->io_Error = S2ERR_NO_RESOURCES;
+                io->ios2_WireError = S2WERR_BUFF_ERROR;
+            }
             FreeMem(pkt, sizeof(struct EchoPacket));
         } else {
             io0->io_Flags &= ~IOF_QUICK;
