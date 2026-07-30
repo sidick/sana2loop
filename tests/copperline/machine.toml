@@ -1,0 +1,42 @@
+# Copperline machine profile for sana2loop's headless on-target smoke test.
+#
+# Plain 68000, 1 MB -- loopback.device's actual target floor (see
+# docs/sana2-notes.md), so if this passes here it passes on the floor of
+# what the device claims to support.
+#
+# Boots from a minimal bootable ADF (built fresh by run.sh via xdftool: a
+# blank OFS floppy with just DEVS:loopback.device, C:sana2test, and a
+# one-line S:Startup-Sequence) rather than a full Workbench disk -- a real
+# Workbench 1.3 image takes ~90 emulated seconds to reach a usable state
+# even under warp_speed=max (disk-validator/font/icon overhead this test
+# doesn't need), where the minimal disk reaches RESULT=PASS/FAIL in under
+# 10. `speed = 0` (turbo floppy DMA) cuts wall-clock further on top of that.
+#
+# The Kickstart ROM is passed as a positional CLI arg (see run.sh), or
+# omitted entirely to boot Copperline's bundled AROS replacement instead
+# (what public CI uses, since a real ROM is licensed and can't live there --
+# see CLAUDE.md). Prefer a real Kickstart 1.3 ROM locally: validating actual
+# 1.3 fidelity is the point of this project, not just "some 68000
+# Amiga-like thing", and AROS can't stand in for that.
+#
+# This config boots from a plain floppy image, never [[filesys]], so it
+# does not hit the real 68000+[[filesys]] doorbell bug some Copperline
+# versions have (see CLAUDE.md) -- any released `copperline` binary works
+# fine here, confirmed against 0.13.0 with both a real 1.3 ROM and AROS.
+[cpu]
+model = "68000"
+
+[memory]
+chip = "512K"
+slow = "512K"
+
+[floppy]
+drives = 1
+speed = 0        # turbo: instant floppy DMA, no realistic seek/rotation delay
+
+[floppy.df0]
+path = "minimal-boot.adf"   # built fresh by run.sh via xdftool
+
+[emulation]
+power_on = true
+warp_speed = "max"

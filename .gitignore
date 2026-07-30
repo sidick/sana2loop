@@ -1,0 +1,22 @@
+# Build output
+/build/
+
+# Prerequisites
+*.d
+
+# Object files
+*.o
+*.ko
+*.obj
+
+# Linker output
+*.ilk
+*.map
+*.exp
+
+# Debug files
+*.dSYM/
+*.su
+
+# Copperline test harness: ADF built fresh by tests/copperline/run.sh
+/tests/copperline/minimal-boot.adf

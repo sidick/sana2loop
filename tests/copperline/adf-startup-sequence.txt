@@ -1,0 +1,2 @@
+; sana2loop Copperline smoke boot (real Kickstart/Workbench 1.3 floppy).
+sana2test
