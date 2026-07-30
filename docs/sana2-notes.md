@@ -205,14 +205,15 @@ have no config file, and compiled-in defaults apply -- but a file that
 `S2ERR_BAD_ARGUMENT` (an unrecognized key is exactly as fatal as a
 malformed line: silent typo-tolerance is wrong for a test tool).
 
-Only `mtu` and `rxqueue` are recognized right now -- the only two per-unit
-knobs that already exist as real device state. The proposal's full config
-vocabulary (`mode`/`peer` for M6 crossover; `seed`/`droppct`/`duppct`/
-`reorder`/`truncate`/`oversilent`/`offlineafter`/`onlineafter` for M7 fault
-injection; `replay`/`record`/`replaymode`/`recordmax` for M8-M9) has
-nothing to configure yet -- each key lands with the milestone that actually
-consumes it, not before (a recognized key with no backing feature would be
-dead code). `mtu` is bounded above by `SANA2LOOP_MAX_PACKET -
+`mtu`/`rxqueue` (M5) and `mode`/`peer` (M6, see its own section below) are
+recognized so far -- the only per-unit knobs that already exist as real
+device state. The proposal's remaining config vocabulary
+(`seed`/`droppct`/`duppct`/`reorder`/`truncate`/`oversilent`/
+`offlineafter`/`onlineafter` for M7 fault injection; `replay`/`record`/
+`replaymode`/`recordmax` for M8-M9) has nothing to configure yet -- each
+key lands with the milestone that actually consumes it, not before (a
+recognized key with no backing feature would be dead code). `mtu` is
+bounded above by `SANA2LOOP_MAX_PACKET -
 SANA2LOOP_RAW_HDR_SIZE` (1500) -- a configured MTU above that would let a
 RAW write's relaxed size check (M4) exceed the fixed `EchoPacket` buffer's
 actual capacity. `rxqueue` is bounded by a sanity ceiling (64), not a spec
@@ -261,6 +262,53 @@ both bundled AROS and real Kickstart 1.3:
    standards -- linear directory scans, minimal buffering -- and AROS's
    modern reimplementation was never built to be cycle-faithful to that,
    just functionally compatible.
+
+## Crossover mode (M6)
+
+A unit is either standalone **echo** (Phase 1 behavior, unchanged) or
+**crossover**-paired with exactly one other unit -- a config surface
+entirely of this device's own invention (`mode`=`echo`|`crossover`,
+`peer`=<unit index>; SANA-II itself has no such concept). Compiled-in
+default, needing no config file at all: units 2 and 3 pair with each
+other; every other unit defaults to echo. `read_unit_config()` rejects
+`mode=crossover` with no valid, distinct `peer=` (an echo-mode unit's
+default peer is itself, which is what makes "crossover with no peer"
+concretely fail this check rather than silently self-delivering).
+
+Crossover changes two things echo mode never had to think about, because
+echo mode has no real second party:
+
+1. **Addressing is real, not swapped.** Echo's plain `CMD_WRITE` fakes
+   both ends (src = whatever address the caller wrote to, dst = this
+   unit's own station) because there is no actual peer to ask. Crossover
+   mode (any write type) uses real addressing instead: src is the WRITING
+   unit's own actual station address, dst is exactly what the caller
+   specified. This also fixed a latent bug from M4: echo's own
+   `S2_BROADCAST`/`S2_MULTICAST` had reused the swap machinery's `src =
+   ios2_DstAddr` line unconditionally, meaning a broadcast frame's "source"
+   was the broadcast address itself -- wrong, and never caught because
+   M4's own tests only ever asserted the delivered *destination*, not
+   source. Fixed as a side effect of building this properly for crossover
+   (`do_write()`'s `swap_to_self` now gates the swap specifically, not
+   generally).
+2. **Delivery filters by destination.** `deliver_packet()` targets the
+   PEER unit for a crossover write (`&sld->sld_Units[unit->su_Peer]`, the
+   whole reason it takes a unit parameter rather than always operating on
+   the writer). For a crossover-mode target, every candidate -- a typed
+   `CMD_READ`, an `S2_READORPHAN`, or the `rxqueue` itself --  must also
+   pass `dest_matches_unit()`: standard 802.3 receive filtering (unicast
+   to the target's own station address, the all-1s broadcast address, or
+   a joined multicast group from M4's table) **unless** the specific
+   candidate reader's own open has `SANA2OPF_PROM` set, which finally
+   gives that flag real meaning (previously ignored entirely: "every
+   opener already sees everything on its unit," true only for echo mode).
+   `rxqueue` queuing never gets promiscuous treatment -- it's a shared,
+   unit-wide buffer for a not-yet-known future reader, not a specific
+   open's own request, so there's no meaningful "this reader is
+   promiscuous" to consult at queue time. Echo mode stays fully unfiltered
+   -- there is no separate peer to have misaddressed the packet at, so
+   filtering would only get in the way of the simplest test scenario, the
+   original Phase 1 design intent.
 
 ## `S2_DEVICEQUERY` convention (easy to get backwards)
 

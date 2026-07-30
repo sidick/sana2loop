@@ -104,6 +104,7 @@ static char NAME_MULTICAST[]      = "multicast";
 static char NAME_MULTICASTADDR[]  = "multicastaddress";
 static char NAME_RAW[]            = "raw";
 static char NAME_CONFIG[]         = "config";
+static char NAME_CROSSOVER[]      = "crossover";
 static char DBG_CHECKIO_NULL[]    = "DBG_CHECKIO_NULL=";
 
 /* _start must be the very first thing in the file and contain no data of
@@ -844,7 +845,7 @@ static int test_main(void)
         report(NAME_RAW, ok, &fails);
     }
 
-    /* --- config: M5's config-file infrastructure. Units 1 and 2 are
+    /* --- config: M5's config-file infrastructure. Units 1 and 4 are
      * fresh here (no earlier sub-test ever opens them) and each get their
      * own s/sana2loop/unitN.config on the boot ADF (see run.sh) -- unit 0
      * (used by every earlier sub-test) deliberately has NO config file at
@@ -852,9 +853,13 @@ static int test_main(void)
      * -> compiled-in defaults" implicitly. Both fixtures live under S:,
      * not ENV: -- this minimal boot ADF has no ENV: assign at all, so
      * every lookup here naturally exercises the S: fallback path, not
-     * just the ENV: primary one.
+     * just the ENV: primary one. Unit 4, not 2 or 3: this fixture makes
+     * OpenDevice() permanently fail on whichever unit hosts it (every
+     * open of a never-successfully-opened unit re-triggers the same
+     * failing config read), and M6's crossover sub-test needs units 2
+     * and 3 to both open cleanly as the default crossover pair.
      * (a) unit 1's config sets mtu=1400 -- S2_DEVICEQUERY must report it.
-     * (b) unit 2's config has an unrecognized key -- OpenDevice() itself
+     * (b) unit 4's config has an unrecognized key -- OpenDevice() itself
      *     must fail S2ERR_BAD_ARGUMENT (fail-fast, not silently
      *     ignored). --- */
     {
@@ -886,7 +891,7 @@ static int test_main(void)
             BOOL bad_ok = FALSE;
 
             if (io4) {
-                LONG err = OpenDevice((STRPTR)DEVICE_NAME, 2, (struct IORequest *)io4, 0);
+                LONG err = OpenDevice((STRPTR)DEVICE_NAME, 4, (struct IORequest *)io4, 0);
                 bad_ok = (err != 0) && (io4->ios2_Req.io_Error == S2ERR_BAD_ARGUMENT);
                 if (err == 0) /* shouldn't happen, but don't leak if it does */
                     CloseDevice((struct IORequest *)io4);
@@ -900,6 +905,154 @@ static int test_main(void)
         }
 
         report(NAME_CONFIG, ok, &fails);
+    }
+
+    /* --- crossover: units 2 and 3 default-pair with each other (M6,
+     * docs/PLAN.md) with no config file needed -- a real, separately-
+     * addressed link, unlike echo mode's self-reflection. Confirms:
+     * (a) a write on unit 2 to an address that is NOT unit 3's station
+     *     (and not broadcast/multicast) is NOT delivered to a queued
+     *     typed read on unit 3 -- crossover's destination-address
+     *     filtering (dest_matches_unit()) actually gates delivery, unlike
+     *     echo mode's unconditional self-delivery.
+     * (b) the SAME write, re-addressed to unit 3's real station address,
+     *     IS delivered, with REAL (unswapped) addressing: the unit-3
+     *     reader sees ios2_SrcAddr == unit 2's own actual station address
+     *     (not echo's fake swap) and ios2_DstAddr exactly what was
+     *     written.
+     * (c) a promiscuous (SANA2OPF_PROM) open on unit 3 accepts a
+     *     wrong-destination write anyway -- the whole point of
+     *     promiscuous mode. --- */
+    {
+        BOOL ok = TRUE;
+        struct MsgPort *port2c = make_port();
+        struct IOSana2Req *io2c = port2c ? make_io(port2c) : NULL; /* unit 2: writer */
+        struct MsgPort *port3c = make_port();
+        struct IOSana2Req *io3c = port3c ? make_io(port3c) : NULL; /* unit 3: reader */
+
+        if (io2c && io3c &&
+            OpenDevice((STRPTR)DEVICE_NAME, 2, (struct IORequest *)io2c, 0) == 0 &&
+            OpenDevice((STRPTR)DEVICE_NAME, 3, (struct IORequest *)io3c, 0) == 0) {
+            int i;
+            UBYTE unit2_addr[SANA2_MAX_ADDR_BYTES];
+            UBYTE unit3_addr[SANA2_MAX_ADDR_BYTES];
+
+            io2c->ios2_Req.io_Command = S2_ONLINE;
+            do_io(io2c);
+            io3c->ios2_Req.io_Command = S2_ONLINE;
+            do_io(io3c);
+            ok = ok && (io2c->ios2_Req.io_Error == 0) && (io3c->ios2_Req.io_Error == 0);
+
+            io2c->ios2_Req.io_Command = S2_GETSTATIONADDRESS;
+            do_io(io2c);
+            for (i = 0; i < SANA2_MAX_ADDR_BYTES; i++)
+                unit2_addr[i] = io2c->ios2_SrcAddr[i];
+
+            io3c->ios2_Req.io_Command = S2_GETSTATIONADDRESS;
+            do_io(io3c);
+            for (i = 0; i < SANA2_MAX_ADDR_BYTES; i++)
+                unit3_addr[i] = io3c->ios2_SrcAddr[i];
+
+            /* (a) wrong destination -- must NOT be delivered. */
+            io3c->ios2_Req.io_Command = CMD_READ;
+            io3c->ios2_Data = readbuf;
+            io3c->ios2_PacketType = 0xC0C0;
+            io3c->ios2_Req.io_Flags = 0;
+            send_io(io3c);
+
+            io2c->ios2_Req.io_Command = CMD_WRITE;
+            io2c->ios2_PacketType = 0xC0C0;
+            io2c->ios2_DataLength = sizeof(PAYLOAD) - 1;
+            io2c->ios2_Data = (APTR)PAYLOAD;
+            for (i = 0; i < SANA2_MAX_ADDR_BYTES; i++) /* deliberately NOT unit 3's address */
+                io2c->ios2_DstAddr[i] = (i < 6) ? (UBYTE)(0x60 + i) : 0;
+            do_io(io2c);
+            ok = ok && (io2c->ios2_Req.io_Error == 0);
+
+            AbortIO((struct IORequest *)io3c);
+            WaitIO((struct IORequest *)io3c);
+            ok = ok && (io3c->ios2_Req.io_Error == IOERR_ABORTED);
+
+            /* (b) correct destination -- must be delivered, unswapped. */
+            io3c->ios2_Req.io_Command = CMD_READ;
+            io3c->ios2_Data = readbuf;
+            io3c->ios2_PacketType = 0xC0C0;
+            io3c->ios2_Req.io_Flags = 0;
+            send_io(io3c);
+
+            io2c->ios2_Req.io_Command = CMD_WRITE;
+            io2c->ios2_PacketType = 0xC0C0;
+            io2c->ios2_DataLength = sizeof(PAYLOAD) - 1;
+            io2c->ios2_Data = (APTR)PAYLOAD;
+            for (i = 0; i < SANA2_MAX_ADDR_BYTES; i++)
+                io2c->ios2_DstAddr[i] = unit3_addr[i];
+            do_io(io2c);
+
+            WaitIO((struct IORequest *)io3c);
+            ok = ok && (io2c->ios2_Req.io_Error == 0) && (io3c->ios2_Req.io_Error == 0);
+            for (i = 0; i < 6; i++) {
+                if (io3c->ios2_SrcAddr[i] != unit2_addr[i]) /* real, unswapped src */
+                    ok = FALSE;
+                if (io3c->ios2_DstAddr[i] != unit3_addr[i])
+                    ok = FALSE;
+            }
+
+            /* (c) promiscuous open on unit 3 accepts a wrong-destination
+             * write anyway. */
+            {
+                struct MsgPort *portp = make_port();
+                struct IOSana2Req *iop = portp ? make_io(portp) : NULL;
+                BOOL prom_ok = FALSE;
+
+                if (iop && OpenDevice((STRPTR)DEVICE_NAME, 3,
+                                       (struct IORequest *)iop, SANA2OPF_PROM) == 0) {
+                    iop->ios2_Req.io_Command = CMD_READ;
+                    iop->ios2_Data = readbuf2;
+                    iop->ios2_PacketType = 0xC1C1;
+                    iop->ios2_Req.io_Flags = 0;
+                    send_io(iop);
+
+                    io2c->ios2_Req.io_Command = CMD_WRITE;
+                    io2c->ios2_PacketType = 0xC1C1;
+                    io2c->ios2_DataLength = sizeof(PAYLOAD) - 1;
+                    io2c->ios2_Data = (APTR)PAYLOAD;
+                    for (i = 0; i < SANA2_MAX_ADDR_BYTES; i++) /* wrong dest again */
+                        io2c->ios2_DstAddr[i] = (i < 6) ? (UBYTE)(0x70 + i) : 0;
+                    do_io(io2c);
+
+                    WaitIO((struct IORequest *)iop);
+                    prom_ok = (io2c->ios2_Req.io_Error == 0) && (iop->ios2_Req.io_Error == 0);
+                    CloseDevice((struct IORequest *)iop);
+                }
+                if (iop)
+                    FreeMem(iop, sizeof(struct IOSana2Req));
+                if (portp) {
+                    FreeSignal(portp->mp_SigBit);
+                    FreeMem(portp, sizeof(struct MsgPort));
+                }
+                ok = ok && prom_ok;
+            }
+
+            CloseDevice((struct IORequest *)io2c);
+            CloseDevice((struct IORequest *)io3c);
+        } else {
+            ok = FALSE;
+        }
+
+        if (io2c)
+            FreeMem(io2c, sizeof(struct IOSana2Req));
+        if (io3c)
+            FreeMem(io3c, sizeof(struct IOSana2Req));
+        if (port2c) {
+            FreeSignal(port2c->mp_SigBit);
+            FreeMem(port2c, sizeof(struct MsgPort));
+        }
+        if (port3c) {
+            FreeSignal(port3c->mp_SigBit);
+            FreeMem(port3c, sizeof(struct MsgPort));
+        }
+
+        report(NAME_CROSSOVER, ok, &fails);
     }
 
     CloseDevice((struct IORequest *)io1);

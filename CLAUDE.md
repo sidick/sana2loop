@@ -32,7 +32,7 @@ they may require Kickstart 2.0+ where convenient (documented per-tool).
 ## Current state
 
 Working through `docs/PLAN.md`'s milestones (M0-M12: spec-correctness
-backfill, then Phases 2-4). **M0-M5 done**, each validated on-target under
+backfill, then Phases 2-4). **M0-M6 done**, each validated on-target under
 Copperline against both bundled AROS (CI) and a real Kickstart 1.3 ROM
 (`make copperline-smoke` / `KICK=... make copperline-smoke`,
 see `tests/copperline/`) before being considered complete.
@@ -107,15 +107,37 @@ see `tests/copperline/`) before being considered complete.
     slower than AROS's (`tests/copperline/run.sh`'s `KICK=` benchmark
     default needed raising, 10s -> 30s). See `docs/sana2-notes.md`'s M5
     section for the full story.
-  - 4 units pre-allocated in the device base (unit 0 wired for echo; units
-    1-3 exist for Phase 2 crossover pairs but aren't dispatched differently
-    yet). A unit fully resets (`reset_unit()`: offline, factory address,
-    stats zeroed, `rxqueue` back to 0) the moment its open count goes
-    0->1, then (M5) has its config file read -- "config re-read on next
-    open" now means exactly this. No separate unit task -- echo completes
-    synchronously inside `BeginIO` on the calling task; that path itself
-    still never touches dos.library (only `open()`'s M5 config read
-    does), so the echo/delivery path's own 1.3 compliance is unchanged.
+  - **M6**: crossover mode. A unit is either standalone echo (unchanged)
+    or crossover-paired with exactly one other unit -- config-only
+    concept (`mode=echo|crossover`, `peer=<unit>`), compiled-in default of
+    units 2<->3 paired, everything else echo. `do_write()` now resolves a
+    delivery TARGET (`unit` for echo, `&sld->sld_Units[unit->su_Peer]` for
+    crossover) and uses real, unswapped addressing for any crossover write
+    (src = writer's own station, dst = exactly what was specified) --
+    fixing a latent M4 bug where echo's own broadcast/multicast reused the
+    swap machinery's `src=ios2_DstAddr` line unconditionally, so a
+    broadcast frame's "source" was wrongly the broadcast address itself
+    (never caught since M4's tests only checked delivered destination).
+    `deliver_packet()` gained real destination-address filtering for
+    crossover-mode targets (`dest_matches_unit()`: unicast/broadcast/
+    joined-multicast, or the specific candidate reader's own
+    `SANA2OPF_PROM` -- finally given real meaning, previously ignored
+    entirely). Echo mode stays fully unfiltered by design. `SANA2LOOP_NUM_UNITS`
+    is now 5 (was 4): a spare unit 4 exists so M5's malformed-config test
+    and M6's crossover test (needing units 2 and 3 to both open cleanly)
+    don't collide over the same fixture. See `docs/sana2-notes.md`'s M6
+    section for the full story.
+  - 5 units pre-allocated in the device base (unit 0 wired for echo by
+    default; units 2-3 default-paired for crossover; unit 4 spare/echo,
+    reserved for on-target tests needing a fixture-free unit). A unit
+    fully resets (`reset_unit()`: offline, factory address, stats zeroed,
+    `rxqueue` back to 0, mode/peer to their compiled-in default) the
+    moment its open count goes 0->1, then (M5) has its config file read --
+    "config re-read on next open" now means exactly this. No separate
+    unit task -- echo completes synchronously inside `BeginIO` on the
+    calling task; that path itself still never touches dos.library (only
+    `open()`'s M5 config read does), so the echo/delivery path's own 1.3
+    compliance is unchanged.
 - `src/sanainfo.c` -- `SanaInfo`, the Phase 1 validation tool: opens a unit,
   optionally issues `S2_ONLINE`/`S2_OFFLINE`, prints `S2_DEVICEQUERY` +
   station address. Normal clib2 CLI program (V36+ Exec calls -- see the
@@ -127,8 +149,7 @@ see `tests/copperline/`) before being considered complete.
   reason specific to itself (not the device): see the comment block at its
   top for a real on-target bug this tripped over and how it was found.
 
-Not yet done: crossover pairs, fault injection knobs, pcap replay/record,
-`SanaDump`/`SanaSend`.
+Not yet done: fault injection knobs, pcap replay/record, `SanaDump`/`SanaSend`.
 
 ## Architecture
 
@@ -189,7 +210,7 @@ pinned `ghcr.io/reinauer/container-amiga-gcc` image narrator.wyoming uses
 
 `make docker` has been run successfully in this environment (both binaries
 build clean), and `make copperline-smoke` has confirmed every sub-test
-through M5 on-target against both bundled AROS and real Kickstart 1.3 (see
+through M6 on-target against both bundled AROS and real Kickstart 1.3 (see
 "Testing under Copperline" below and `tests/copperline/sana2test.c`'s
 `SUB=` list).
 

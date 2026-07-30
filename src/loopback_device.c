@@ -65,9 +65,17 @@
 #define DEVICE_PRIORITY   0
 
 /* Unit 0 is the Phase-1 echo default (per the proposal's mode-selection
- * plan). Units 1-3 exist so Phase 2 crossover pairs have somewhere to go
- * without changing the device base layout again. */
-#define SANA2LOOP_NUM_UNITS   4
+ * plan). Units 2-3 default to a crossover pair (M6); unit 1 stays echo by
+ * default too, both so a plain "no config at all" boot still has more
+ * than one echo-mode unit available and to leave the M6 crossover default
+ * (2<->3) as the sole example of it, rather than making every remaining
+ * unit crossover-paired. Unit 4 is a spare, echo-default unit reserved for
+ * on-target tests that need a unit no other test already has a fixture
+ * or expectation riding on (see tests/copperline/run.sh's per-unit
+ * config fixture layout -- M5's malformed-config test lives there
+ * specifically so M6's crossover test can rely on units 2 and 3 both
+ * opening cleanly). */
+#define SANA2LOOP_NUM_UNITS   5
 #define SANA2LOOP_DEFAULT_MTU 1500
 /* Ethernet dst[6]+src[6]+type[2] -- the allowance SANA2IOF_RAW adds on top
  * of su_MTU (docs/PLAN.md's M4 entry: "SANA2IOF_RAW (buffer -> MTU+14)").
@@ -121,10 +129,10 @@ struct DosLibrary *DOSBase;
 /* M5 config-file infrastructure: ENV:sana2loop/unitN.config, falling back
  * to S:sana2loop/unitN.config, read once at first-open (unit_OpenCnt
  * 0->1, same trigger as reset_unit()) and only from a real Process opener
- * -- see read_unit_config()'s own comment. Only `mtu` and `rxqueue` are
- * recognized here: those are the only two per-unit knobs that already
- * exist as real device state today. The proposal's full key vocabulary
- * (mode/peer for M6 crossover; seed/droppct/duppct/reorder/truncate/
+ * -- see read_unit_config()'s own comment. `mtu`/`rxqueue` (M5) and
+ * `mode`/`peer` (M6) are recognized here: those are the only per-unit
+ * knobs that already exist as real device state today. The proposal's
+ * remaining key vocabulary (seed/droppct/duppct/reorder/truncate/
  * oversilent/offlineafter/onlineafter for M7 fault injection; replay/
  * record/replaymode/recordmax for M8-M9) has nothing to configure yet --
  * adding parser support for a key with no consuming feature behind it
@@ -140,9 +148,21 @@ struct DosLibrary *DOSBase;
  * 1.3's limited chip/fast memory pool via runaway EchoPacket queuing. */
 #define SANA2LOOP_CONFIG_MAX_RXQUEUE 64
 
+/* M6: a unit is either a standalone echo loopback (Phase 1 behavior,
+ * unchanged) or crossover-paired with exactly one other unit (a real,
+ * separately-addressed peer -- see do_write()/deliver_packet()'s own
+ * comments for how addressing and receive filtering differ between the
+ * two). Plain ints, not something pulled from devices/sana2.h -- SANA-II
+ * itself has no concept of "mode", this is entirely this device's own
+ * config surface. */
+#define SANA2LOOP_MODE_ECHO      0
+#define SANA2LOOP_MODE_CROSSOVER 1
+
 struct UnitConfig {
     ULONG mtu;
     ULONG rxqueue;
+    ULONG mode;
+    ULONG peer;
 };
 
 static char CONFIG_ENV_PREFIX[] = "ENV:sana2loop/unit";
@@ -234,6 +254,30 @@ static BOOL parse_config_line(struct UnitConfig *cfg, const char *line, const ch
         if (value > SANA2LOOP_CONFIG_MAX_RXQUEUE)
             return FALSE;
         cfg->rxqueue = value;
+        return TRUE;
+    }
+    if (key_matches(line, eq, "mode")) {
+        /* key_matches() is a generic byte-range-equals-literal compare,
+         * not specifically about keys -- reused here for the value too. */
+        if (key_matches(eq + 1, line_end, "echo")) {
+            cfg->mode = SANA2LOOP_MODE_ECHO;
+            return TRUE;
+        }
+        if (key_matches(eq + 1, line_end, "crossover")) {
+            cfg->mode = SANA2LOOP_MODE_CROSSOVER;
+            return TRUE;
+        }
+        /* "replay" is a real future value (M8-M9) but has nothing to
+         * configure yet -- same reasoning as the keys not recognized at
+         * all above, just at the value level instead. */
+        return FALSE;
+    }
+    if (key_matches(line, eq, "peer")) {
+        if (!parse_ulong(eq + 1, line_end, &value))
+            return FALSE;
+        if (value >= SANA2LOOP_NUM_UNITS)
+            return FALSE;
+        cfg->peer = value;
         return TRUE;
     }
     return FALSE; /* unrecognized key -- fail-fast, not silently ignored */
@@ -343,7 +387,22 @@ static BOOL read_unit_config(struct UnitConfig *cfg, UBYTE unit_index)
     if (len < 0)
         return FALSE; /* a real I/O error reading a file that DID exist */
 
-    return parse_config_buffer(cfg, cfgbuf, len);
+    if (!parse_config_buffer(cfg, cfgbuf, len))
+        return FALSE;
+
+    /* Cross-field check, not expressible per-line: crossover mode needs a
+     * real, distinct peer. Catches both an explicit bad `peer=` value and
+     * `mode=crossover` given with no `peer=` at all -- units 0/1's
+     * compiled-in default peer is themselves (reset_unit()), which this
+     * rejects same as any other self-referencing or out-of-range value.
+     * Units 2/3 never hit this: their own compiled-in defaults are
+     * already a valid mutual pair, and this only runs when a config file
+     * actually exists to override them. */
+    if (cfg->mode == SANA2LOOP_MODE_CROSSOVER &&
+        (cfg->peer >= SANA2LOOP_NUM_UNITS || cfg->peer == unit_index))
+        return FALSE;
+
+    return TRUE;
 }
 
 /* One echoed packet, queued either waiting for a CMD_READ (su_PendingData)
@@ -380,6 +439,14 @@ struct Sana2LoopUnit {
                                           SANA-II drop semantics (the default --
                                           M5's config knob overrides this) */
     ULONG       su_PendingDataCount;  /* current su_PendingData depth */
+    ULONG       su_Mode;              /* SANA2LOOP_MODE_ECHO or _CROSSOVER (M6) */
+    ULONG       su_Peer;              /* crossover only: the OTHER unit index
+                                          packets written here are delivered
+                                          to. Meaningless (defaults to this
+                                          unit's own index) in echo mode --
+                                          that self-reference is exactly what
+                                          catches "crossover with no peer
+                                          configured" in read_unit_config(). */
     struct Sana2DeviceStats su_Stats;
     /* S2_TRACKTYPE table: fixed SANA2LOOP_MAX_TRACKED_TYPES slots, shared
      * unit-wide state (any open can track/untrack/query any type) --
@@ -389,10 +456,11 @@ struct Sana2LoopUnit {
     struct Sana2PacketTypeStats su_TypeStats[SANA2LOOP_MAX_TRACKED_TYPES];
     /* S2_ADD/DELMULTICASTADDRESS table: fixed SANA2LOOP_MAX_MULTICAST
      * slots, refcounted -- two opens joining the same group both need to
-     * leave before it's actually dropped. Bookkeeping only: delivery stays
-     * unit-wide and unfiltered by group membership, same as it always has
-     * been (this device has no per-open receive filtering at all yet, so
-     * there's nothing for group membership to gate). */
+     * leave before it's actually dropped. Consulted for real once M6 gives
+     * crossover-mode delivery destination-address filtering (see
+     * dest_matches_unit()); echo mode still doesn't filter by group
+     * membership at all (every opener of an echo unit already sees
+     * everything on it, unchanged since Phase 1). */
     BOOL        su_McastInUse[SANA2LOOP_MAX_MULTICAST];
     UBYTE       su_McastAddr[SANA2LOOP_MAX_MULTICAST][6];
     ULONG       su_McastRefCount[SANA2LOOP_MAX_MULTICAST];
@@ -437,6 +505,14 @@ struct Sana2LoopOpen {
     Sana2CopyFunc          slo_CopyToBuff;
     Sana2CopyFunc          slo_CopyFromBuff;
     struct Hook           *slo_PacketFilter;  /* recorded; not yet dispatched */
+    BOOL                   slo_Promiscuous;   /* SANA2OPF_PROM at open time --
+                                                  ignored in echo mode (every
+                                                  opener already sees
+                                                  everything on its unit), but
+                                                  in crossover mode (M6) lets
+                                                  a specific queued read
+                                                  accept a packet regardless
+                                                  of destination address */
 };
 
 /*-----------------------------------------------------------
@@ -754,6 +830,23 @@ static void reset_unit(struct Sana2LoopUnit *unit)
     unit->su_PendingDataCount = 0;
     unit->su_Configured  = FALSE;
 
+    /* Compiled-in default wiring (docs/PLAN.md M6): units 2 and 3 are a
+     * crossover pair, every other unit is standalone echo. A config file
+     * (M5/M6) can override either half of this per unit -- read_unit_config()
+     * validates crossover mode always ends up with a real, distinct peer;
+     * an echo-mode unit's su_Peer defaulting to itself here is what makes
+     * "mode=crossover with no peer=" concretely fail that check instead of
+     * silently doing something (self-delivery would just be echo again,
+     * quietly, which is not what a config author asking for crossover
+     * meant). */
+    if (unit->su_Index == 2 || unit->su_Index == 3) {
+        unit->su_Mode = SANA2LOOP_MODE_CROSSOVER;
+        unit->su_Peer = (unit->su_Index == 2) ? 3 : 2;
+    } else {
+        unit->su_Mode = SANA2LOOP_MODE_ECHO;
+        unit->su_Peer = unit->su_Index;
+    }
+
     /* Locally-administered (bit set in the first octet) fake address,
      * spelling "S2L" in the middle bytes so it's recognisable in a packet
      * dump; last byte is the unit number. This is the FACTORY default --
@@ -892,12 +985,16 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
             struct UnitConfig cfg;
             cfg.mtu     = unit->su_MTU;
             cfg.rxqueue = unit->su_RxQueueMax;
+            cfg.mode    = unit->su_Mode;
+            cfg.peer    = unit->su_Peer;
             if (!read_unit_config(&cfg, unit->su_Index)) {
                 io->io_Error = S2ERR_BAD_ARGUMENT;
                 return;
             }
             unit->su_MTU        = cfg.mtu;
             unit->su_RxQueueMax = cfg.rxqueue;
+            unit->su_Mode       = cfg.mode;
+            unit->su_Peer       = cfg.peer;
         }
     }
 
@@ -912,6 +1009,13 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
      * NULL); apply_buffer_mgmt_tags() reads it before we overwrite the
      * field below with our own cookie. */
     apply_buffer_mgmt_tags(slo, (struct TagItem *)io2->ios2_BufferManagement);
+    /* SANA2OPF_PROM: irrelevant in echo mode (every opener already sees
+     * everything on its unit, unchanged since Phase 1), but in crossover
+     * mode (M6) lets THIS open's queued reads accept a packet regardless
+     * of destination address -- see dest_matches_unit(). SANA2OPF_MINE
+     * still has no meaning here: this device has no hardware resource to
+     * exclusively reserve. */
+    slo->slo_Promiscuous = (flags & SANA2OPF_PROM) ? TRUE : FALSE;
 
     io->io_Device = (struct Device *)dev;
     io->io_Unit   = &unit->su_Unit;
@@ -920,9 +1024,6 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
     io2->ios2_BufferManagement = slo; /* per SANA-II: the opener must copy
                                           this into every future request */
     io->io_Error = 0;
-    (void)flags; /* SANA2OPF_MINE / SANA2OPF_PROM: no exclusivity or
-                    promiscuous distinction in a software loopback -- every
-                    opener already sees everything on its unit. */
 }
 
 /* device dependent close function
@@ -951,10 +1052,43 @@ close(struct Library *dev asm("a6"), struct IORequest *io asm("a1"))
     return 0;
 }
 
+/* Does `dst` make a packet deliverable to `unit` at all? Only consulted
+ * for CROSSOVER-mode delivery (echo mode's reflexive self-delivery never
+ * filters by destination -- see deliver_packet()'s own comment): standard
+ * 802.3 receive filtering -- unicast to this unit's own current station
+ * address, the all-1s broadcast address, or a multicast group this unit
+ * has joined (M4's su_McastInUse/su_McastAddr table) -- OR the specific
+ * candidate reader is promiscuous (`prom`, from that request's own open
+ * cookie), which accepts a packet regardless of its destination.
+ * Must be called under Disable() (it touches su_McastInUse/su_McastAddr,
+ * the same shared table find_mcast_locked() already requires that of). */
+static BOOL dest_matches_unit(struct Sana2LoopUnit *unit, const UBYTE *dst, BOOL prom)
+{
+    int k;
+    BOOL station_match = TRUE, all_ff = TRUE;
+
+    if (prom)
+        return TRUE;
+
+    for (k = 0; k < 6; k++) {
+        if (dst[k] != unit->su_Station[k])
+            station_match = FALSE;
+        if (dst[k] != 0xFF)
+            all_ff = FALSE;
+    }
+    if (station_match || all_ff)
+        return TRUE;
+
+    if ((dst[0] & 0x01) && find_mcast_locked(unit, dst) >= 0)
+        return TRUE;
+
+    return FALSE;
+}
+
 /* Delivers one packet to `unit` (the receiving side -- for echo that's the
- * same unit the write happened on; a later milestone's crossover mode
- * calls this on the PEER unit instead, which is the whole reason this is
- * its own function rather than inlined into CMD_WRITE).
+ * same unit the write happened on; crossover mode (M6) calls this on the
+ * PEER unit instead, which is the whole reason this is its own function
+ * rather than inlined into CMD_WRITE).
  *
  * SANA-II precedence, strictly: a pending CMD_READ queued for this exact
  * ios2_PacketType, else a pending S2_READORPHAN (any type), else -- only
@@ -965,12 +1099,25 @@ close(struct Library *dev asm("a6"), struct IORequest *io asm("a1"))
  * rejected. `pkt` is always consumed by this call: delivered, queued, or
  * freed, never left dangling.
  *
+ * For a CROSSOVER-mode `unit`, every candidate (typed read, orphan read,
+ * or the rxqueue itself) must also pass dest_matches_unit() -- a real
+ * link has two independently-addressed ends, so "does this frame's
+ * destination actually belong to me" is a real question here, unlike echo
+ * mode (still fully unfiltered -- there is no separate peer to have
+ * misaddressed the packet at, so filtering would only get in the way of
+ * the simplest test scenario, per the original Phase 1 design intent).
+ * rxqueue never gets promiscuous treatment (`prom=FALSE` always at that
+ * check): it's a shared, unit-wide buffer for a not-yet-known future
+ * reader, not a specific open's own queued request, so there is no
+ * meaningful "this reader is promiscuous" to consult at queue time.
+ *
  * Must never be called with a Disable() already held by the caller: it
  * calls consumer hooks and ReplyMsg, neither of which may run disabled. */
 static void deliver_packet(struct Sana2LoopUnit *unit, struct EchoPacket *pkt)
 {
     struct IOSana2Req *waiting = NULL;
     BOOL queued = FALSE;
+    BOOL crossover = (unit->su_Mode == SANA2LOOP_MODE_CROSSOVER);
 
     Disable();
     unit->su_Stats.PacketsReceived++;
@@ -980,15 +1127,30 @@ static void deliver_packet(struct Sana2LoopUnit *unit, struct EchoPacket *pkt)
              io->ios2_Req.io_Message.mn_Node.ln_Succ;
              io = next) {
             next = (struct IOSana2Req *)io->ios2_Req.io_Message.mn_Node.ln_Succ;
-            if (io->ios2_PacketType == pkt->ep_PacketType) {
+            if (io->ios2_PacketType == pkt->ep_PacketType &&
+                (!crossover || dest_matches_unit(unit, pkt->ep_DstAddr,
+                    ((struct Sana2LoopOpen *)io->ios2_BufferManagement)->slo_Promiscuous))) {
                 Remove((struct Node *)io);
                 waiting = io;
                 break;
             }
         }
-        if (!waiting)
-            waiting = (struct IOSana2Req *)RemHead(&unit->su_OrphanReads);
-        if (!waiting && unit->su_PendingDataCount < unit->su_RxQueueMax) {
+        if (!waiting) {
+            struct IOSana2Req *oio, *onext;
+            for (oio = (struct IOSana2Req *)unit->su_OrphanReads.lh_Head;
+                 oio->ios2_Req.io_Message.mn_Node.ln_Succ;
+                 oio = onext) {
+                onext = (struct IOSana2Req *)oio->ios2_Req.io_Message.mn_Node.ln_Succ;
+                if (!crossover || dest_matches_unit(unit, pkt->ep_DstAddr,
+                        ((struct Sana2LoopOpen *)oio->ios2_BufferManagement)->slo_Promiscuous)) {
+                    Remove((struct Node *)oio);
+                    waiting = oio;
+                    break;
+                }
+            }
+        }
+        if (!waiting && unit->su_PendingDataCount < unit->su_RxQueueMax &&
+            (!crossover || dest_matches_unit(unit, pkt->ep_DstAddr, FALSE))) {
             AddTail(&unit->su_PendingData, (struct Node *)pkt);
             unit->su_PendingDataCount++;
             queued = TRUE;
@@ -1031,23 +1193,33 @@ static void deliver_packet(struct Sana2LoopUnit *unit, struct EchoPacket *pkt)
 }
 
 /* Shared body for CMD_WRITE and its S2_BROADCAST/S2_MULTICAST cousins --
- * all three ultimately hand one packet to deliver_packet(); they differ
- * only in what ios2_DstAddr means and whether the reader should be told
- * that unit's own station address, or the actual destination:
- *  - plain CMD_WRITE (echo_dst_to_self=TRUE): unchanged since Phase 1 --
- *    the reader sees itself as the recipient (this unit's own station
- *    address), the "src/dst addresses swapped" echo semantics.
- *  - S2_BROADCAST/S2_MULTICAST (echo_dst_to_self=FALSE): the reader must
- *    see the ACTUAL destination (all-1s broadcast, or the caller's chosen
- *    multicast group) or SANA2IOF_BCAST/MCAST (set in
- *    fill_read_from_packet(), from this same address) would never mean
- *    anything on the receiving end. */
-static void do_write(struct Sana2LoopUnit *unit, struct IORequest *io0,
-                      struct IOSana2Req *io, BOOL echo_dst_to_self)
+ * all three ultimately hand one packet to deliver_packet(). `is_plain_write`
+ * distinguishes CMD_WRITE (TRUE) from S2_BROADCAST/S2_MULTICAST (FALSE);
+ * combined with `unit`'s own mode, that decides addressing:
+ *  - Echo mode's plain CMD_WRITE (the only case that swaps): unchanged
+ *    since Phase 1 -- there's no real peer to ask, so the reader on this
+ *    SAME unit is told it's the recipient (this unit's own station
+ *    address) and that whatever address it wrote to is the "sender".
+ *  - Every other case (crossover mode of ANY write type; echo's own
+ *    S2_BROADCAST/S2_MULTICAST) uses real, unswapped addressing: src is
+ *    this unit's own actual station address (a real driver never lets a
+ *    caller fake their own source address -- fixing a latent bug from
+ *    M4, whose src=dst-of-write shortcut was never caught because M4's
+ *    own broadcast/multicast tests only ever checked the delivered dst),
+ *    dst is exactly what the caller specified (S2_BROADCAST already
+ *    forced it to all-1s before do_write() was ever called).
+ *
+ * `sld` is needed only to reach a crossover peer's struct
+ * Sana2LoopUnit -- echo-mode writes never touch it. */
+static void do_write(struct Sana2LoopDevice *sld, struct Sana2LoopUnit *unit,
+                      struct IORequest *io0, struct IOSana2Req *io, BOOL is_plain_write)
 {
     struct EchoPacket *pkt;
+    struct Sana2LoopUnit *target;
     struct Sana2LoopOpen *writer_slo = (struct Sana2LoopOpen *)io->ios2_BufferManagement;
     ULONG max_len = unit->su_MTU;
+    BOOL swap_to_self;
+    int k;
 
     if (io->ios2_Req.io_Flags & SANA2IOF_RAW)
         max_len += SANA2LOOP_RAW_HDR_SIZE;
@@ -1068,12 +1240,15 @@ static void do_write(struct Sana2LoopUnit *unit, struct IORequest *io0,
     }
     pkt->ep_Length     = io->ios2_DataLength;
     pkt->ep_PacketType = io->ios2_PacketType;
-    CopyMem(io->ios2_DstAddr, pkt->ep_SrcAddr, SANA2_MAX_ADDR_BYTES);
-    if (echo_dst_to_self) {
-        int k;
+
+    swap_to_self = is_plain_write && (unit->su_Mode == SANA2LOOP_MODE_ECHO);
+    if (swap_to_self) {
+        CopyMem(io->ios2_DstAddr, pkt->ep_SrcAddr, SANA2_MAX_ADDR_BYTES);
         for (k = 0; k < SANA2_MAX_ADDR_BYTES; k++)
             pkt->ep_DstAddr[k] = (k < 6) ? unit->su_Station[k] : 0;
     } else {
+        for (k = 0; k < SANA2_MAX_ADDR_BYTES; k++)
+            pkt->ep_SrcAddr[k] = (k < 6) ? unit->su_Station[k] : 0;
         CopyMem(io->ios2_DstAddr, pkt->ep_DstAddr, SANA2_MAX_ADDR_BYTES);
     }
     if (!writer_slo->slo_CopyFromBuff(pkt->ep_Data, io->ios2_Data, pkt->ep_Length)) {
@@ -1093,7 +1268,10 @@ static void do_write(struct Sana2LoopUnit *unit, struct IORequest *io0,
         }
     }
     Enable();
-    deliver_packet(unit, pkt);
+
+    target = (unit->su_Mode == SANA2LOOP_MODE_CROSSOVER)
+             ? &sld->sld_Units[unit->su_Peer] : unit;
+    deliver_packet(target, pkt);
 }
 
 /* device dependent beginio function */
@@ -1102,17 +1280,20 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
 {
     struct IOSana2Req *io = (struct IOSana2Req *)io0;
     struct Sana2LoopUnit *unit = (struct Sana2LoopUnit *)io0->io_Unit;
-    (void)dev;
+    struct Sana2LoopDevice *sld = (struct Sana2LoopDevice *)dev;
 
     io0->io_Error = 0;
 
     switch (io0->io_Command) {
 
     case CMD_WRITE:
-        /* Echo semantics: the address we were asked to send TO becomes the
-         * src the reader sees; the reader's dst is our own station address
-         * -- "src/dst addresses swapped", per the proposal. */
-        do_write(unit, io0, io, TRUE);
+        /* Echo mode: the address we were asked to send TO becomes the src
+         * the reader sees, and the reader's dst is our own station
+         * address -- "src/dst addresses swapped", per the proposal.
+         * Crossover mode uses real, unswapped addressing instead -- see
+         * do_write()'s own comment for why the mode check lives there,
+         * not here. */
+        do_write(sld, unit, io0, io, TRUE);
         break;
 
     case S2_BROADCAST:
@@ -1128,7 +1309,7 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
             for (k = 6; k < SANA2_MAX_ADDR_BYTES; k++)
                 io->ios2_DstAddr[k] = 0;
         }
-        do_write(unit, io0, io, FALSE);
+        do_write(sld, unit, io0, io, FALSE);
         break;
 
     case S2_MULTICAST:
@@ -1145,7 +1326,7 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
             io->ios2_WireError = S2WERR_BAD_MULTICAST;
             break;
         }
-        do_write(unit, io0, io, FALSE);
+        do_write(sld, unit, io0, io, FALSE);
         break;
 
     case CMD_READ: {
