@@ -105,6 +105,89 @@ updated from real traffic, not left at zero: `CMD_WRITE` bumps
 alive (immediate delivery or acceptance into the `rxqueue`), reserving
 `PacketsDropped` for the one outcome that's an actual loss.
 
+## `S2_BROADCAST`/`S2_MULTICAST`, multicast membership, `SANA2IOF_RAW` (M4)
+
+`S2_BROADCAST` is exactly `CMD_WRITE` with `ios2_DstAddr` forced to the
+all-1s Ethernet broadcast address first -- confirmed against a real driver
+(plipbox, `amiga/src/device.c`), which implements it as literally
+`memset(dst, 0xff, ...); /* fall through */ case CMD_WRITE:`. `S2_MULTICAST`
+is the same `CMD_WRITE` path but leaves the caller's `ios2_DstAddr` alone,
+only validating it actually has the Ethernet group bit set (low bit of the
+first octet) -- plipbox never implements `S2_MULTICAST` at all, so this
+validation is this device's own choice (the standard 802.3 convention, not
+a guess). A completed read's `SANA2IOF_BCAST`/`SANA2IOF_MCAST` flags
+(`ios2_Flags`, masked and recomputed every read) are derived from the
+delivered packet's actual destination address this same way: all-1s =
+broadcast (plipbox's own detection method, confirmed identical), else the
+group bit set = multicast (this device's own extension). A plain
+`CMD_WRITE`'s delivered destination is unaffected -- still always this
+unit's own station address, the original echo semantics -- only
+`S2_BROADCAST`/`S2_MULTICAST` writes let the reader see the real
+destination, or the flags would never mean anything.
+
+`S2_ADDMULTICASTADDRESS`/`S2_DELMULTICASTADDRESS` take the group address in
+`ios2_SrcAddr` (the same "single address of interest" convention
+`S2_CONFIGINTERFACE` already uses) and are refcounted in a fixed
+8-slot-per-unit table: joining an already-joined group just bumps the
+count, since this device's delivery was never filtered per-open membership
+in the first place (no per-open receive filtering exists here at all) --
+the table is honest bookkeeping, not a live filter. `S2WERR_MULTICAST_FULL`
+(11) is a real, dedicated wire error for a full table, unlike
+`S2_TRACKTYPE`'s table-full case (M3), which had no dedicated code to reuse.
+
+`SANA2IOF_RAW` here means only "relax the MTU-exceeded check by 14 bytes"
+(Ethernet's dst+src+type header size) -- deliberately narrow. This device
+does **not** reinterpret the buffer as a literal raw frame with an embedded
+header the way a real hardware driver does (plipbox's `write_frame()`/
+`read_frame()` genuinely copy/parse a 14-byte header in and out of the
+buffer) -- there's no real wire framing here to parse a header out of, so
+growing the size budget is the whole of what "raw" usefully means for a
+loopback device.
+
+### A real AmigaOS gotcha this surfaced: `SendIO()`/`DoIO()` clear `io_Flags`
+
+Both exec.library's `SendIO()` and `DoIO()` explicitly reset `io_Flags`
+before dispatching to a device -- confirmed from their own autodocs:
+`SendIO()` "will be set to zero before the request is sent," `DoIO()` "is
+always set to IOF_QUICK (0x01) before the internal device call." Neither
+preserves a caller-set bit like `SANA2IOF_RAW`. Only `amiga.lib`'s
+`BeginIO()` does ("equivalent to `SendIO()`, except that `io_Flags` is not
+cleared") -- confirmed against AROS's own open-source implementation of it
+(`compiler/alib/beginio.c`): a bare LVO -30 dispatch, nothing else, no
+`Forbid()`/`Permit()`, no other bookkeeping. A survey of real SANA-II
+client code (Olaf Barthel's `amiga-sana-ii-tftpclient`, an intentional
+reference SANA-II consumer) found it never touches `io_Flags`/
+`SANA2IOF_RAW`/`_BCAST`/`_MCAST` at all -- it has no need for raw-frame
+mode, so there's no real-world precedent to confirm this against beyond the
+autodocs and AROS's own source. `tests/copperline/sana2test.c`'s
+`flagged_begin_io()` reimplements `amiga.lib`'s `BeginIO()` by hand (this
+freestanding build links no amiga.lib) as a direct JSR to the device's
+BeginIO vector -- the standard exec device jump-table slot at LVO -30
+(`Open=-6, Close=-12, Expunge=-18, ExtFunc=-24, BeginIO=-30, AbortIO=-36`),
+exactly what `SendIO()`/`DoIO()` already jump to internally, just without
+their `io_Flags`-clearing side effect first.
+
+**A second, sharper lesson from chasing this down**: the first version of
+`flagged_begin_io()`'s inline asm passed `a1` as an input register (holding
+the `IORequest*`) but omitted it from the clobber list. This built cleanly
+and worked perfectly against Copperline's bundled AROS -- but hung
+indefinitely against a real Kickstart 1.3 ROM, reproducibly, even at a very
+generous benchmark timeout. `a1` is caller-scratch on m68k/Amiga (the
+callee is free to trash it), so GCC must be told so explicitly or it may
+make invalid assumptions about the register's value surviving the call
+depending on surrounding register pressure and codegen -- exactly the kind
+of undefined behavior that "happens to work" on one target/build and not
+another. The already-working `raw_put()` helper's own inline asm (calling
+`RawPutChar` via `jsr -516(%a6)`) already clobbers `a1` correctly, which is
+precisely why it never hit this. Fix: add `"a1"` to the clobber list
+alongside the other caller-scratch registers. **A hang that reproduces on
+real 1.3 but not AROS is not automatically a compatibility quirk to work
+around or document away (unlike the real, confirmed `CheckIO()` AROS
+quirk elsewhere in this file) -- treat it as a real bug until proven
+otherwise**, especially in hand-written inline asm, where AROS's emulation
+may simply be more forgiving of an incomplete clobber list than real
+hardware/ROM timing.
+
 ## `S2_DEVICEQUERY` convention (easy to get backwards)
 
 The caller pre-sets `ios2_StatData->SizeAvailable` to the size of *its own*

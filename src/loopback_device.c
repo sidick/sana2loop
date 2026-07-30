@@ -60,16 +60,33 @@
  * without changing the device base layout again. */
 #define SANA2LOOP_NUM_UNITS   4
 #define SANA2LOOP_DEFAULT_MTU 1500
-/* Fixed queued-packet buffer size. Per-unit configurable MTU (from
- * ENV:sana2loop/unitN.config) is a later phase; for now this is also the
- * hard cap enforced against ios2_DataLength. */
-#define SANA2LOOP_MAX_PACKET  1500
+/* Ethernet dst[6]+src[6]+type[2] -- the allowance SANA2IOF_RAW adds on top
+ * of su_MTU (docs/PLAN.md's M4 entry: "SANA2IOF_RAW (buffer -> MTU+14)").
+ * Scoped deliberately narrow: this device only relaxes the MTU-exceeded
+ * size check by this much when the flag is set, it does NOT reinterpret
+ * the buffer as a literal header-plus-payload frame the way a real
+ * hardware driver (e.g. plipbox) does -- there is no real wire framing
+ * here to parse a header out of, so growing the size budget is the whole
+ * of what "raw" usefully means for a loopback device. */
+#define SANA2LOOP_RAW_HDR_SIZE 14
+/* Fixed queued-packet buffer size: MTU plus the RAW allowance above, since
+ * a RAW write is still just one more CMD_WRITE-shaped packet through the
+ * exact same EchoPacket buffer -- it needs room for the biggest thing
+ * that's allowed to arrive, not just the plain MTU. Per-unit configurable
+ * MTU (from ENV:sana2loop/unitN.config) is a later phase; for now this is
+ * also the hard cap enforced against ios2_DataLength. */
+#define SANA2LOOP_MAX_PACKET  (SANA2LOOP_DEFAULT_MTU + SANA2LOOP_RAW_HDR_SIZE)
 /* S2_TRACKTYPE table size: fixed, not dynamically grown -- consistent with
  * this device's "no hidden buffers/allocations behind the caller's back"
  * ethos elsewhere (rxqueue=0 default, fixed-size EchoPacket). A caller that
  * needs more simultaneously-tracked types gets S2ERR_NO_RESOURCES, same as
  * any other fixed-capacity resource here. */
 #define SANA2LOOP_MAX_TRACKED_TYPES 8
+
+/* S2_ADD/DELMULTICASTADDRESS table size: same fixed-capacity reasoning as
+ * SANA2LOOP_MAX_TRACKED_TYPES -- a caller that needs more simultaneously
+ * joined groups gets S2ERR_NO_RESOURCES/S2WERR_MULTICAST_FULL. */
+#define SANA2LOOP_MAX_MULTICAST 8
 
 /* SysBase -- the one file-scope global this file needs. Safe here: this is
  * a plain -nostdlib freestanding build (no -fbaserel), so globals use
@@ -119,6 +136,15 @@ struct Sana2LoopUnit {
     BOOL        su_TypeInUse[SANA2LOOP_MAX_TRACKED_TYPES];
     ULONG       su_TypeTracked[SANA2LOOP_MAX_TRACKED_TYPES];
     struct Sana2PacketTypeStats su_TypeStats[SANA2LOOP_MAX_TRACKED_TYPES];
+    /* S2_ADD/DELMULTICASTADDRESS table: fixed SANA2LOOP_MAX_MULTICAST
+     * slots, refcounted -- two opens joining the same group both need to
+     * leave before it's actually dropped. Bookkeeping only: delivery stays
+     * unit-wide and unfiltered by group membership, same as it always has
+     * been (this device has no per-open receive filtering at all yet, so
+     * there's nothing for group membership to gate). */
+    BOOL        su_McastInUse[SANA2LOOP_MAX_MULTICAST];
+    UBYTE       su_McastAddr[SANA2LOOP_MAX_MULTICAST][6];
+    ULONG       su_McastRefCount[SANA2LOOP_MAX_MULTICAST];
     struct List su_PendingReads;      /* queued, TYPED CMD_READ IORequests */
     struct List su_OrphanReads;       /* queued S2_READORPHAN IORequests (untyped) */
     struct List su_PendingData;       /* packets awaiting a CMD_READ/S2_READORPHAN,
@@ -298,6 +324,33 @@ static struct Sana2PacketTypeStats *find_tracked_locked(struct Sana2LoopUnit *un
     return NULL;
 }
 
+/* Plain 6-byte compare, not memcmp(): this freestanding build has no libc,
+ * and (per this file's own hard-won lesson from M3) even an innocent-looking
+ * fixed-count loop can get miscompiled into a libc call under -O2 -- but
+ * that idiom recognition targets COPY loops (store = load), not compare
+ * loops, so this one is safe as an ordinary loop. */
+static BOOL mcast_addr_eq(const UBYTE *a, const UBYTE *b)
+{
+    int k;
+    for (k = 0; k < 6; k++)
+        if (a[k] != b[k])
+            return FALSE;
+    return TRUE;
+}
+
+/* Looks up a joined S2_ADDMULTICASTADDRESS entry by group address; returns
+ * -1 if `addr` isn't currently joined. Same Disable()-held-by-caller
+ * contract as find_tracked_locked() above, for the same reason (shared
+ * unit-wide table any open can mutate). */
+static int find_mcast_locked(struct Sana2LoopUnit *unit, const UBYTE *addr)
+{
+    int i;
+    for (i = 0; i < SANA2LOOP_MAX_MULTICAST; i++)
+        if (unit->su_McastInUse[i] && mcast_addr_eq(unit->su_McastAddr[i], addr))
+            return i;
+    return -1;
+}
+
 /* Aborts any request still queued (reads or event waits) under a cookie
  * that's about to be freed -- a well-behaved consumer closes with nothing
  * outstanding, but a test device should survive one that doesn't rather
@@ -342,6 +395,35 @@ static BOOL fill_read_from_packet(struct IOSana2Req *io, struct EchoPacket *pkt)
     CopyMem(pkt->ep_DstAddr, io->ios2_DstAddr, SANA2_MAX_ADDR_BYTES);
     io->ios2_PacketType = pkt->ep_PacketType;
     io->ios2_DataLength = pkt->ep_Length;
+
+    /* SANA2IOF_BCAST/MCAST: informational flags on a completed read,
+     * derived from the packet's actual destination address -- standard
+     * Ethernet convention (all-1s = broadcast; else the low bit of the
+     * first octet = group/multicast address). Cross-checked against a real
+     * driver (plipbox) for the broadcast half specifically: it detects
+     * SANA2IOF_BCAST with exactly this all-1s scan. plipbox never
+     * implements multicast at all, so the low-bit half is this device's
+     * own choice, not something it confirms -- but it's the standard
+     * 802.3 convention, not a guess. Recomputed on every read, masking any
+     * stale bits first, since a caller may reuse one IORequest across many
+     * commands without resetting io_Flags itself (this harness does
+     * exactly that -- see sana2test.c's send_io()/do_io() comment). */
+    io->ios2_Req.io_Flags &= ~(SANA2IOF_BCAST | SANA2IOF_MCAST);
+    {
+        int k;
+        BOOL all_ff = TRUE;
+        for (k = 0; k < 6; k++) {
+            if (pkt->ep_DstAddr[k] != 0xFF) {
+                all_ff = FALSE;
+                break;
+            }
+        }
+        if (all_ff)
+            io->ios2_Req.io_Flags |= SANA2IOF_BCAST;
+        else if (pkt->ep_DstAddr[0] & 0x01)
+            io->ios2_Req.io_Flags |= SANA2IOF_MCAST;
+    }
+
     return slo->slo_CopyToBuff(io->ios2_Data, pkt->ep_Data, pkt->ep_Length);
 }
 
@@ -448,6 +530,9 @@ static void reset_unit(struct Sana2LoopUnit *unit)
 
     for (i = 0; i < SANA2LOOP_MAX_TRACKED_TYPES; i++)
         unit->su_TypeInUse[i] = FALSE;
+
+    for (i = 0; i < SANA2LOOP_MAX_MULTICAST; i++)
+        unit->su_McastInUse[i] = FALSE;
 
     unit->su_Stats.PacketsReceived      = 0;
     unit->su_Stats.PacketsSent          = 0;
@@ -674,6 +759,72 @@ static void deliver_packet(struct Sana2LoopUnit *unit, struct EchoPacket *pkt)
     /* else: queued -- pkt now belongs to su_PendingData, nothing more to do */
 }
 
+/* Shared body for CMD_WRITE and its S2_BROADCAST/S2_MULTICAST cousins --
+ * all three ultimately hand one packet to deliver_packet(); they differ
+ * only in what ios2_DstAddr means and whether the reader should be told
+ * that unit's own station address, or the actual destination:
+ *  - plain CMD_WRITE (echo_dst_to_self=TRUE): unchanged since Phase 1 --
+ *    the reader sees itself as the recipient (this unit's own station
+ *    address), the "src/dst addresses swapped" echo semantics.
+ *  - S2_BROADCAST/S2_MULTICAST (echo_dst_to_self=FALSE): the reader must
+ *    see the ACTUAL destination (all-1s broadcast, or the caller's chosen
+ *    multicast group) or SANA2IOF_BCAST/MCAST (set in
+ *    fill_read_from_packet(), from this same address) would never mean
+ *    anything on the receiving end. */
+static void do_write(struct Sana2LoopUnit *unit, struct IORequest *io0,
+                      struct IOSana2Req *io, BOOL echo_dst_to_self)
+{
+    struct EchoPacket *pkt;
+    struct Sana2LoopOpen *writer_slo = (struct Sana2LoopOpen *)io->ios2_BufferManagement;
+    ULONG max_len = unit->su_MTU;
+
+    if (io->ios2_Req.io_Flags & SANA2IOF_RAW)
+        max_len += SANA2LOOP_RAW_HDR_SIZE;
+
+    if (!unit->su_Online) {
+        io0->io_Error = S2ERR_OUTOFSERVICE;
+        return;
+    }
+    if (io->ios2_DataLength > max_len || io->ios2_DataLength > SANA2LOOP_MAX_PACKET) {
+        io0->io_Error = S2ERR_MTU_EXCEEDED;
+        return;
+    }
+
+    pkt = AllocMem(sizeof(struct EchoPacket), MEMF_CLEAR);
+    if (!pkt) {
+        io0->io_Error = S2ERR_NO_RESOURCES;
+        return;
+    }
+    pkt->ep_Length     = io->ios2_DataLength;
+    pkt->ep_PacketType = io->ios2_PacketType;
+    CopyMem(io->ios2_DstAddr, pkt->ep_SrcAddr, SANA2_MAX_ADDR_BYTES);
+    if (echo_dst_to_self) {
+        int k;
+        for (k = 0; k < SANA2_MAX_ADDR_BYTES; k++)
+            pkt->ep_DstAddr[k] = (k < 6) ? unit->su_Station[k] : 0;
+    } else {
+        CopyMem(io->ios2_DstAddr, pkt->ep_DstAddr, SANA2_MAX_ADDR_BYTES);
+    }
+    if (!writer_slo->slo_CopyFromBuff(pkt->ep_Data, io->ios2_Data, pkt->ep_Length)) {
+        FreeMem(pkt, sizeof(struct EchoPacket));
+        io0->io_Error = S2ERR_NO_RESOURCES;
+        io->ios2_WireError = S2WERR_BUFF_ERROR;
+        return;
+    }
+
+    Disable();
+    unit->su_Stats.PacketsSent++;
+    {
+        struct Sana2PacketTypeStats *ts = find_tracked_locked(unit, pkt->ep_PacketType);
+        if (ts) {
+            ts->PacketsSent++;
+            ts->BytesSent += pkt->ep_Length;
+        }
+    }
+    Enable();
+    deliver_packet(unit, pkt);
+}
+
 /* device dependent beginio function */
 static void __attribute__((used))
 begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
@@ -686,55 +837,45 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
 
     switch (io0->io_Command) {
 
-    case CMD_WRITE: {
-        struct EchoPacket *pkt;
-        struct Sana2LoopOpen *writer_slo = (struct Sana2LoopOpen *)io->ios2_BufferManagement;
-
-        if (!unit->su_Online) {
-            io0->io_Error = S2ERR_OUTOFSERVICE;
-            break;
-        }
-        if (io->ios2_DataLength > unit->su_MTU || io->ios2_DataLength > SANA2LOOP_MAX_PACKET) {
-            io0->io_Error = S2ERR_MTU_EXCEEDED;
-            break;
-        }
-
-        pkt = AllocMem(sizeof(struct EchoPacket), MEMF_CLEAR);
-        if (!pkt) {
-            io0->io_Error = S2ERR_NO_RESOURCES;
-            break;
-        }
-        pkt->ep_Length     = io->ios2_DataLength;
-        pkt->ep_PacketType = io->ios2_PacketType;
+    case CMD_WRITE:
         /* Echo semantics: the address we were asked to send TO becomes the
          * src the reader sees; the reader's dst is our own station address
          * -- "src/dst addresses swapped", per the proposal. */
-        CopyMem(io->ios2_DstAddr, pkt->ep_SrcAddr, SANA2_MAX_ADDR_BYTES);
+        do_write(unit, io0, io, TRUE);
+        break;
+
+    case S2_BROADCAST:
+        /* Same as CMD_WRITE, with the destination forced to the all-1s
+         * Ethernet broadcast address -- confirmed against a real driver
+         * (plipbox), which implements S2_BROADCAST as exactly this
+         * "stomp ios2_DstAddr, then fall into the normal write path"
+         * pattern. */
         {
             int k;
-            for (k = 0; k < SANA2_MAX_ADDR_BYTES; k++)
-                pkt->ep_DstAddr[k] = (k < 6) ? unit->su_Station[k] : 0;
+            for (k = 0; k < 6; k++)
+                io->ios2_DstAddr[k] = 0xFF;
+            for (k = 6; k < SANA2_MAX_ADDR_BYTES; k++)
+                io->ios2_DstAddr[k] = 0;
         }
-        if (!writer_slo->slo_CopyFromBuff(pkt->ep_Data, io->ios2_Data, pkt->ep_Length)) {
-            FreeMem(pkt, sizeof(struct EchoPacket));
-            io0->io_Error = S2ERR_NO_RESOURCES;
-            io->ios2_WireError = S2WERR_BUFF_ERROR;
+        do_write(unit, io0, io, FALSE);
+        break;
+
+    case S2_MULTICAST:
+        /* Unlike S2_BROADCAST, the caller already supplies the
+         * destination (the multicast group to send to) in ios2_DstAddr --
+         * this device's only extra behavior is validating that address
+         * actually has the Ethernet group bit set (low bit of the first
+         * octet), per the standard 802.3 multicast-addressing convention.
+         * plipbox doesn't implement S2_MULTICAST at all, so this
+         * validation is this device's own choice, not something it
+         * confirms. */
+        if (!(io->ios2_DstAddr[0] & 0x01)) {
+            io0->io_Error = S2ERR_BAD_ARGUMENT;
+            io->ios2_WireError = S2WERR_BAD_MULTICAST;
             break;
         }
-
-        Disable();
-        unit->su_Stats.PacketsSent++;
-        {
-            struct Sana2PacketTypeStats *ts = find_tracked_locked(unit, pkt->ep_PacketType);
-            if (ts) {
-                ts->PacketsSent++;
-                ts->BytesSent += pkt->ep_Length;
-            }
-        }
-        Enable();
-        deliver_packet(unit, pkt);
+        do_write(unit, io0, io, FALSE);
         break;
-    }
 
     case CMD_READ: {
         /* Typed: only a packet whose ep_PacketType matches what the
@@ -1003,6 +1144,78 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
         break;
     }
 
+    case S2_ADDMULTICASTADDRESS: {
+        /* The group address to join, low 6 bytes -- ios2_SrcAddr, matching
+         * the same "single address of interest" convention
+         * S2_CONFIGINTERFACE already uses (real header/plipbox don't
+         * document this field explicitly since plipbox never implements
+         * multicast at all -- this is the well-established SANA-II
+         * convention, not a guess specific to this device). Refcounted:
+         * joining an address already joined (by this or another open on
+         * the unit) just bumps the count, since delivery here isn't
+         * filtered per-open anyway -- see the struct field comment. */
+        UBYTE *addr = io->ios2_SrcAddr;
+        int slot = -1;
+        BOOL already;
+
+        if (!(addr[0] & 0x01)) {
+            io0->io_Error = S2ERR_BAD_ARGUMENT;
+            io->ios2_WireError = S2WERR_BAD_MULTICAST;
+            break;
+        }
+
+        Disable();
+        {
+            int existing = find_mcast_locked(unit, addr);
+            already = existing >= 0;
+            if (already) {
+                unit->su_McastRefCount[existing]++;
+            } else {
+                int i;
+                for (i = 0; i < SANA2LOOP_MAX_MULTICAST; i++) {
+                    if (!unit->su_McastInUse[i]) {
+                        slot = i;
+                        break;
+                    }
+                }
+                if (slot >= 0) {
+                    int k;
+                    unit->su_McastInUse[slot] = TRUE;
+                    for (k = 0; k < 6; k++)
+                        unit->su_McastAddr[slot][k] = addr[k];
+                    unit->su_McastRefCount[slot] = 1;
+                }
+            }
+        }
+        Enable();
+
+        if (!already && slot < 0) {
+            /* Fixed SANA2LOOP_MAX_MULTICAST-slot table is full -- unlike
+             * S2_TRACKTYPE's table-full case (M3), the real header has a
+             * dedicated wire error for exactly this. */
+            io0->io_Error = S2ERR_NO_RESOURCES;
+            io->ios2_WireError = S2WERR_MULTICAST_FULL;
+        }
+        break;
+    }
+
+    case S2_DELMULTICASTADDRESS: {
+        UBYTE *addr = io->ios2_SrcAddr;
+        int existing;
+
+        Disable();
+        existing = find_mcast_locked(unit, addr);
+        if (existing >= 0 && --unit->su_McastRefCount[existing] == 0)
+            unit->su_McastInUse[existing] = FALSE;
+        Enable();
+
+        if (existing < 0) {
+            io0->io_Error = S2ERR_BAD_STATE;
+            io->ios2_WireError = S2WERR_BAD_MULTICAST;
+        }
+        break;
+    }
+
     case S2_ONLINE:
         unit->su_Online = TRUE;
         fire_event(unit, S2EVENT_ONLINE);
@@ -1062,8 +1275,10 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
         break;
     }
 
-    /* Later phases: S2_ADD/DELMULTICASTADDRESS, S2_MULTICAST/BROADCAST send
-     * flags (M4). */
+    /* S2_ADD/DELMULTICASTADDRESSES (plural -- the Rev 7 batch-list
+     * variants, 0xc000/0xc001) have no consumer needing them yet, same
+     * treatment as the Rev 7 buffer-management hook variants (M1) --
+     * falling to default (IOERR_NOCMD) here is correct, not a gap. */
     default:
         io0->io_Error = IOERR_NOCMD;
         break;

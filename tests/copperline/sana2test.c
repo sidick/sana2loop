@@ -99,6 +99,10 @@ static char NAME_ONEVENTNOW[]     = "oneventnow";
 static char NAME_DELIVERY[]       = "delivery";
 static char NAME_CONFIGINTERFACE[] = "configinterface";
 static char NAME_TRACKTYPE[]      = "tracktype";
+static char NAME_BROADCAST[]      = "broadcast";
+static char NAME_MULTICAST[]      = "multicast";
+static char NAME_MULTICASTADDR[]  = "multicastaddress";
+static char NAME_RAW[]            = "raw";
 static char DBG_CHECKIO_NULL[]    = "DBG_CHECKIO_NULL=";
 
 /* _start must be the very first thing in the file and contain no data of
@@ -123,6 +127,7 @@ static BOOL counting_copy_from(APTR to asm("a0"), APTR from asm("a1"), ULONG siz
 static BOOL open_unit0(struct IOSana2Req *io);
 static void send_io(struct IOSana2Req *io);
 static void do_io(struct IOSana2Req *io);
+static void flagged_begin_io(struct IOSana2Req *io);
 
 int __attribute__((no_reorder)) _start(void)
 {
@@ -645,6 +650,199 @@ static int test_main(void)
         report(NAME_TRACKTYPE, ok, &fails);
     }
 
+    /* --- broadcast: S2_BROADCAST forces the destination to the all-1s
+     * Ethernet broadcast address (confirmed against a real driver,
+     * plipbox) and the reader sees SANA2IOF_BCAST set with that same
+     * destination -- unlike a plain CMD_WRITE, whose delivered dst is
+     * always this unit's own station address (see the device's
+     * fill_read_from_packet() comment). --- */
+    {
+        BOOL ok;
+        int i;
+
+        io1->ios2_Req.io_Command = CMD_READ;
+        io1->ios2_Data = readbuf;
+        io1->ios2_PacketType = 0xBCBC;
+        io1->ios2_Req.io_Flags = 0;
+        send_io(io1);
+
+        io2->ios2_Req.io_Command = S2_BROADCAST;
+        io2->ios2_PacketType = 0xBCBC;
+        io2->ios2_DataLength = sizeof(PAYLOAD) - 1;
+        io2->ios2_Data = (APTR)PAYLOAD;
+        for (i = 0; i < SANA2_MAX_ADDR_BYTES; i++) /* ignored -- forced to all-1s */
+            io2->ios2_DstAddr[i] = (i < 6) ? (UBYTE)(0x30 + i) : 0;
+        do_io(io2);
+
+        WaitIO((struct IORequest *)io1);
+        ok = (io1->ios2_Req.io_Error == 0) && (io2->ios2_Req.io_Error == 0);
+        ok = ok && (io1->ios2_Req.io_Flags & SANA2IOF_BCAST) != 0;
+        for (i = 0; i < 6; i++)
+            if (io1->ios2_DstAddr[i] != 0xFF)
+                ok = FALSE;
+
+        report(NAME_BROADCAST, ok, &fails);
+    }
+
+    /* --- multicast: S2_MULTICAST validates the caller-chosen destination
+     * actually has the Ethernet group bit set (low bit of the first
+     * octet), delivers to it as given (unlike S2_BROADCAST, which
+     * overrides it), and the reader sees SANA2IOF_MCAST set with that same
+     * destination. A non-multicast destination must fail
+     * S2ERR_BAD_ARGUMENT/S2WERR_BAD_MULTICAST before ever reaching
+     * delivery. --- */
+    {
+        BOOL ok;
+        int i;
+
+        io2->ios2_Req.io_Command = S2_MULTICAST;
+        io2->ios2_PacketType = 0xCACA;
+        io2->ios2_DataLength = sizeof(PAYLOAD) - 1;
+        io2->ios2_Data = (APTR)PAYLOAD;
+        for (i = 0; i < SANA2_MAX_ADDR_BYTES; i++) /* 0x40 & 1 == 0 -- invalid */
+            io2->ios2_DstAddr[i] = (i < 6) ? (UBYTE)(0x40 + i) : 0;
+        do_io(io2);
+        ok = (io2->ios2_Req.io_Error == S2ERR_BAD_ARGUMENT) &&
+             (io2->ios2_WireError == S2WERR_BAD_MULTICAST);
+
+        io1->ios2_Req.io_Command = CMD_READ;
+        io1->ios2_Data = readbuf;
+        io1->ios2_PacketType = 0xCACA;
+        io1->ios2_Req.io_Flags = 0;
+        send_io(io1);
+
+        io2->ios2_Req.io_Command = S2_MULTICAST;
+        for (i = 0; i < SANA2_MAX_ADDR_BYTES; i++) /* 0x41 & 1 == 1 -- valid */
+            io2->ios2_DstAddr[i] = (i < 6) ? (UBYTE)(0x41 + i) : 0;
+        do_io(io2);
+
+        WaitIO((struct IORequest *)io1);
+        ok = ok && (io1->ios2_Req.io_Error == 0) && (io2->ios2_Req.io_Error == 0);
+        ok = ok && (io1->ios2_Req.io_Flags & SANA2IOF_MCAST) != 0;
+        for (i = 0; i < 6; i++)
+            if (io1->ios2_DstAddr[i] != (UBYTE)(0x41 + i))
+                ok = FALSE;
+
+        report(NAME_MULTICAST, ok, &fails);
+    }
+
+    /* --- multicastaddress: S2_ADD/DELMULTICASTADDRESS, refcounted --
+     * adding the same group twice (as two independent opens, io1 and io2,
+     * both joining) must not actually leave the group until BOTH remove
+     * it; a third removal (nothing left to remove) must fail
+     * S2ERR_BAD_STATE/S2WERR_BAD_MULTICAST. An invalid (non-multicast)
+     * address must fail S2ERR_BAD_ARGUMENT/S2WERR_BAD_MULTICAST at add
+     * time, same validation S2_MULTICAST uses. --- */
+    {
+        BOOL ok;
+        int i;
+
+        io1->ios2_Req.io_Command = S2_ADDMULTICASTADDRESS;
+        for (i = 0; i < 6; i++) /* 0x50 & 1 == 0 -- invalid */
+            io1->ios2_SrcAddr[i] = (UBYTE)(0x50 + i);
+        do_io(io1);
+        ok = (io1->ios2_Req.io_Error == S2ERR_BAD_ARGUMENT) &&
+             (io1->ios2_WireError == S2WERR_BAD_MULTICAST);
+
+        for (i = 0; i < 6; i++) /* 0x51 & 1 == 1 -- valid */
+            io1->ios2_SrcAddr[i] = (UBYTE)(0x51 + i);
+        do_io(io1);
+        ok = ok && (io1->ios2_Req.io_Error == 0);
+
+        io2->ios2_Req.io_Command = S2_ADDMULTICASTADDRESS;
+        for (i = 0; i < 6; i++)
+            io2->ios2_SrcAddr[i] = (UBYTE)(0x51 + i);
+        do_io(io2);
+        ok = ok && (io2->ios2_Req.io_Error == 0);
+
+        io1->ios2_Req.io_Command = S2_DELMULTICASTADDRESS;
+        do_io(io1); /* refcount 2 -> 1 */
+        ok = ok && (io1->ios2_Req.io_Error == 0);
+
+        io2->ios2_Req.io_Command = S2_DELMULTICASTADDRESS;
+        do_io(io2); /* refcount 1 -> 0, actually gone now */
+        ok = ok && (io2->ios2_Req.io_Error == 0);
+
+        io1->ios2_Req.io_Command = S2_DELMULTICASTADDRESS;
+        do_io(io1); /* nothing left -- must fail */
+        ok = ok && (io1->ios2_Req.io_Error == S2ERR_BAD_STATE) &&
+             (io1->ios2_WireError == S2WERR_BAD_MULTICAST);
+
+        report(NAME_MULTICASTADDR, ok, &fails);
+    }
+
+    /* --- raw: SANA2IOF_RAW relaxes the MTU-exceeded check by 14 bytes
+     * (the Ethernet header this device doesn't otherwise reparse -- see
+     * the device's own comment on why that's a deliberately narrow scope
+     * for a loopback device with no real wire framing to parse a header
+     * out of). Confirms: (a) a write between MTU and MTU+14 fails WITHOUT
+     * the flag, (b) succeeds WITH the flag and the reader gets the exact
+     * same bytes back, (c) a write beyond MTU+14 fails even WITH the
+     * flag.
+     *
+     * (b) and (c) must use flagged_begin_io(), NOT send_io()/do_io():
+     * confirmed via a very confusing false failure (identical on bundled
+     * AROS and real Kickstart 1.3, so this is documented AmigaOS behavior,
+     * not a compatibility quirk) that BOTH SendIO()'s and DoIO()'s own
+     * autodocs spell out plainly -- SendIO() "will be set to zero before
+     * the request is sent," DoIO() "is always set to IOF_QUICK (0x01)
+     * before the internal device call." Neither preserves a caller-set
+     * io_Flags bit like SANA2IOF_RAW; only amiga.lib's BeginIO() does
+     * ("equivalent to SendIO(), except that io_Flags is not cleared"),
+     * hence flagged_begin_io()'s direct vector call. (a) doesn't need this
+     * care since the ABSENCE of the RAW flag is exactly what SendIO()/
+     * DoIO() force anyway. See docs/sana2-notes.md and
+     * flagged_begin_io()'s own comment. --- */
+    {
+        static UBYTE rawbuf[1520];
+        static UBYTE rawreadbuf[1520];
+        BOOL ok;
+        int i;
+
+        for (i = 0; i < 1520; i++)
+            rawbuf[i] = (UBYTE)(i & 0xFF);
+
+        io1->ios2_Req.io_Command = CMD_WRITE;
+        io1->ios2_Req.io_Flags = 0;
+        io1->ios2_DataLength = 1510;
+        io1->ios2_Data = rawbuf;
+        io1->ios2_PacketType = 0xAAAA;
+        for (i = 0; i < SANA2_MAX_ADDR_BYTES; i++)
+            io1->ios2_DstAddr[i] = (i < 6) ? (UBYTE)(0x20 + i) : 0;
+        do_io(io1);
+        ok = (io1->ios2_Req.io_Error == S2ERR_MTU_EXCEEDED);
+
+        io1->ios2_Req.io_Flags = SANA2IOF_RAW;
+        io1->ios2_DataLength = 1520;
+        flagged_begin_io(io1);
+        WaitIO((struct IORequest *)io1);
+        ok = ok && (io1->ios2_Req.io_Error == S2ERR_MTU_EXCEEDED);
+
+        io2->ios2_Req.io_Command = CMD_READ;
+        io2->ios2_Data = rawreadbuf;
+        io2->ios2_PacketType = 0xAAAA;
+        io2->ios2_Req.io_Flags = 0;
+        send_io(io2);
+
+        io1->ios2_Req.io_Command = CMD_WRITE;
+        io1->ios2_Req.io_Flags = SANA2IOF_RAW;
+        io1->ios2_DataLength = 1510;
+        flagged_begin_io(io1);
+        WaitIO((struct IORequest *)io1);
+
+        WaitIO((struct IORequest *)io2);
+        ok = ok && (io1->ios2_Req.io_Error == 0) && (io2->ios2_Req.io_Error == 0) &&
+             (io2->ios2_DataLength == 1510);
+        if (ok)
+            for (i = 0; i < 1510; i++)
+                if (rawreadbuf[i] != (UBYTE)(i & 0xFF)) {
+                    ok = FALSE;
+                    break;
+                }
+
+        report(NAME_RAW, ok, &fails);
+    }
+
     CloseDevice((struct IORequest *)io1);
     CloseDevice((struct IORequest *)io2);
     FreeMem(io1, sizeof(struct IOSana2Req));
@@ -748,6 +946,30 @@ static void do_io(struct IOSana2Req *io)
 {
     io->ios2_Req.io_Message.mn_Node.ln_Type = NT_MESSAGE;
     DoIO((struct IORequest *)io);
+}
+
+/* Neither exec.library's SendIO() nor DoIO() preserve caller-set io_Flags
+ * bits (like SANA2IOF_RAW) -- their own autodocs say so plainly: SendIO()
+ * "will be set to zero before the request is sent," DoIO() "is always set
+ * to IOF_QUICK (0x01) before the internal device call." amiga.lib's
+ * BeginIO() is documented as "equivalent to SendIO(), except that io_Flags
+ * is not cleared" -- exactly what a caller wanting SANA2IOF_RAW honored
+ * needs -- but this freestanding build links no amiga.lib. Call the
+ * device's BeginIO vector directly instead: same a6=devbase/a1=IORequest
+ * convention this project's own device uses for begin_io() (see
+ * loopback_device.c), reached at LVO offset -30, the standard Exec device
+ * jump-table slot (open=-6, close=-12, expunge=-18, ExtFunc=-24,
+ * BeginIO=-30, AbortIO=-36) -- exactly what SendIO()/DoIO() already jump
+ * to internally, just without their io_Flags-clearing side effect first. */
+static void flagged_begin_io(struct IOSana2Req *io)
+{
+    io->ios2_Req.io_Message.mn_Node.ln_Type = NT_MESSAGE;
+    {
+        register struct Library *a6 __asm__("a6") = (struct Library *)io->ios2_Req.io_Device;
+        register struct IORequest *a1 __asm__("a1") = (struct IORequest *)io;
+        __asm__ volatile("jsr -30(%%a6)" : : "r"(a6), "r"(a1)
+                          : "d0", "d1", "a0", "a1", "cc", "memory");
+    }
 }
 
 static void report(const char *name, BOOL ok, int *fails)

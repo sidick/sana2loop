@@ -32,7 +32,7 @@ they may require Kickstart 2.0+ where convenient (documented per-tool).
 ## Current state
 
 Working through `docs/PLAN.md`'s milestones (M0-M12: spec-correctness
-backfill, then Phases 2-4). **M0-M3 done**, each validated on-target under
+backfill, then Phases 2-4). **M0-M4 done**, each validated on-target under
 Copperline against both bundled AROS (CI) and a real Kickstart 1.3 ROM
 (`make copperline-smoke` / `KICK=... make copperline-smoke`,
 see `tests/copperline/`) before being considered complete.
@@ -67,6 +67,25 @@ see `tests/copperline/`) before being considered complete.
     makes the unit usable with zero setup) and `S2_TRACKTYPE`/
     `S2_UNTRACKTYPE`/`S2_GETTYPESTATS` (fixed 8-slot per-unit table, real
     counts fed from `CMD_WRITE`/`deliver_packet()` traffic, not a stub).
+  - **M4**: `S2_BROADCAST` (forces `ios2_DstAddr` to all-1s, confirmed
+    against plipbox) and `S2_MULTICAST` (validates the caller's address has
+    the Ethernet group bit set) both share `CMD_WRITE`'s body via a new
+    `do_write()` helper; unlike a plain write, their delivered destination
+    is the real address, not this unit's station address, so a reader's
+    `SANA2IOF_BCAST`/`SANA2IOF_MCAST` (recomputed every read in
+    `fill_read_from_packet()`) mean something. `S2_ADD/DELMULTICASTADDRESS`
+    add a refcounted fixed 8-slot per-unit group-membership table
+    (bookkeeping only -- no per-open receive filtering exists to gate on
+    it). `SANA2IOF_RAW` relaxes the MTU-exceeded check by 14 bytes
+    (deliberately not a full raw-frame reinterpretation -- see
+    `docs/sana2-notes.md`). Surfaced a real, confirmed-on-both-AROS-and-1.3
+    AmigaOS gotcha along the way: `SendIO()`/`DoIO()` both clear `io_Flags`
+    before dispatch (per their own autodocs), silently discarding
+    `SANA2IOF_RAW` -- only `amiga.lib`'s `BeginIO()` preserves it, hence
+    `sana2test.c`'s hand-rolled `flagged_begin_io()` (this build links no
+    amiga.lib). See `docs/sana2-notes.md`'s M4 section for the full story,
+    including a real real-1.3-only hang that turned out to be a missing
+    `a1` clobber in that inline asm, not an emulator quirk.
   - 4 units pre-allocated in the device base (unit 0 wired for echo; units
     1-3 exist for Phase 2 crossover pairs but aren't dispatched differently
     yet). A unit fully resets (`reset_unit()`: offline, factory address,
@@ -86,11 +105,10 @@ see `tests/copperline/`) before being considered complete.
   reason specific to itself (not the device): see the comment block at its
   top for a real on-target bug this tripped over and how it was found.
 
-Not yet done: broadcast/multicast/`SANA2IOF_RAW` (M4), crossover pairs,
-fault injection knobs, pcap replay/record, `SanaDump`/`SanaSend`,
-`ENV:sana2loop/unitN.config` (units currently use a hardcoded 1500-byte
-MTU -- see the "Config via ENV" section of the proposal for the target
-design).
+Not yet done: crossover pairs, fault injection knobs, pcap replay/record,
+`SanaDump`/`SanaSend`, `ENV:sana2loop/unitN.config` (units currently use a
+hardcoded 1500-byte MTU -- see the "Config via ENV" section of the
+proposal for the target design).
 
 ## Architecture
 
@@ -151,7 +169,7 @@ pinned `ghcr.io/reinauer/container-amiga-gcc` image narrator.wyoming uses
 
 `make docker` has been run successfully in this environment (both binaries
 build clean), and `make copperline-smoke` has confirmed every sub-test
-through M3 on-target against both bundled AROS and real Kickstart 1.3 (see
+through M4 on-target against both bundled AROS and real Kickstart 1.3 (see
 "Testing under Copperline" below and `tests/copperline/sana2test.c`'s
 `SUB=` list).
 
