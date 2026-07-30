@@ -38,7 +38,7 @@ the technical detail behind each one.
 | M6 | ✅ Done | Crossover: config-driven `mode`/`peer` (defaults: units 0–1 echo, 2↔3 crossover), pair validation at first-open, unswapped addressing, receive filtering (station/bcast/mcast/PROM) | `src/loopback_device.c`, `run.sh`, harness (SendIO read on 3 + write on 2; wrong-dst filtered unless PROM) |
 | M7 | ✅ Done | Fault injection: xorshift32 + full pipeline + forced offline/online events + PMTUD black hole | `src/loopback_device.c`, harness (droppct=100 never completes; duppct=100 → 2 reads; fixed-seed reorder → assert exact permutation) |
 | M8 | ✅ Done | pcap core (`src/pcap.h`, both endians) + consume-mode replay; commit fixture bytes | `src/pcap.h`, `src/loopback_device.c`, `fixtures/`, harness |
-| M9 | ⏳ Next | VBlank tick server, tick-scheduled replay, RAM record + close-flush, interrupt-context-hook knob, 68000 per-packet overhead measurement (VBlank-count bracketing, tracked not gated). Record test: `run.sh` extracts written pcap off the ADF post-run via xdftool and byte-compares — **verify early that Copperline persists floppy writes to the image** | `src/loopback_device.c`, `run.sh` |
+| M9 | ⚠️ Implemented, real-1.3-verified; AROS CI lane currently hangs (see risk note below) | VBlank tick server, tick-scheduled replay, RAM record + close-flush, interrupt-context-hook knob, 68000 per-packet overhead measurement (VBlank-count bracketing, tracked not gated). Record test: `run.sh` extracts written pcap off the ADF post-run via xdftool and byte-compares — **verify early that Copperline persists floppy writes to the image** | `src/loopback_device.c`, `run.sh` |
 | M10 | | Docs pass: teaching-reference comments through the source, README, sana2-notes refresh. Also stand up a `userdocs/` end-user site (MkDocs Material, adopting sibling project amiauth's pattern in preference to narrator.wyoming's, since amiauth's is the more tried-and-tested one) alongside a `tools/docs2guide.py`-style converter producing an on-Amiga AmigaGuide manual from the same `userdocs/` source -- one docs source feeding both the web site and native Amiga reading, not two to keep in sync by hand | all sources, `docs/`, new `userdocs/`, `mkdocs.yml`, `tools/docs2guide.py` |
 | M11 | | Tools: `src/tools/pcapio.c`, `sana2open.c`, `SanaDump`, `SanaSend`; `host/make_fixtures.py` + `host/lint_pcap.py` (scapy); canonical corpus (ARP, DHCP, TCP handshake) | new `src/tools/*`, `host/*`, `fixtures/`, `Makefile` |
 | M12 | | Aminet packaging + release flow, adopting sibling project amiauth's pattern (in preference to narrator.wyoming's simpler one, since amiauth's is the more tried-and-tested of the two): tag-driven `release.yml` that verifies the pushed tag matches `version.mk` and the `.readme`'s `Version:` field before doing anything else, cross-builds via the pinned Docker image, greps the built binary for its `$VER` string, packages via `make dist` (building a real, archive-capable `lha` from source -- Ubuntu's/Homebrew's is extract-only), validates the readme with `aminet-release-action` in `validate-only` mode, creates the GitHub release (curated notes from the `.readme` for the first release, `--generate-notes` once there's real tag-to-tag history to diff), and only then hands off to a *separate* job gated on a GitHub Environment requiring manual approval for the actual (irreversible-ish) Aminet FTP upload -- human-in-the-loop by construction, not an afterthought | `Makefile`, `version.mk`, `.github/workflows/release.yml`, release docs |
@@ -105,8 +105,44 @@ proper.
   compiler rematerialized a unit pointer that way) -- avoided via
   `__attribute__((noinline))` plus pointer-walking instead of indexing,
   not by finally linking `-lgcc`. Still deferred.
-- ReplyMsg + consumer hooks from a VBlank server on real 1.3 (M9).
-- Copperline floppy write-back persistence (M9's record assertion depends on it).
+- ~~ReplyMsg + consumer hooks from a VBlank server on real 1.3~~ -- **resolved
+  at M9**: `make copperline-smoke KICK=...` (real 1.3) passes every M9
+  assertion cleanly, including the interrupt-context hook-invocation check
+  -- `S2_CopyToBuff` genuinely gets called from inside the VBlank interrupt,
+  confirmed via invocation counting, and the register/Z-flag convention for
+  the server itself was verified by objdump before trusting it (same
+  discipline M1 established for hook calls).
+- ~~Copperline floppy write-back persistence~~ -- **resolved at M9**: confirmed
+  empirically via a standalone experiment (write a known file to `S:`, read
+  it back post-run via `xdftool type`, byte-identical) before building the
+  record-flush feature on top of it. Needed `write_protected = false` in
+  `[floppy.dfN]` (defaults to `true`) -- see `machine.toml`.
+- **NEW, UNRESOLVED: bundled AROS under Copperline hangs once a unit
+  actually uses `replaymode=scheduled` or `record=` (M9).** Not simply
+  "AddIntServer(INTB_VERTB,...) doesn't fire under AROS" -- a standalone
+  isolated test (register a server, busy-loop ~2M iterations, read the
+  tick count back) confirms AROS dispatches to a custom-registered VBlank
+  server correctly (723 hits over 30 emulated seconds, comparable to real
+  1.3). The hang is specific to the actual device: once unit 10 (scheduled
+  replay) goes online, Copperline's serial capture shows one
+  `[AmigaVideo:Bitmap] AmigaVideoBM__Root__New: superclass failed to
+  instantiate a suitable bitmap...!!` line (AROS's own internal warning,
+  not something this device prints) immediately followed by the guest
+  never producing another `SUB=`/`END` line again, even with
+  `--benchmark-until` raised to 120s -- while Copperline itself exits 0
+  (not a Copperline crash, the m68k guest is genuinely stuck). Leading
+  theory, not yet confirmed: `AllocMem()` called from real interrupt
+  context (`vblank_server()`'s per-due-record fresh-copy allocation) run
+  into an AROS-specific allocator limitation under this profile's already
+  tight memory headroom (see `SANA2LOOP_MAX_REPLAY_PACKETS`'s own
+  comment) that a real ROM's simpler allocator doesn't share -- untested.
+  Real Kickstart 1.3 is unaffected: `make copperline-smoke KICK=...` passes
+  every M9 sub-test including `scheduled`/`record`, `RESULT=PASS`, and the
+  post-run `RECORD_VERIFY=PASS` check. Until this is root-caused, the
+  `copperline-smoke-aros` CI job (the only lane public CI can run) is
+  expected to fail/hang specifically on the `scheduled` sub-test -- flag
+  this to whoever picks up M9 next before assuming CI red means a real
+  regression elsewhere.
 
 ## Verification
 

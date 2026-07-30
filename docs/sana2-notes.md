@@ -207,13 +207,10 @@ malformed line: silent typo-tolerance is wrong for a test tool).
 
 `mtu`/`rxqueue` (M5), `mode`/`peer` (M6, see its own section below),
 `seed`/`droppct`/`duppct`/`truncate`/`oversilent`/`reorder`/`offlineafter`/
-`onlineafter` (M7, fault injection), and `mode=replay`/`replay` (M8, see
-its own section below) are recognized so far -- every per-unit knob that
-already exists as real device state. The proposal's remaining config
-vocabulary (`record`/`replaymode`/`recordmax` for M9's tick-scheduled
-replay and RAM record) has nothing to configure yet -- each key lands with
-the milestone that actually consumes it, not before (a recognized key with
-no backing feature would be dead code). `mtu` is
+`onlineafter` (M7, fault injection), `mode=replay`/`replay` (M8), and
+`replaymode`/`record`/`recordmax` (M9, see its own section below) are all
+recognized now -- every key the proposal's original vocabulary named.
+`mtu` is
 bounded above by `SANA2LOOP_MAX_PACKET -
 SANA2LOOP_RAW_HDR_SIZE` (1500) -- a configured MTU above that would let a
 RAW write's relaxed size check (M4) exceed the fixed `EchoPacket` buffer's
@@ -486,6 +483,109 @@ replay variant this deliberately doesn't attempt yet.
   `reset_unit()`'s matching `FreeMem()` (freeing a previous lifetime's
   buffer at the next 0->1 transition) must use this same fixed size, not
   `su_ReplayCount`.
+
+## VBlank tick server, tick-scheduled replay, RAM record (M9)
+
+`config-file infrastructure` gains `replaymode` (`consume` -- M8's
+existing on-demand behavior, still the default -- or `scheduled`),
+`record=<path>`, and `recordmax` (default 64 KB). One VBlank interrupt
+server (`vblank_server()`, `AddIntServer(INTB_VERTB, ...)`, added once in
+`init_device()`) drives BOTH new features: it ticks `su_Tick` for any unit
+that's online AND (in scheduled-replay mode OR recording), and for
+scheduled units, delivers each record whose due tick has arrived through
+the SAME `deliver_packet()` precedence echo/crossover writes use (per
+docs/PLAN.md decision #3 -- one delivery path, not a parallel mechanism).
+A fresh heap copy is made (`AllocMem` + `CopyMem` from the read-only loaded
+array) before handing it to `deliver_packet()`, since that function's
+existing contract always consumes/frees/queues its `pkt` argument, and the
+loaded replay array is NOT individually-owned per record.
+
+- **Due-tick scheduling is whole-second, not microsecond-exact.** Each
+  loaded record's due tick = `(ts_sec - first_record's ts_sec) * 50`
+  (`SANA2LOOP_VBLANK_HZ`, a fixed PAL assumption -- this device has no
+  timer.device dependency and no interest in real-world timing fidelity,
+  only in determinism under a fixed emulation). `ts_usec` is never
+  consulted, deliberately: converting it to ticks would need a genuine
+  runtime division/multiply against a non-power-of-2 constant -- exactly
+  the class of expression this project has twice already found compiles
+  to an unavailable `__udivsi3`/`__mulsi3` on this `-nostdlib` build.
+  Records captured in the same real second share a due tick and are
+  delivered back-to-back, in file order (already guaranteed by sequential
+  consumption) -- a deliberate, documented simplification.
+- **`su_ReplayDueTicks` is a `ULONG` array, safely indexable by a runtime
+  variable** (power-of-2 element size) -- unlike `su_ReplayPackets`
+  (`struct EchoPacket`, NOT power-of-2), which still only ever gets walked
+  via the `su_ReplayNext` running-pointer idiom M8 established.
+- **`load_replay_file()` validates monotonic timestamps** (`ts_sec` never
+  decreasing between consecutive records) -- needed so the due-tick
+  subtraction can never underflow on a corrupt or out-of-order capture;
+  fails the whole open, same as every other malformed-capture case.
+- **CMD_READ/S2_READORPHAN's M8 "serve directly from `su_ReplayNext`"
+  shortcut is now gated on `su_ReplayMode == CONSUME`.** A SCHEDULED unit's
+  reads fall through to completely normal queuing (typed reads still
+  respect `ios2_PacketType`; only `S2_READORPHAN` gives "whatever's next"
+  semantics) and wait for `vblank_server()` to deliver -- the whole point
+  of this milestone versus M8's on-demand behavior.
+- **`record_append()` taps `deliver_packet()` unconditionally** (delivered,
+  queued, or dropped -- matching how `PacketsReceived` already counts
+  regardless of outcome), appending a native-endian (big-endian --
+  `pcap_write_u32`/`u16` in `pcap.h`, no need to ever write little-endian
+  from this device's own recorder) pcap record with `su_Tick` as `ts_sec`
+  (a virtual tick count, NOT real wall-clock time) and `ts_usec` always 0.
+  Overflow (`su_RecordMax` reached) stops appending further packets
+  (`su_RecordDropped` counts how many) but never truncates/corrupts what's
+  already captured; surfaced via `S2_GETSPECIALSTATS` per docs/PLAN.md
+  decision #7 ("overflow = stop + count") -- the ONE record type this
+  device defines, `SANA2LOOP_SPECIALSTAT_RECORD_OVERFLOW`, written
+  immediately after the caller-supplied header per the standard (if
+  underdocumented in the bare struct) SANA-II convention of records living
+  contiguous with the header in the same `ios2_StatData` buffer.
+- **Two real bugs found and fixed while building this, both worth
+  remembering:**
+  1. `build_config_path()`'s original one-line `'0' + unit_index` digit
+     substitution (from Phase 1) silently produced `:`/`;` instead of
+     `10`/`11` for double-digit unit numbers -- a LATENT bug that survived
+     M7 (bumped to 9 units) and M8 (bumped to 10) purely because every
+     unit number through then was still single-digit; M9 was the first
+     milestone to actually reach unit 10. Not a parse error (a config file
+     simply wasn't found under its real name, which read_unit_config()'s
+     own contract treats as "no config, defaults apply") -- it looked
+     exactly like "the config isn't being applied" until traced back to
+     the path string itself. Fixed with a division-free (repeated
+     subtraction) tens/ones digit split, handling 0-99.
+  2. `SANA2LOOP_MAX_REPLAY_PACKETS` (M8's empirically-chosen 16, picked
+     against a SINGLE replay unit's memory footprint) needed shrinking
+     again, to 4 -- not just from M9's own per-unit field growth eating
+     into bundled AROS's already-tight headroom, but because this
+     device's own "free memory only at the NEXT open, never at close"
+     design (`reset_unit()`'s documented contract) means a SECOND
+     replay-mode unit opened later in the same run has to coexist with
+     the FIRST one's still-held buffer -- the real constraint turned out
+     to be two simultaneous `SANA2LOOP_MAX_REPLAY_PACKETS`-sized
+     allocations, not one, confirmed via the same `AvailMem(MEMF_LARGEST)`
+     probing technique M8 used.
+- **`__attribute__((noinline))` verification extended to `vblank_server()`
+  in a different way than `load_replay_file()`'s: register convention AND
+  the VERTB "always return with Z set" calling-convention requirement
+  were both confirmed by objdump before trusting them** (same discipline
+  M1 established for buffer-management hook calls) -- `A1` correctly holds
+  `is_Data` at entry, and the function's single `return 0;` compiles to a
+  `moveq #0,d0` immediately before the epilogue's `movem.l`/`rts` (MOVEM
+  doesn't touch condition codes on 68k, so Z survives from the `moveq`
+  through to the `rts`).
+- **Copperline persists floppy writes back to the host ADF file** --
+  confirmed empirically (write a known file to `S:`, extract it post-run
+  via `xdftool type`, byte-identical) before building the record-flush
+  feature on this assumption -- but ONLY once `write_protected = false` is
+  set in `[floppy.dfN]` (`machine.toml`); it defaults to `true` (safe by
+  default), which otherwise fails the guest's `Open(..., MODE_NEWFILE)`
+  with `ERROR_DISK_WRITE_PROTECTED` (214) -- found the hard way via a
+  standalone write-test program before ever touching the real feature.
+- **Known, unresolved issue: bundled AROS under Copperline hangs once a
+  unit actually uses `replaymode=scheduled` or `record=`** -- see
+  docs/PLAN.md's M9 risk note for the full story (confirmed NOT a simple
+  "AROS doesn't dispatch custom VBlank servers" via an isolated
+  standalone test). Real Kickstart 1.3 passes every M9 assertion cleanly.
 
 ## `S2_DEVICEQUERY` convention (easy to get backwards)
 

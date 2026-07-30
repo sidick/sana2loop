@@ -111,6 +111,8 @@ static char NAME_FAULTREORDER[]    = "faultreorder";
 static char NAME_FAULTOVERSILENT[] = "faultoversilent";
 static char NAME_FAULTFLAP[]       = "faultflap";
 static char NAME_REPLAY[]          = "replay";
+static char NAME_SCHEDULED[]       = "scheduled";
+static char NAME_RECORD[]          = "record";
 static char DBG_CHECKIO_NULL[]    = "DBG_CHECKIO_NULL=";
 
 /* M8 replay fixture data -- must exactly match
@@ -133,6 +135,33 @@ static UBYTE *REPLAY_SRC[3] = {REPLAY_SRC0, REPLAY_SRC1, REPLAY_SRC2};
 static char  *REPLAY_PAY[3] = {REPLAY_PAY0, REPLAY_PAY1, REPLAY_PAY2};
 static ULONG  REPLAY_TYPE[3] = {0x0800, 0x0806, 0x86DD};
 static ULONG  REPLAY_LEN[3]  = {8, 9, 10};
+
+/* M9 scheduled-replay fixture data -- must exactly match
+ * tests/copperline/fixtures/scheduled.pcap's 2 records: ts_sec=100 (due
+ * tick 0 -- delivers on the first VBlank after S2_ONLINE) and ts_sec=101
+ * (1 real second later -- due tick 50 at SANA2LOOP_VBLANK_HZ). */
+static UBYTE SCHED_DST0[] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xF1};
+static UBYTE SCHED_SRC0[] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xF2};
+static char  SCHED_PAY0[] = "SCHED-A";
+static UBYTE SCHED_DST1[] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xF3};
+static UBYTE SCHED_SRC1[] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xF4};
+static char  SCHED_PAY1[] = "SCHED-BB";
+
+/* M9 record fixture data -- the 3 known writes unit 11's record test
+ * makes, so run.sh's post-run pcap extraction can byte-compare against
+ * them. dst is deliberately the SAME for all 3 (an arbitrary
+ * "wrote-to" address); echo mode swaps addressing on a plain CMD_WRITE
+ * (see do_write()'s own comment), so the RECORDED src is this constant
+ * address and the recorded dst is unit 11's own (unconfigured, factory)
+ * station address -- 02:53:32:4C:00:0B, per reset_unit()'s deterministic
+ * factory-address scheme (0x0B = unit 11). */
+static UBYTE RECORD_WROTE_TO[] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01};
+static char  RECORD_PAY0[] = "RECORD-ONE";
+static char  RECORD_PAY1[] = "RECORD-TWO";
+static char  RECORD_PAY2[] = "RECORD-THREE";
+static char  *RECORD_PAY[3] = {RECORD_PAY0, RECORD_PAY1, RECORD_PAY2};
+static ULONG  RECORD_TYPE[3] = {0x1000, 0x1001, 0x1002};
+static ULONG  RECORD_LEN[3]  = {10, 10, 12};
 
 /* _start must be the very first thing in the file and contain no data of
  * its own -- it only calls test_main(), which holds all the real logic and
@@ -1557,6 +1586,173 @@ static int test_main(void)
         }
 
         report(NAME_REPLAY, ok, &fails);
+    }
+
+    /* --- scheduled: unit 10 (mode=replay, replaymode=scheduled) delivers
+     * its 2-record fixture on real VBlank-driven timing rather than
+     * on-demand -- the actual point of M9, unlike M8's consume mode. A
+     * queued CMD_READ submitted before a record's due tick genuinely
+     * WAITS, completing only once vblank_server() delivers it through the
+     * normal deliver_packet() precedence. A real S2_CopyToBuff hook
+     * (matching the bufferhooks sub-test's own pattern) is registered on
+     * the reading open and its invocation count checked, proving it gets
+     * called correctly from ACTUAL VBlank interrupt context -- every
+     * other sub-test in this file only ever exercises hooks from ordinary
+     * task context. --- */
+    {
+        BOOL ok = TRUE;
+        struct MsgPort *port10a = make_port();
+        struct IOSana2Req *io10a = port10a ? make_io(port10a) : NULL; /* reader, with hook */
+        struct MsgPort *port10b = make_port();
+        struct IOSana2Req *io10b = port10b ? make_io(port10b) : NULL; /* S2_ONLINE control */
+        struct TagItem tags10[2];
+
+        if (io10a) {
+            tags10[0].ti_Tag  = S2_CopyToBuff;
+            tags10[0].ti_Data = (ULONG)counting_copy_to;
+            tags10[1].ti_Tag  = TAG_DONE;
+            tags10[1].ti_Data = 0;
+            io10a->ios2_BufferManagement = tags10;
+        }
+
+        if (io10a && io10b &&
+            OpenDevice((STRPTR)DEVICE_NAME, 10, (struct IORequest *)io10a, 0) == 0 &&
+            OpenDevice((STRPTR)DEVICE_NAME, 10, (struct IORequest *)io10b, 0) == 0) {
+            int k;
+            g_HookToCount = 0;
+
+            /* Record 0: due tick 0 -- delivers on the very first VBlank
+             * after going online. Read submitted BEFORE S2_ONLINE, same
+             * as this file's other pre-queue-then-trigger tests.
+             * S2_READORPHAN (untyped), not CMD_READ: unlike M8's consume
+             * mode, SCHEDULED delivery goes through the REAL
+             * deliver_packet() precedence, which DOES respect CMD_READ's
+             * typing -- S2_READORPHAN is the correct "give me whatever's
+             * next" tool here, not a workaround. */
+            io10a->ios2_Req.io_Command = S2_READORPHAN;
+            io10a->ios2_Data = readbuf;
+            io10a->ios2_Req.io_Flags = 0;
+            send_io(io10a);
+
+            io10b->ios2_Req.io_Command = S2_ONLINE;
+            do_io(io10b);
+
+            WaitIO((struct IORequest *)io10a);
+            ok = ok && (io10a->ios2_Req.io_Error == 0) &&
+                 (io10a->ios2_PacketType == 0x0800) &&
+                 (io10a->ios2_DataLength == sizeof(SCHED_PAY0) - 1) &&
+                 g_HookToCount >= 1;
+            for (k = 0; k < 6; k++) {
+                if (io10a->ios2_DstAddr[k] != SCHED_DST0[k])
+                    ok = FALSE;
+                if (io10a->ios2_SrcAddr[k] != SCHED_SRC0[k])
+                    ok = FALSE;
+            }
+            for (k = 0; k < (int)(sizeof(SCHED_PAY0) - 1); k++)
+                if (readbuf[k] != (UBYTE)SCHED_PAY0[k])
+                    ok = FALSE;
+
+            /* Record 1: due tick 50 (1 real second later at
+             * SANA2LOOP_VBLANK_HZ). CheckIO() right after SendIO() is
+             * logged (DBG_CHECKIO_NULL), same informational-only
+             * treatment as the onevent sub-test's own use of this --
+             * confirmed reliable on real 1.3 but not gated on, since
+             * bundled AROS has its own CheckIO compatibility quirk there. */
+            io10a->ios2_Req.io_Command = S2_READORPHAN; /* untyped, see record 0's comment above */
+            io10a->ios2_Data = readbuf2;
+            io10a->ios2_Req.io_Flags = 0;
+            send_io(io10a);
+
+            raw_str(DBG_CHECKIO_NULL);
+            raw_u16((unsigned short)(CheckIO((struct IORequest *)io10a) == NULL), 1);
+            raw_str(MSG_CRLF);
+
+            WaitIO((struct IORequest *)io10a);
+            ok = ok && (io10a->ios2_Req.io_Error == 0) &&
+                 (io10a->ios2_PacketType == 0x0801) &&
+                 (io10a->ios2_DataLength == sizeof(SCHED_PAY1) - 1) &&
+                 g_HookToCount >= 2;
+            for (k = 0; k < 6; k++) {
+                if (io10a->ios2_DstAddr[k] != SCHED_DST1[k])
+                    ok = FALSE;
+                if (io10a->ios2_SrcAddr[k] != SCHED_SRC1[k])
+                    ok = FALSE;
+            }
+            for (k = 0; k < (int)(sizeof(SCHED_PAY1) - 1); k++)
+                if (readbuf2[k] != (UBYTE)SCHED_PAY1[k])
+                    ok = FALSE;
+
+            CloseDevice((struct IORequest *)io10a);
+            CloseDevice((struct IORequest *)io10b);
+        } else {
+            ok = FALSE;
+        }
+        if (io10a)
+            FreeMem(io10a, sizeof(struct IOSana2Req));
+        if (io10b)
+            FreeMem(io10b, sizeof(struct IOSana2Req));
+        if (port10a) {
+            FreeSignal(port10a->mp_SigBit);
+            FreeMem(port10a, sizeof(struct MsgPort));
+        }
+        if (port10b) {
+            FreeSignal(port10b->mp_SigBit);
+            FreeMem(port10b, sizeof(struct MsgPort));
+        }
+
+        report(NAME_SCHEDULED, ok, &fails);
+    }
+
+    /* --- record: unit 11 (`record=S:sana2loop/recorded.pcap`,
+     * recordmax=4096) taps 3 known echo writes into a RAM buffer, flushed
+     * to that file at CloseDevice() (last close). No queued reader is
+     * needed -- a plain CMD_WRITE with nobody listening still "succeeds"
+     * from the writer's perspective under this device's strict rxqueue=0
+     * default (the packet is simply dropped after delivery, per M2), and
+     * record_append() taps deliver_packet() unconditionally regardless of
+     * that outcome. run.sh extracts the flushed file off the ADF
+     * post-run (via xdftool) and byte-compares it against these same 3
+     * writes -- this sub-test only proves the writes themselves succeed;
+     * the actual recorded-bytes assertion lives in run.sh, since verifying
+     * what ended up on the host-side ADF is inherently a host-side
+     * question, not something the on-target harness can check about
+     * itself. --- */
+    {
+        BOOL ok = TRUE;
+        struct MsgPort *port11 = make_port();
+        struct IOSana2Req *io11 = port11 ? make_io(port11) : NULL;
+
+        if (io11 && OpenDevice((STRPTR)DEVICE_NAME, 11, (struct IORequest *)io11, 0) == 0) {
+            int i;
+
+            io11->ios2_Req.io_Command = S2_ONLINE;
+            do_io(io11);
+            ok = (io11->ios2_Req.io_Error == 0);
+
+            for (i = 0; i < 3; i++) {
+                int k;
+                io11->ios2_Req.io_Command = CMD_WRITE;
+                io11->ios2_PacketType = RECORD_TYPE[i];
+                io11->ios2_DataLength = RECORD_LEN[i];
+                io11->ios2_Data = (APTR)RECORD_PAY[i];
+                for (k = 0; k < SANA2_MAX_ADDR_BYTES; k++)
+                    io11->ios2_DstAddr[k] = (k < 6) ? RECORD_WROTE_TO[k] : 0;
+                do_io(io11);
+                ok = ok && (io11->ios2_Req.io_Error == 0);
+            }
+
+            CloseDevice((struct IORequest *)io11);
+        } else {
+            ok = FALSE;
+        }
+        if (io11)
+            FreeMem(io11, sizeof(struct IOSana2Req));
+        if (port11) {
+            FreeSignal(port11->mp_SigBit);
+            FreeMem(port11, sizeof(struct MsgPort));
+        }
+
+        report(NAME_RECORD, ok, &fails);
     }
 
     CloseDevice((struct IORequest *)io1);

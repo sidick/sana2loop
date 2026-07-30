@@ -40,6 +40,8 @@
 #include <exec/tasks.h>
 #include <devices/sana2.h>
 #include <utility/tagitem.h>
+#include <exec/interrupts.h>
+#include <hardware/intbits.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
 #include <dos/dosextens.h>
@@ -78,8 +80,9 @@
  * 2/3=M6 crossover pair (also M7's oversilent/PMTUD pair, since neither
  * milestone's own assertions care about the other's config additions
  * there), 4=M5 malformed-config-fails, 5=M7 droppct, 6=M7 duppct,
- * 7=M7 reorder, 8=M7 offlineafter/onlineafter, 9=M8 consume-mode replay). */
-#define SANA2LOOP_NUM_UNITS   10
+ * 7=M7 reorder, 8=M7 offlineafter/onlineafter, 9=M8 consume-mode replay,
+ * 10=M9 scheduled replay, 11=M9 RAM record). */
+#define SANA2LOOP_NUM_UNITS   12
 #define SANA2LOOP_DEFAULT_MTU 1500
 /* Ethernet dst[6]+src[6]+type[2] -- the allowance SANA2IOF_RAW adds on top
  * of su_MTU (docs/PLAN.md's M4 entry: "SANA2IOF_RAW (buffer -> MTU+14)").
@@ -118,16 +121,41 @@
  * SANA2LOOP_MAX_TRACKED_TYPES/_MULTICAST above. A capture with more
  * records than this is REJECTED outright at open time (S2ERR_BAD_ARGUMENT)
  * rather than silently truncated -- silently playing back only part of a
- * named capture would be a worse surprise than a loud, obvious failure. 32
- * is generous for the hand-crafted/small-corpus captures this project
+ * named capture would be a worse surprise than a loud, obvious failure.
+ * Still plenty for the hand-crafted/small-corpus captures this project
  * actually ships (M11's canonical ARP/DHCP/TCP-handshake corpus is a
  * handful of packets); a test wanting more just needs a higher cap, not a
- * design change. */
-#define SANA2LOOP_MAX_REPLAY_PACKETS 16
+ * design change -- see load_replay_file()'s own comment for why this
+ * value specifically (8, not a rounder-looking 16 or 32) had to be
+ * re-verified empirically twice, at M8 and again at M9. */
+#define SANA2LOOP_MAX_REPLAY_PACKETS 4
 /* dos.library path/filename length for `replay=<path>` -- generous for
  * "S:sana2loop/whatever.pcap"-shaped values; same bounded-not-dynamic
  * reasoning as the config-path buffers in read_unit_config() below. */
 #define SANA2LOOP_MAX_REPLAY_PATH 64
+
+/* M9: RAM record buffer -- `record=<path>` taps deliver_packet() and
+ * appends every packet THIS unit actually receives (regardless of mode --
+ * echo self-delivery, crossover peer delivery, or scheduled-replay's
+ * manufactured deliveries) as pcap-formatted bytes into a fixed-size RAM
+ * buffer, flushed to `record_path` at last close (only if the closer is a
+ * real Process -- same dos.library-needs-process-context reasoning as
+ * config/replay file I/O). `recordmax` default matches docs/PLAN.md
+ * decision #7 ("64 KB"); overflow stops recording further packets (not a
+ * fatal error -- see su_RecordDropped) rather than truncating what's
+ * already captured. NOTE: unlike SANA2LOOP_MAX_REPLAY_PACKETS (which M8
+ * had to shrink from a 32-record/49KB guess after it reliably failed
+ * AllocMem() under bundled AROS's tighter free-memory headroom), this
+ * default is NOT independently re-verified against that same AROS memory
+ * pressure -- this project's own on-target test deliberately configures a
+ * much smaller `recordmax=` on its one recording fixture rather than
+ * exercising the 64KB default, for exactly that reason. A real deployment
+ * enabling `record=` under bundled AROS specifically may need to lower
+ * `recordmax=` if AllocMem() ever fails for it. */
+#define SANA2LOOP_DEFAULT_RECORDMAX (64 * 1024)
+/* Sanity ceiling on `recordmax=N` -- not a spec requirement, same guard
+ * purpose as SANA2LOOP_CONFIG_MAX_RXQUEUE. */
+#define SANA2LOOP_CONFIG_MAX_RECORDMAX (256 * 1024)
 
 /* SysBase -- the one file-scope global this file needs. Safe here: this is
  * a plain -nostdlib freestanding build (no -fbaserel), so globals use
@@ -192,6 +220,48 @@ struct DosLibrary *DOSBase;
  * trace has nowhere meaningful to send anything. */
 #define SANA2LOOP_MODE_REPLAY    2
 
+/* M9: `replaymode` -- which of the two replay delivery models a
+ * `mode=replay` unit uses. Default (no `replaymode` key at all) stays
+ * `_CONSUME`, M8's existing behavior, for backward compatibility with
+ * every config file/test written before this milestone existed.
+ * `_SCHEDULED` is new: instead of CMD_READ/S2_READORPHAN pulling the next
+ * record whenever asked, the VBlank interrupt server (vblank_server())
+ * pushes each record through the normal deliver_packet() precedence
+ * (typed read / orphan read / rxqueue / drop+stats) at the moment its own
+ * captured timestamp comes due, relative to this unit's own su_Tick
+ * (ticking only while online -- see reset_unit()/force_online()). A
+ * CMD_READ/S2_READORPHAN submitted before a record is due just queues
+ * normally and waits, exactly like any unit with no traffic yet -- see
+ * the gating check in both command handlers below. */
+#define SANA2LOOP_REPLAYMODE_CONSUME   0
+#define SANA2LOOP_REPLAYMODE_SCHEDULED 1
+
+/* M9: deliberately PAL/50Hz, not the actual detected refresh rate -- this
+ * device has no timer.device dependency and no interest in exact
+ * wall-clock fidelity, only in DETERMINISM under a fixed emulation (per
+ * docs/PLAN.md decision #7: "Deterministic under Copperline (VBlank =
+ * emulated time)"). Scheduling is also deliberately SECOND-granularity,
+ * not microsecond-exact: a captured record's due tick is
+ * `(ts_sec - first_ts_sec) * SANA2LOOP_VBLANK_HZ`, dropping ts_usec
+ * entirely. Two records captured within the same real second get the
+ * same due tick and are delivered back-to-back at that tick, in their
+ * original file order (already guaranteed by sequential su_ReplayNext
+ * consumption) -- a clean, honest simplification for a test tool, not an
+ * attempt at real-world timing fidelity. This also sidesteps a genuine
+ * hazard this project has hit twice already: `ts_usec`, a RUNTIME value,
+ * multiplied/divided against a non-power-of-2 constant to convert between
+ * microseconds and ticks would risk exactly the unavailable
+ * __udivsi3/__mulsi3 library calls this -nostdlib build has no libgcc
+ * for -- staying at whole-second granularity needs only `delta_sec * 50`,
+ * a small-constant multiply of the same safely-synthesizable shape as
+ * M7's already-proven `pct*655`. */
+#define SANA2LOOP_VBLANK_HZ 50
+
+/* M9 S2_GETSPECIALSTATS record type -- this device's own, since SANA-II
+ * leaves "special" (per-driver) stat Type values entirely undefined; only
+ * one exists so far. */
+#define SANA2LOOP_SPECIALSTAT_RECORD_OVERFLOW 1
+
 struct UnitConfig {
     ULONG mtu;
     ULONG rxqueue;
@@ -211,6 +281,13 @@ struct UnitConfig {
                             only consulted once, right after config parsing,
                             to load_replay_file(); never itself persisted on
                             the unit (see open()'s own comment). */
+    ULONG replaymode;   /* M9: SANA2LOOP_REPLAYMODE_CONSUME/_SCHEDULED */
+    char  record_path[SANA2LOOP_MAX_REPLAY_PATH]; /* M9: `record=<path>` --
+                            where su_RecordBuf gets flushed at last close;
+                            empty = recording disabled. Same transient-only
+                            contract as replay_path. */
+    ULONG recordmax;    /* M9: RAM record buffer cap in bytes, default
+                            SANA2LOOP_DEFAULT_RECORDMAX */
 };
 
 static char CONFIG_ENV_PREFIX[] = "ENV:sana2loop/unit";
@@ -219,14 +296,35 @@ static char CONFIG_SUFFIX[]     = ".config";
 
 /* Builds "<prefix><unit_index>.config" into buf by hand (no sprintf/
  * strcpy/strcat -- this is a -nostdlib freestanding build with no libc).
- * unit_index is always a single digit (SANA2LOOP_NUM_UNITS is 4), so one
- * character substitution suffices. */
+ *
+ * Handles unit_index 0-99 (two decimal digits, tens digit omitted for
+ * single-digit units so existing fixtures like "unit9.config" keep
+ * working unchanged). A REAL, latent bug lived here from M7 (when
+ * SANA2LOOP_NUM_UNITS first passed single digits conceptually possible,
+ * though not yet reached) through M8 (NUM_UNITS=10, units 0-9, still all
+ * single-digit) until M9 actually allocated units 10/11: the original
+ * one-line `'0' + unit_index` substitution silently produced ':'/';'
+ * (ASCII 58/59, one and two past '9') instead of "10"/"11", so
+ * ENV:/S:sana2loop/unit10.config was never found under its real name --
+ * not a parse error (missing file isn't one), just silently falling back
+ * to compiled-in defaults, which looked exactly like "the config wasn't
+ * applied" until traced back here. Tens-digit extraction is a division-free
+ * repeated-subtraction loop (bounded, at most ~9 iterations for any
+ * 2-digit input) -- consistent with this file's established "no runtime
+ * div/mod without libgcc" discipline. */
 static void build_config_path(char *buf, const char *prefix, UBYTE unit_index)
 {
     int i = 0, k;
+    UBYTE tens = 0, ones = unit_index;
     for (k = 0; prefix[k]; k++)
         buf[i++] = prefix[k];
-    buf[i++] = (char)('0' + unit_index);
+    while (ones >= 10) {
+        ones -= 10;
+        tens++;
+    }
+    if (tens > 0)
+        buf[i++] = (char)('0' + tens);
+    buf[i++] = (char)('0' + ones);
     for (k = 0; CONFIG_SUFFIX[k]; k++)
         buf[i++] = CONFIG_SUFFIX[k];
     buf[i] = 0;
@@ -407,6 +505,34 @@ static BOOL parse_config_line(struct UnitConfig *cfg, const char *line, const ch
             return FALSE;
         CopyMem((APTR)(eq + 1), cfg->replay_path, vlen);
         cfg->replay_path[vlen] = 0;
+        return TRUE;
+    }
+    if (key_matches(line, eq, "replaymode")) {
+        if (key_matches(eq + 1, line_end, "consume")) {
+            cfg->replaymode = SANA2LOOP_REPLAYMODE_CONSUME;
+            return TRUE;
+        }
+        if (key_matches(eq + 1, line_end, "scheduled")) {
+            cfg->replaymode = SANA2LOOP_REPLAYMODE_SCHEDULED;
+            return TRUE;
+        }
+        return FALSE;
+    }
+    if (key_matches(line, eq, "record")) {
+        /* Same bounded-CopyMem contract as `replay=` above. */
+        ULONG vlen = (ULONG)(line_end - (eq + 1));
+        if (vlen >= sizeof(cfg->record_path))
+            return FALSE;
+        CopyMem((APTR)(eq + 1), cfg->record_path, vlen);
+        cfg->record_path[vlen] = 0;
+        return TRUE;
+    }
+    if (key_matches(line, eq, "recordmax")) {
+        if (!parse_ulong(eq + 1, line_end, &value))
+            return FALSE;
+        if (value < 1 || value > SANA2LOOP_CONFIG_MAX_RECORDMAX)
+            return FALSE;
+        cfg->recordmax = value;
         return TRUE;
     }
     return FALSE; /* unrecognized key -- fail-fast, not silently ignored */
@@ -665,6 +791,41 @@ struct Sana2LoopUnit {
                                           traffic arrived yet") -- a plain
                                           counter, only ever compared, never
                                           used to index su_ReplayPackets */
+    /* M9: which of the two replay delivery models (see
+     * SANA2LOOP_REPLAYMODE_CONSUME/_SCHEDULED's own comment). su_Tick
+     * ticks once per VBlank (vblank_server()) while this unit is online
+     * AND (scheduled-replay mode OR recording) -- gated on su_Online so a
+     * replay session's own "elapsed time" only counts while the link is
+     * actually up, matching how a real interface only experiences
+     * traffic time while connected. su_ReplayDueTicks[i] (ULONG, safely
+     * indexable -- power-of-2 element size, unlike su_ReplayPackets) is
+     * each loaded record's own due tick, computed once at load time from
+     * its captured pcap timestamp relative to the FIRST record's own
+     * timestamp (whole-second granularity -- see SANA2LOOP_VBLANK_HZ's
+     * comment for why not microsecond-exact). */
+    ULONG       su_ReplayMode;
+    ULONG       su_Tick;
+    ULONG      *su_ReplayDueTicks;
+    /* M9 RAM record: `record=<path>` taps deliver_packet() (see
+     * record_append()) and appends every packet this unit actually
+     * receives, pcap-formatted, into su_RecordBuf -- flushed to
+     * su_RecordPath at last close, only if the closer is a real Process
+     * (same dos.library-needs-process-context reasoning as config/replay
+     * file I/O). su_RecordBuf is NULL unless su_Recording is TRUE.
+     * su_RecordPath is remembered on the unit (unlike replay_path, which
+     * is transient) because the flush happens at CLOSE time, potentially
+     * long after open()'s config was read. */
+    BOOL        su_Recording;
+    char        su_RecordPath[SANA2LOOP_MAX_REPLAY_PATH];
+    UBYTE      *su_RecordBuf;
+    ULONG       su_RecordMax;
+    ULONG       su_RecordUsed;
+    ULONG       su_RecordDropped;     /* packets NOT appended because
+                                          su_RecordMax was already reached
+                                          -- not a fatal error, whatever's
+                                          already captured stays intact;
+                                          surfaced via S2_GETSPECIALSTATS
+                                          per docs/PLAN.md decision #7 */
     struct List su_PendingReads;      /* queued, TYPED CMD_READ IORequests */
     struct List su_OrphanReads;       /* queued S2_READORPHAN IORequests (untyped) */
     struct List su_PendingData;       /* packets awaiting a CMD_READ/S2_READORPHAN,
@@ -675,6 +836,12 @@ struct Sana2LoopUnit {
 struct Sana2LoopDevice {
     struct Device         sld_Device;
     BPTR                  sld_SegList;   /* handed back to Exec by expunge() */
+    /* M9: one VBlank interrupt server for the whole device (not per-unit
+     * -- see vblank_server()'s own comment), added once in init_device()
+     * and removed in expunge(). Must live at a stable address for as long
+     * as the device is loaded, hence embedded in the device base itself
+     * rather than a separate AllocMem'd struct. */
+    struct Interrupt      sld_VBlankInt;
     struct Sana2LoopUnit  sld_Units[SANA2LOOP_NUM_UNITS];
 };
 
@@ -1282,9 +1449,27 @@ static void reset_unit(struct Sana2LoopUnit *unit)
         FreeMem(unit->su_ReplayPackets, SANA2LOOP_MAX_REPLAY_PACKETS * sizeof(struct EchoPacket));
         unit->su_ReplayPackets = NULL;
     }
+    if (unit->su_ReplayDueTicks) {
+        FreeMem(unit->su_ReplayDueTicks, SANA2LOOP_MAX_REPLAY_PACKETS * sizeof(ULONG));
+        unit->su_ReplayDueTicks = NULL;
+    }
     unit->su_ReplayNext  = NULL;
     unit->su_ReplayCount = 0;
     unit->su_ReplayPos   = 0;
+    unit->su_ReplayMode  = SANA2LOOP_REPLAYMODE_CONSUME;
+    unit->su_Tick        = 0;
+
+    /* M9 RAM record: free any buffer allocated by a PREVIOUS lifetime,
+     * same reasoning as the replay buffer above. */
+    if (unit->su_RecordBuf) {
+        FreeMem(unit->su_RecordBuf, unit->su_RecordMax);
+        unit->su_RecordBuf = NULL;
+    }
+    unit->su_Recording       = FALSE;
+    unit->su_RecordPath[0]   = 0;
+    unit->su_RecordMax       = SANA2LOOP_DEFAULT_RECORDMAX;
+    unit->su_RecordUsed      = 0;
+    unit->su_RecordDropped   = 0;
 
     unit->su_Stats.PacketsReceived      = 0;
     unit->su_Stats.PacketsSent          = 0;
@@ -1363,6 +1548,7 @@ static BOOL __attribute__((noinline)) load_replay_file(struct Sana2LoopUnit *uni
     BPTR file;
     struct pcap_file_header fh;
     struct EchoPacket *packets;
+    ULONG *due_ticks;
     ULONG magic_raw;
     BOOL swapped;
     ULONG count = 0;
@@ -1427,17 +1613,41 @@ static BOOL __attribute__((noinline)) load_replay_file(struct Sana2LoopUnit *uni
      * S2_ADD/DELMULTICASTADDRESS). reset_unit()'s matching FreeMem() must
      * use this same size, not su_ReplayCount's -- it's the actual
      * allocation size, independent of how many slots ended up used.
-     * SANA2LOOP_MAX_REPLAY_PACKETS=16 was picked empirically, not just
-     * "generous": 32 (the original guess) reliably failed this exact
-     * AllocMem() under bundled AROS specifically (confirmed via a
-     * temporary AvailMem(MEMF_LARGEST) probe while chasing this) -- AROS,
-     * unlike a real ROM in true ROM space, has to load its own Kickstart
-     * replacement INTO this profile's 512K+512K chip+fast budget, leaving
-     * measurably less free than real Kickstart 1.3 does on the identical
-     * profile. 16 (25KB) passed with real headroom to spare on both
-     * targets; 32 (49KB) did not on AROS. */
+     * SANA2LOOP_MAX_REPLAY_PACKETS=4 was picked empirically, not just
+     * "generous" -- and had to be re-checked TWICE, both times via a
+     * temporary AvailMem(MEMF_LARGEST) probe: M8's original guess (32,
+     * ~49KB) reliably failed this exact AllocMem() under bundled AROS
+     * specifically (a real ROM in true ROM space doesn't pay this cost,
+     * but AROS has to load its own Kickstart replacement INTO this
+     * profile's 512K+512K chip+fast budget, leaving measurably less free
+     * than real Kickstart 1.3 on the identical profile) -- 16 (~25KB)
+     * passed with headroom at M8. Then M9's own per-unit field growth
+     * (su_RecordPath[64] alone, plus su_Tick/su_ReplayMode/
+     * su_ReplayDueTicks/the recording bookkeeping fields, times
+     * SANA2LOOP_NUM_UNITS units) ate enough of that headroom that even 8
+     * started failing -- and not just from the fixed per-unit growth:
+     * this device's "free memory only at NEXT open, not at close"
+     * design (reset_unit()'s own contract) means a SECOND replay-mode
+     * unit opened later in the same run has to coexist with the FIRST
+     * one's still-held buffer, so the real constraint here is two
+     * simultaneous SANA2LOOP_MAX_REPLAY_PACKETS-sized allocations, not
+     * one. Settled on 4 (~6KB each, ~12KB combined), with real margin to
+     * spare against a budget that keeps shrinking as this device's
+     * per-unit state grows; a future milestone adding more per-unit
+     * fields, or more replay-mode test units, should re-verify this the
+     * same way. */
     packets = AllocMem(SANA2LOOP_MAX_REPLAY_PACKETS * sizeof(struct EchoPacket), MEMF_CLEAR);
     if (!packets) {
+        Close(file);
+        CloseLibrary((struct Library *)DOSBase);
+        DOSBase = NULL;
+        return FALSE;
+    }
+    /* Due ticks: ULONG is power-of-2 sized, so (unlike su_ReplayPackets)
+     * indexing this array by a runtime count is safe -- no __mulsi3 risk. */
+    due_ticks = AllocMem(SANA2LOOP_MAX_REPLAY_PACKETS * sizeof(ULONG), MEMF_CLEAR);
+    if (!due_ticks) {
+        FreeMem(packets, SANA2LOOP_MAX_REPLAY_PACKETS * sizeof(struct EchoPacket));
         Close(file);
         CloseLibrary((struct Library *)DOSBase);
         DOSBase = NULL;
@@ -1457,6 +1667,7 @@ static BOOL __attribute__((noinline)) load_replay_file(struct Sana2LoopUnit *uni
      * loads into exists for (see its own comment). */
     {
         struct EchoPacket *cur = packets;
+        ULONG first_sec = 0, prev_sec = 0;
 
         for (;;) {
             struct pcap_pkthdr ph;
@@ -1478,6 +1689,21 @@ static BOOL __attribute__((noinline)) load_replay_file(struct Sana2LoopUnit *uni
                 flen > SANA2LOOP_MAX_PACKET || count >= SANA2LOOP_MAX_REPLAY_PACKETS) {
                 ok = FALSE;
                 break;
+            }
+            /* M9: timestamps must be non-decreasing -- a well-formed
+             * capture's records already appear in the order they were
+             * captured, and this device's tick-scheduled replay (M9)
+             * needs that to compute each record's due tick as a safe
+             * subtraction (ts_sec - first_sec) rather than risk
+             * underflowing on an out-of-order or corrupt capture. */
+            if (count == 0) {
+                first_sec = ph.ts_sec;
+                prev_sec = ph.ts_sec;
+            } else if (ph.ts_sec < prev_sec) {
+                ok = FALSE;
+                break;
+            } else {
+                prev_sec = ph.ts_sec;
             }
 
             if (Read(file, framebuf, (LONG)flen) != (LONG)flen) {
@@ -1504,6 +1730,15 @@ static BOOL __attribute__((noinline)) load_replay_file(struct Sana2LoopUnit *uni
              * the idiom that just broke the `replay=` config-value copy
              * above (see parse_config_line()'s comment); same fix. */
             CopyMem(framebuf + SANA2LOOP_RAW_HDR_SIZE, cur->ep_Data, cur->ep_Length);
+            /* M9: due tick, whole-second granularity -- (ts_sec -
+             * first_sec) is a safe subtraction (monotonic check above
+             * guarantees first_sec <= ts_sec), and *50 is a small-constant
+             * multiply of a runtime value, the same safely-synthesizable
+             * shape as M7's proven pct*655 (see SANA2LOOP_VBLANK_HZ's own
+             * comment for why this stays whole-second, never touching
+             * ts_usec at all, to avoid a genuinely risky
+             * runtime-value-vs-non-power-of-2-constant division/multiply). */
+            due_ticks[count] = (ph.ts_sec - first_sec) * SANA2LOOP_VBLANK_HZ;
             count++;
             cur++;
         }
@@ -1515,14 +1750,78 @@ static BOOL __attribute__((noinline)) load_replay_file(struct Sana2LoopUnit *uni
 
     if (!ok || count == 0) {
         FreeMem(packets, SANA2LOOP_MAX_REPLAY_PACKETS * sizeof(struct EchoPacket));
+        FreeMem(due_ticks, SANA2LOOP_MAX_REPLAY_PACKETS * sizeof(ULONG));
         return FALSE;
     }
 
-    unit->su_ReplayPackets = packets;
-    unit->su_ReplayNext    = packets;
-    unit->su_ReplayCount   = count;
-    unit->su_ReplayPos     = 0;
+    unit->su_ReplayPackets  = packets;
+    unit->su_ReplayNext     = packets;
+    unit->su_ReplayCount    = count;
+    unit->su_ReplayPos      = 0;
+    unit->su_ReplayDueTicks = due_ticks;
     return TRUE;
+}
+
+/* M9: one VBlank interrupt server for the whole device (see
+ * struct Sana2LoopDevice's own comment), added once in init_device().
+ * Ticks su_Tick for any unit that's online AND either SCHEDULED-mode
+ * replay or recording (echo/crossover units doing neither pay nothing --
+ * the loop still visits them, but the `wants_tick` check short-circuits
+ * before touching anything else). Delivering a due SCHEDULED-replay
+ * record allocates a fresh heap copy and hands it to the EXISTING
+ * deliver_packet() precedence (typed read / orphan read / rxqueue /
+ * drop+stats) -- per docs/PLAN.md decision #3's stated goal of ONE
+ * delivery path shared by echo, crossover, AND replay, this is not a
+ * parallel mechanism. AllocMem() from interrupt context is used
+ * deliberately, not accidentally: it's long-established as legal here
+ * (Exec's allocator wraps its own list ops in Disable()/Enable(), same
+ * discipline this file already uses throughout), and a failed allocation
+ * just silently skips that one record (no synchronous caller exists to
+ * report a failure to from inside an interrupt anyway) -- matching this
+ * file's own established "duppct" precedent (M7) for a best-effort extra
+ * copy.
+ *
+ * Server-type interrupt (VERTB is a shared chain, not an exclusive
+ * handler): per the Exec interrupt-server calling convention, entered
+ * with A1 = is_Data (this device's own base, set at registration below)
+ * and D0/D1/A0/A6 all scratch/unreliable -- reached exactly like this
+ * file's open/close/begin_io/abort_io hooks reach their own register
+ * parameters, just a different register. Must return with the CPU's Z
+ * flag SET (VERTB server convention: "always return with Z set" so the
+ * dispatcher keeps walking the rest of the chain) -- returning ULONG 0
+ * makes GCC's own epilogue end in a `moveq #0,d0`-shaped return, which
+ * leaves Z set; verified this holds via objdump before trusting it (the
+ * same verification discipline M1 already established for register
+ * annotations on hook calls), since this is exactly the kind of subtle
+ * calling-convention detail this project doesn't take on faith. */
+static ULONG __attribute__((used)) vblank_server(struct Sana2LoopDevice *sld asm("a1"))
+{
+    int i;
+
+    for (i = 0; i < SANA2LOOP_NUM_UNITS; i++) {
+        struct Sana2LoopUnit *unit = &sld->sld_Units[i];
+        BOOL scheduled = (unit->su_Mode == SANA2LOOP_MODE_REPLAY &&
+                          unit->su_ReplayMode == SANA2LOOP_REPLAYMODE_SCHEDULED);
+
+        if (!unit->su_Online || !(scheduled || unit->su_Recording))
+            continue;
+
+        unit->su_Tick++;
+
+        if (scheduled) {
+            while (unit->su_ReplayPos < unit->su_ReplayCount &&
+                   unit->su_ReplayDueTicks[unit->su_ReplayPos] <= unit->su_Tick) {
+                struct EchoPacket *fresh = AllocMem(sizeof(struct EchoPacket), MEMF_CLEAR);
+                if (fresh) {
+                    CopyMem(unit->su_ReplayNext, fresh, sizeof(struct EchoPacket));
+                    deliver_packet(unit, fresh);
+                }
+                unit->su_ReplayNext++; /* plain pointer step -- see the field's own comment */
+                unit->su_ReplayPos++;
+            }
+        }
+    }
+    return 0;
 }
 
 /*------- init_device ---------------------------------------
@@ -1558,6 +1857,17 @@ init_device(BPTR seg_list asm("a0"), struct Library *dev asm("d0"))
         list_init(&u->su_EventReqs);
     }
 
+    /* M9: one VBlank server for the device's whole lifetime -- see
+     * vblank_server()'s own comment and struct Sana2LoopDevice's field
+     * comment for why this lives embedded in the device base rather than
+     * a separately-allocated struct. */
+    sld->sld_VBlankInt.is_Node.ln_Type = NT_INTERRUPT;
+    sld->sld_VBlankInt.is_Node.ln_Pri  = 0;
+    sld->sld_VBlankInt.is_Node.ln_Name = device_name;
+    sld->sld_VBlankInt.is_Data = sld;
+    sld->sld_VBlankInt.is_Code = (void (*)())vblank_server;
+    AddIntServer(INTB_VERTB, &sld->sld_VBlankInt);
+
     return dev;
 }
 
@@ -1572,6 +1882,9 @@ static BPTR __attribute__((used)) expunge(struct Library *dev asm("a6"))
         dev->lib_Flags |= LIBF_DELEXP;
         return 0;
     }
+    /* Must happen before FreeMem below -- the interrupt struct itself
+     * lives inside the device base being freed. */
+    RemIntServer(INTB_VERTB, &sld->sld_VBlankInt);
     seg_list = sld->sld_SegList;
     Remove(&dev->lib_Node);
     FreeMem((char *)dev - dev->lib_NegSize, dev->lib_NegSize + dev->lib_PosSize);
@@ -1625,6 +1938,12 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
                                         transient, see UnitConfig's field
                                         comment -- so always starts empty,
                                         never seeded from prior state */
+            cfg.replaymode   = unit->su_ReplayMode;
+            cfg.record_path[0] = 0; /* M9: same transient-only contract as
+                                        replay_path -- su_RecordPath (the
+                                        persisted copy) is set below only
+                                        if this comes back non-empty */
+            cfg.recordmax    = unit->su_RecordMax;
             if (!read_unit_config(&cfg, unit->su_Index)) {
                 io->io_Error = S2ERR_BAD_ARGUMENT;
                 return;
@@ -1660,6 +1979,28 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
                 io->io_Error = S2ERR_BAD_ARGUMENT;
                 return;
             }
+            unit->su_ReplayMode = cfg.replaymode;
+
+            /* M9: `record=<path>` -- allocate the RAM buffer and write its
+             * pcap file header immediately (so record_append() below only
+             * ever needs to append records, never special-case "is this
+             * the first packet"). su_RecordMax must be applied BEFORE this
+             * check (it's the allocation size), independent of whether
+             * recording actually turns out to be enabled -- read_unit_config()
+             * accepts `recordmax=` regardless of whether `record=` is also
+             * given, same as every other independently-parsed key. */
+            unit->su_RecordMax = cfg.recordmax;
+            if (cfg.record_path[0] != 0) {
+                unit->su_RecordBuf = AllocMem(unit->su_RecordMax, MEMF_CLEAR);
+                if (!unit->su_RecordBuf) {
+                    io->io_Error = S2ERR_NO_RESOURCES;
+                    return;
+                }
+                CopyMem(cfg.record_path, unit->su_RecordPath, sizeof(unit->su_RecordPath));
+                pcap_build_file_header(unit->su_RecordBuf, SANA2LOOP_MAX_PACKET, PCAP_LINKTYPE_ETHERNET);
+                unit->su_RecordUsed = PCAP_FILE_HEADER_SIZE;
+                unit->su_Recording = TRUE;
+            }
         }
     }
 
@@ -1691,6 +2032,43 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
     io->io_Error = 0;
 }
 
+/* M9: flushes unit->su_RecordBuf (su_RecordUsed bytes -- the pcap file
+ * header plus every appended record) to su_RecordPath, at last close,
+ * only if the closer is a real Process (dos.library needs process-level
+ * context, same reasoning as read_unit_config()/load_replay_file()).
+ * Best-effort: a Task closer, or any failure opening the output file,
+ * silently loses the recording rather than failing CloseDevice() itself
+ * -- CloseDevice() has no error-reporting channel back to the caller
+ * (Exec's own contract), so there is nothing else a failure here could
+ * usefully do. */
+static void flush_record(struct Sana2LoopUnit *unit)
+{
+    struct Process *proc;
+    APTR old_window_ptr;
+    BPTR file;
+
+    if (!unit->su_Recording || FindTask(NULL)->tc_Node.ln_Type != NT_PROCESS)
+        return;
+
+    DOSBase = (struct DosLibrary *)OpenLibrary((STRPTR)"dos.library", 0);
+    if (!DOSBase)
+        return;
+
+    proc = (struct Process *)FindTask(NULL);
+    old_window_ptr = proc->pr_WindowPtr;
+    proc->pr_WindowPtr = (APTR)-1L;
+    file = Open((STRPTR)unit->su_RecordPath, MODE_NEWFILE);
+    proc->pr_WindowPtr = old_window_ptr;
+
+    if (file) {
+        Write(file, unit->su_RecordBuf, (LONG)unit->su_RecordUsed);
+        Close(file);
+    }
+
+    CloseLibrary((struct Library *)DOSBase);
+    DOSBase = NULL;
+}
+
 /* device dependent close function
  * CAUTION: runs in a forbidden state; guaranteed single-threaded. */
 static BPTR __attribute__((used))
@@ -1709,6 +2087,9 @@ close(struct Library *dev asm("a6"), struct IORequest *io asm("a1"))
          * entry -- otherwise a packet could sit there forever once
          * nobody's left to ever write another one and push it back out. */
         reorder_flush((struct Sana2LoopDevice *)dev, unit);
+        /* M9: same last-close boundary flushes any RAM-recorded traffic
+         * to its named output file. */
+        flush_record(unit);
     }
 
     FreeMem(slo, sizeof(struct Sana2LoopOpen));
@@ -1756,6 +2137,46 @@ static BOOL dest_matches_unit(struct Sana2LoopUnit *unit, const UBYTE *dst, BOOL
     return FALSE;
 }
 
+/* M9: appends `pkt`, pcap-formatted, into unit->su_RecordBuf if
+ * `record=<path>` is active for this unit -- a no-op otherwise. Called
+ * from deliver_packet() unconditionally (whether the packet ends up
+ * delivered, queued, or dropped -- a real capture point sees traffic
+ * regardless of whether a consumer was there to read it, matching how
+ * su_Stats.PacketsReceived already counts unconditionally too).
+ *
+ * Timestamps are su_Tick itself (whole "virtual seconds", ts_usec always
+ * 0) -- NOT real wall-clock time; see SANA2LOOP_VBLANK_HZ's own comment
+ * for why this device only ever deals in tick-granularity time. Once
+ * su_RecordMax would be exceeded, further packets are silently NOT
+ * appended -- su_RecordDropped counts how many, surfaced via
+ * S2_GETSPECIALSTATS per docs/PLAN.md decision #7 ("overflow = stop +
+ * count") -- whatever was already captured stays intact, never truncated
+ * or corrupted to make room. */
+static void record_append(struct Sana2LoopUnit *unit, struct EchoPacket *pkt)
+{
+    ULONG frame_len, need;
+    UBYTE *p;
+
+    if (!unit->su_Recording)
+        return;
+
+    frame_len = SANA2LOOP_RAW_HDR_SIZE + pkt->ep_Length;
+    need = PCAP_PKTHDR_SIZE + frame_len;
+    if (unit->su_RecordUsed + need > unit->su_RecordMax) {
+        unit->su_RecordDropped++;
+        return;
+    }
+
+    p = unit->su_RecordBuf + unit->su_RecordUsed;
+    pcap_build_pkthdr(p, unit->su_Tick, 0, frame_len, frame_len);
+    CopyMem(pkt->ep_DstAddr, p + PCAP_PKTHDR_SIZE, 6);
+    CopyMem(pkt->ep_SrcAddr, p + PCAP_PKTHDR_SIZE + 6, 6);
+    pcap_write_u16(p + PCAP_PKTHDR_SIZE + 12, (UWORD)pkt->ep_PacketType);
+    CopyMem(pkt->ep_Data, p + PCAP_PKTHDR_SIZE + SANA2LOOP_RAW_HDR_SIZE, pkt->ep_Length);
+
+    unit->su_RecordUsed += need;
+}
+
 /* Delivers one packet to `unit` (the receiving side -- for echo that's the
  * same unit the write happened on; crossover mode (M6) calls this on the
  * PEER unit instead, which is the whole reason this is its own function
@@ -1792,6 +2213,7 @@ static void deliver_packet(struct Sana2LoopUnit *unit, struct EchoPacket *pkt)
 
     Disable();
     unit->su_Stats.PacketsReceived++;
+    record_append(unit, pkt); /* M9: no-op unless record=<path> is active */
     {
         struct IOSana2Req *io, *next;
         for (io = (struct IOSana2Req *)unit->su_PendingReads.lh_Head;
@@ -2071,15 +2493,23 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
          * catch-anything counterpart. */
         struct EchoPacket *pkt = NULL, *scan, *next;
 
-        /* M8: a replay-mode unit's CMD_READ ignores typing entirely --
-         * "consume mode" is a scripted, in-order playback of whatever the
-         * capture actually contains, not a filter -- identical treatment
-         * to S2_READORPHAN below (see this case's own comment there for
-         * why). Once the loaded sequence is exhausted, falls straight
-         * through to the exact same queuing behavior as any other unit
-         * with no traffic waiting -- a replay unit doesn't hand out a
-         * special "end of stream" signal; SANA-II has no such concept. */
-        if (unit->su_Mode == SANA2LOOP_MODE_REPLAY && unit->su_ReplayPos < unit->su_ReplayCount) {
+        /* M8: a CONSUME-mode replay unit's CMD_READ ignores typing
+         * entirely -- "consume mode" is a scripted, in-order playback of
+         * whatever the capture actually contains, not a filter --
+         * identical treatment to S2_READORPHAN below (see this case's own
+         * comment there for why). Once the loaded sequence is exhausted,
+         * falls straight through to the exact same queuing behavior as
+         * any other unit with no traffic waiting -- a replay unit doesn't
+         * hand out a special "end of stream" signal; SANA-II has no such
+         * concept. M9's SCHEDULED replay mode deliberately does NOT take
+         * this branch: its whole point is that a read submitted before a
+         * record's due tick queues and WAITS for vblank_server() to
+         * deliver it through the normal deliver_packet() precedence, not
+         * grab whatever's next on demand -- see SANA2LOOP_REPLAYMODE_*'s
+         * own comment. */
+        if (unit->su_Mode == SANA2LOOP_MODE_REPLAY &&
+            unit->su_ReplayMode == SANA2LOOP_REPLAYMODE_CONSUME &&
+            unit->su_ReplayPos < unit->su_ReplayCount) {
             struct EchoPacket *rp = unit->su_ReplayNext;
             unit->su_ReplayNext++; /* plain pointer step -- see the field's
                                        own comment for why not su_ReplayPackets[su_ReplayPos] */
@@ -2135,7 +2565,9 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
          * CMD_READ and S2_READORPHAN are indistinguishable on a
          * replay-mode unit: both just mean "give me the next captured
          * frame, whatever type it turns out to be". */
-        if (unit->su_Mode == SANA2LOOP_MODE_REPLAY && unit->su_ReplayPos < unit->su_ReplayCount) {
+        if (unit->su_Mode == SANA2LOOP_MODE_REPLAY &&
+            unit->su_ReplayMode == SANA2LOOP_REPLAYMODE_CONSUME &&
+            unit->su_ReplayPos < unit->su_ReplayCount) {
             struct EchoPacket *rp = unit->su_ReplayNext;
             unit->su_ReplayNext++; /* plain pointer step -- see the field's
                                        own comment for why not su_ReplayPackets[su_ReplayPos] */
@@ -2491,10 +2923,18 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
     }
 
     case S2_GETSPECIALSTATS: {
-        /* Zero-record: this device doesn't track any special (per-driver,
-         * non-standard) stats yet. RecordCountMax is the caller's own
-         * buffer capacity (left as they set it); we only report how many
-         * we actually supplied. */
+        /* One record, only if this unit is both recording AND has
+         * actually dropped something to su_RecordMax (docs/PLAN.md
+         * decision #7: "overflow = stop + count via S2_GETSPECIALSTATS")
+         * -- zero records otherwise (this device tracks no OTHER special,
+         * per-driver stats). Per the standard SANA-II convention (not
+         * spelled out in the bare Sana2SpecialStatHeader struct itself,
+         * since it has no explicit array-pointer field): the caller
+         * allocates RecordCountMax Sana2SpecialStatRecord slots
+         * CONTIGUOUS with the header in the SAME ios2_StatData buffer;
+         * the driver writes up to that many immediately after the header,
+         * never more than RecordCountMax regardless of how many it
+         * actually has. */
         struct Sana2SpecialStatHeader *hdr =
             (struct Sana2SpecialStatHeader *)io->ios2_StatData;
         if (!hdr) {
@@ -2502,7 +2942,16 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
             io->ios2_WireError = S2WERR_NULL_POINTER;
             break;
         }
-        hdr->RecordCountSupplied = 0;
+        if (unit->su_RecordDropped > 0 && hdr->RecordCountMax >= 1) {
+            struct Sana2SpecialStatRecord *rec =
+                (struct Sana2SpecialStatRecord *)(hdr + 1);
+            rec->Type   = SANA2LOOP_SPECIALSTAT_RECORD_OVERFLOW;
+            rec->Count  = unit->su_RecordDropped;
+            rec->String = NULL;
+            hdr->RecordCountSupplied = 1;
+        } else {
+            hdr->RecordCountSupplied = 0;
+        }
         break;
     }
 

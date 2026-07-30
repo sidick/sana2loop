@@ -36,6 +36,11 @@ speed = 0        # turbo: instant floppy DMA, no realistic seek/rotation delay
 
 [floppy.df0]
 path = "minimal-boot.adf"   # built fresh by run.sh via xdftool
+# write_protected defaults to true (safe by default); M9's record-flush
+# test needs the guest to actually create/write a file back onto this
+# image, so this is disabled here -- safe since run.sh rebuilds the image
+# fresh (rm -f + reformat) on every invocation anyway, nothing to protect.
+write_protected = false
 
 [emulation]
 power_on = true

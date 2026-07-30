@@ -116,4 +116,47 @@ static void pcap_parse_pkthdr(const UBYTE *buf, BOOL swapped, struct pcap_pkthdr
     out->orig_len = pcap_read_u32(buf + 12, swapped);
 }
 
+/* Writers -- M9's RAM record. Always NATIVE order (big-endian on this
+ * project's own 68000 device): there is no need to ever write
+ * little-endian here, since pcap's whole design point is that any
+ * conformant reader (tcpdump/scapy/Wireshark) already auto-detects and
+ * handles EITHER magic value -- writing this machine's own native order
+ * is fully interoperable, not a limitation. No `swapped` parameter, unlike
+ * the readers above: this is this device's OWN writer for its OWN native
+ * format, not a general-purpose any-order encoder. */
+static void pcap_write_u32(UBYTE *p, ULONG v)
+{
+    p[0] = (UBYTE)(v >> 24);
+    p[1] = (UBYTE)(v >> 16);
+    p[2] = (UBYTE)(v >> 8);
+    p[3] = (UBYTE)v;
+}
+
+static void pcap_write_u16(UBYTE *p, UWORD v)
+{
+    p[0] = (UBYTE)(v >> 8);
+    p[1] = (UBYTE)v;
+}
+
+/* Writes a PCAP_FILE_HEADER_SIZE-byte native-order file header. */
+static void pcap_build_file_header(UBYTE *buf, ULONG snaplen, ULONG linktype)
+{
+    pcap_write_u32(buf + 0, PCAP_MAGIC_NATIVE);
+    pcap_write_u16(buf + 4, 2);   /* version_major */
+    pcap_write_u16(buf + 6, 4);   /* version_minor */
+    pcap_write_u32(buf + 8, 0);   /* thiszone */
+    pcap_write_u32(buf + 12, 0);  /* sigfigs */
+    pcap_write_u32(buf + 16, snaplen);
+    pcap_write_u32(buf + 20, linktype);
+}
+
+/* Writes a PCAP_PKTHDR_SIZE-byte native-order record header. */
+static void pcap_build_pkthdr(UBYTE *buf, ULONG ts_sec, ULONG ts_usec, ULONG incl_len, ULONG orig_len)
+{
+    pcap_write_u32(buf + 0, ts_sec);
+    pcap_write_u32(buf + 4, ts_usec);
+    pcap_write_u32(buf + 8, incl_len);
+    pcap_write_u32(buf + 12, orig_len);
+}
+
 #endif /* SANA2LOOP_PCAP_H */

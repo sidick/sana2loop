@@ -75,10 +75,11 @@ for f in "$HERE"/fixtures/unit*.config; do
     "$XDFTOOL" "$ADF" write "$f" "s/sana2loop/$n.config" > /dev/null
 done
 
-# M8: unit 9's mode=replay config (above) names this pcap capture via
-# S:sana2loop/replay.pcap -- not a unit*.config-shaped name, so it doesn't
-# match the glob above and needs its own write.
+# M8/M9: unit 9's and unit 10's mode=replay configs name these pcap
+# captures via S:sana2loop/*.pcap -- not unit*.config-shaped names, so
+# they don't match the glob above and need their own writes.
 "$XDFTOOL" "$ADF" write "$HERE/fixtures/replay.pcap" "s/sana2loop/replay.pcap" > /dev/null
+"$XDFTOOL" "$ADF" write "$HERE/fixtures/scheduled.pcap" "s/sana2loop/scheduled.pcap" > /dev/null
 
 OUT=$(mktemp)
 cleanup() { rm -f "$OUT"; }
@@ -97,7 +98,7 @@ grep -q '^END' "$OUT" 2>/dev/null || { echo "FAIL: no END marker (raise BENCH?)"
 # just the aggregate RESULT= -- so a regression in one milestone's check
 # names itself instead of being buried in one pass/fail bit. Keep this list
 # in sync with the NAME_* constants in sana2test.c as milestones add more.
-SUBTESTS="online devicequery stationaddress echo offline onevent oneventnow abortio cmdflush bufferhooks delivery configinterface tracktype broadcast multicast multicastaddress raw config crossover faultdrop faultdup faultreorder faultoversilent faultflap replay"
+SUBTESTS="online devicequery stationaddress echo offline onevent oneventnow abortio cmdflush bufferhooks delivery configinterface tracktype broadcast multicast multicastaddress raw config crossover faultdrop faultdup faultreorder faultoversilent faultflap replay scheduled record"
 fails=0
 for s in $SUBTESTS; do
     grep -q "^SUB=${s}=PASS$" "$OUT" 2>/dev/null || {
@@ -106,6 +107,23 @@ for s in $SUBTESTS; do
     }
 done
 grep -q '^RESULT=PASS' "$OUT" 2>/dev/null || { echo "FAIL: RESULT=PASS not found" >&2; fails=$((fails + 1)); }
+
+# M9: the "record" sub-test above only proves unit 11's 3 writes
+# succeeded from the guest's own point of view -- what actually ended up
+# written to the host-side ADF is inherently a host-side question, so
+# extract it via xdftool and byte-compare with verify_record.py. Depends
+# on Copperline actually persisting floppy writes back to the image file
+# (confirmed empirically -- see docs/PLAN.md's M9 risk note) and on
+# machine.toml's write_protected=false (floppies default write-protected).
+RECORDED=$(mktemp)
+if "$XDFTOOL" "$ADF" type s/sana2loop/recorded.pcap > "$RECORDED" 2>/dev/null; then
+    python3 "$HERE/verify_record.py" "$RECORDED" || fails=$((fails + 1))
+else
+    echo "FAIL: s/sana2loop/recorded.pcap not found on the ADF post-run" >&2
+    fails=$((fails + 1))
+fi
+rm -f "$RECORDED"
+
 [ "$fails" -eq 0 ] || exit 1
 
 echo "PASS: loopback.device on-target smoke test (via serial)"

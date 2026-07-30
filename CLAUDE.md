@@ -32,10 +32,19 @@ they may require Kickstart 2.0+ where convenient (documented per-tool).
 ## Current state
 
 Working through `docs/PLAN.md`'s milestones (M0-M12: spec-correctness
-backfill, then Phases 2-4). **M0-M8 done**, each validated on-target under
-Copperline against both bundled AROS (CI) and a real Kickstart 1.3 ROM
-(`make copperline-smoke` / `KICK=... make copperline-smoke`,
-see `tests/copperline/`) before being considered complete.
+backfill, then Phases 2-4). **M0-M8 done** (validated on-target under
+Copperline against both bundled AROS (CI) and a real Kickstart 1.3 ROM,
+`make copperline-smoke` / `KICK=... make copperline-smoke`,
+see `tests/copperline/`, before being considered complete). **M9 is
+implemented and fully verified on real Kickstart 1.3** (`make
+copperline-smoke KICK=...` passes every assertion, including the new
+`scheduled`/`record` sub-tests and the post-run `RECORD_VERIFY=PASS`
+check) **but currently hangs under bundled AROS** specifically once a
+unit uses `replaymode=scheduled` or `record=` -- a real, not-yet-root-caused
+AROS/Copperline compatibility issue (confirmed NOT simply "AROS doesn't
+dispatch custom VBlank interrupt servers" -- see docs/PLAN.md's M9 risk
+note for the full investigation). The public `copperline-smoke-aros` CI
+job is expected to fail/hang on this until resolved.
 
 - `src/loopback_device.c` -- the device. Hand-rolled Resident/auto-init
   (see "Architecture" below for why, and for the on-target Guru
@@ -183,14 +192,47 @@ see `tests/copperline/`) before being considered complete.
     failed its own `AllocMem()` under bundled AROS specifically, since
     AROS has to load its own Kickstart replacement into the same
     512K+512K test profile a real ROM never touches, leaving measurably
-    less free RAM. Settled on 16 (~25 KB), which passes with headroom on
-    both targets. See `docs/sana2-notes.md`'s M8 section for the full
-    story.
-  - 10 units pre-allocated in the device base (unit 0 wired for echo by
-    default; units 2-3 default-paired for crossover; units 4-9 spare/echo,
-    each claimed by exactly one on-target test's own config fixture so no
-    two tests' expectations ever collide on the same unit -- see
-    `tests/copperline/run.sh`'s fixture layout for the current
+    less free RAM. Settled on 16 (~25 KB) at M8 -- **M9 had to shrink this
+    again, to 4** (~6 KB), after its own per-unit field growth (plus a
+    second replay-mode unit having to coexist with the first one's
+    still-held buffer, since this device only frees replay memory at the
+    NEXT open, never at close) ate further into that headroom. See
+    `docs/sana2-notes.md`'s M8/M9 sections for the full story.
+  - **M9**: one VBlank interrupt server (`vblank_server()`,
+    `AddIntServer(INTB_VERTB, ...)`, added once at device init) drives two
+    new features via the same tick: `replaymode=scheduled` (an alternative
+    to M8's on-demand `consume` default) delivers each loaded record
+    through the real `deliver_packet()` precedence at its own captured
+    timestamp's due tick (whole-second granularity, deliberately not
+    microsecond-exact -- see `docs/sana2-notes.md`), and `record=<path>`
+    (+ `recordmax`, default 64 KB) taps that same `deliver_packet()` to
+    build a RAM-buffered pcap capture of whatever a unit actually
+    receives, flushed to file at last close. Verified on real Kickstart
+    1.3: all assertions pass, including a real S2_CopyToBuff hook
+    correctly invoked from actual VBlank interrupt context (the
+    project's `docs/PLAN.md`-flagged risk for this milestone), and a
+    post-run host-side byte-compare of the flushed pcap file
+    (`tests/copperline/verify_record.py`) against the 3 known writes that
+    produced it. Found two real bugs along the way: a latent, since-M7
+    off-by-assumption in `build_config_path()` (its one-line `'0' +
+    unit_index` digit substitution silently mis-encoded unit numbers past
+    9, never triggered before M9 since every unit number through M8 was
+    still single-digit); and confirmed empirically (via a standalone
+    write-then-read-back test, before building the real feature on the
+    assumption) that Copperline persists floppy writes to the host ADF
+    file, but only once `write_protected = false` is set in
+    `[floppy.dfN]` (defaults to `true`). **Known, unresolved on bundled
+    AROS specifically**: the guest hangs once a unit actually uses
+    `replaymode=scheduled` or `record=` -- confirmed via an isolated
+    standalone test that this is NOT simply "AROS doesn't dispatch custom
+    VBlank interrupt servers" (it does, verified). See `docs/PLAN.md`'s M9
+    risk note and `docs/sana2-notes.md`'s M9 section for the full
+    investigation so far.
+  - 12 units pre-allocated in the device base (unit 0 wired for echo by
+    default; units 2-3 default-paired for crossover; units 4-11
+    spare/echo, each claimed by exactly one on-target test's own config
+    fixture so no two tests' expectations ever collide on the same unit
+    -- see `tests/copperline/run.sh`'s fixture layout for the current
     allocation). A unit fully resets (`reset_unit()`: offline, factory
     address, stats zeroed, `rxqueue` back to 0, mode/peer/fault-injection
     knobs all to their compiled-in defaults) the moment its open count
@@ -211,8 +253,10 @@ see `tests/copperline/`) before being considered complete.
   reason specific to itself (not the device): see the comment block at its
   top for a real on-target bug this tripped over and how it was found.
 
-Not yet done: VBlank tick-scheduled replay + RAM record (M9), `SanaDump`/
-`SanaSend`.
+Not yet done: `SanaDump`/`SanaSend` (M11), Aminet packaging (M12). M9
+(VBlank tick-scheduled replay + RAM record) is implemented and real-1.3-verified
+but has an open AROS-under-Copperline compatibility issue -- see "Current
+state" above.
 
 ## Architecture
 
@@ -273,7 +317,9 @@ pinned `ghcr.io/reinauer/container-amiga-gcc` image narrator.wyoming uses
 
 `make docker` has been run successfully in this environment (both binaries
 build clean), and `make copperline-smoke` has confirmed every sub-test
-through M8 on-target against both bundled AROS and real Kickstart 1.3 (see
+through M8 on-target against both bundled AROS and real Kickstart 1.3, and
+every M9 sub-test on real Kickstart 1.3 (bundled AROS currently hangs on
+M9's `scheduled` sub-test specifically -- see "Current state" above) (see
 "Testing under Copperline" below and `tests/copperline/sana2test.c`'s
 `SUB=` list).
 
