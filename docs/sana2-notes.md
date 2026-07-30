@@ -26,22 +26,44 @@ struct IOSana2Req {
 `loopback.device` cares about (Ethernet) only uses 6. Fields beyond byte 6
 should be zeroed, not left as garbage, when a driver fills an address.
 
-## Commands used in Phase 1
+## Commands implemented
 
 | Command | Value | Direction | Notes |
 |---|---|---|---|
-| `CMD_READ` | 2 | caller waits for a packet | completes later if none queued |
-| `CMD_WRITE` | 3 | caller sends a packet | echo: swaps into a queued/pending read |
-| `CMD_FLUSH` | 8 | caller | aborts queued reads with `IOERR_ABORTED` |
-| `S2_DEVICEQUERY` | `CMD_NONSTD+0` | caller | fills `struct Sana2DeviceQuery` via `ios2_StatData` |
-| `S2_GETSTATIONADDRESS` | `CMD_NONSTD+1` | caller | fills both `ios2_SrcAddr`/`ios2_DstAddr` with the current address |
+| `CMD_READ` | 2 | caller waits for a packet | **typed**: only a packet whose type matches `ios2_PacketType` (set before submitting) satisfies it |
+| `S2_READORPHAN` | `CMD_NONSTD+15` | caller waits for any unclaimed packet | untyped catch-all; see delivery precedence below |
+| `CMD_WRITE` | 3 | caller sends a packet | echo: swaps into a queued/pending read via `deliver_packet()` |
+| `CMD_FLUSH` | 8 | caller | aborts queued `CMD_READ`/`S2_READORPHAN` with `IOERR_ABORTED` |
+| `S2_DEVICEQUERY` | `CMD_NONSTD+0` | caller | fills `struct Sana2DeviceQuery` via `ios2_StatData` (NULL-checked) |
+| `S2_GETSTATIONADDRESS` | `CMD_NONSTD+1` | caller | fills both `ios2_SrcAddr`/`ios2_DstAddr` with the current address (no `S2_CONFIGINTERFACE` yet to make them diverge -- M3) |
 | `S2_ONLINE` / `S2_OFFLINE` | `CMD_NONSTD+16/17` | caller | flips unit state, fires queued `S2_ONEVENT`s |
 | `S2_ONEVENT` | `CMD_NONSTD+14` | caller | see below |
+| `S2_GETGLOBALSTATS` | `CMD_NONSTD+13` | caller | copies `struct Sana2DeviceStats` whole (no `SizeAvailable`/`SizeSupplied` negotiation, unlike `S2_DEVICEQUERY`) |
+| `S2_GETSPECIALSTATS` | `CMD_NONSTD+12` | caller | zero-record: `RecordCountSupplied = 0`, nothing tracked yet |
+
+## Delivery precedence (`deliver_packet()`, M2)
+
+A packet arriving on a unit is delivered in this order, each step consuming
+the packet if it matches:
+
+1. A queued **typed** `CMD_READ` whose `ios2_PacketType` matches exactly.
+2. Else a queued `S2_READORPHAN` (any type).
+3. Else, only if `rxqueue` (config, defaults to **0**) allows it, a bounded
+   pending-data queue.
+4. Else **dropped**, and `Sana2DeviceStats.UnknownTypesReceived` counts it.
+
+`rxqueue` defaults to 0 (strict drop, no buffering at all) deliberately --
+the proposal's teaching claim is specifically that "drivers hold no
+internal buffers; this source shows it." A nonzero `rxqueue` is an
+explicit, documented convenience divergence for casual poking, not the
+default. This means callers must queue a `CMD_READ` (via `SendIO`, not
+`DoIO`) **before** the matching `CMD_WRITE` happens, not after -- the
+on-target test harness does exactly this.
 
 Deferred to later phases (accepted-but-unimplemented -> `IOERR_NOCMD` for
 now): `S2_CONFIGINTERFACE`, `S2_ADD/DELMULTICASTADDRESS`, `S2_MULTICAST`/
 `S2_BROADCAST` (send flags), `S2_TRACKTYPE`/`S2_UNTRACKTYPE`,
-`S2_GETTYPESTATS`/`S2_GETSPECIALSTATS`/`S2_GETGLOBALSTATS`, `S2_READORPHAN`.
+`S2_GETTYPESTATS`.
 
 ## `S2_DEVICEQUERY` convention (easy to get backwards)
 
@@ -57,14 +79,24 @@ buffer before the call. The driver:
 
 `AddrFieldSize` is in **bits** (48 for Ethernet's 6-byte address), not bytes.
 
-## `S2_ONEVENT` is edge-triggered
+## `S2_ONEVENT` completes immediately if already true, else waits for the next transition
 
-A queued `S2_ONEVENT` (mask in `ios2_WireError`) completes on the *next*
-matching transition, not the current state. Sending `S2_ONEVENT` for
-`S2EVENT_ONLINE` to an already-online unit blocks until the unit goes
-offline and back online again -- it is a wait-for-change primitive, not a
-status poll (`S2_DEVICEQUERY`, and later `S2_GETGLOBALSTATS`, are the
-status-poll path).
+**Correction from an earlier version of this doc**, which claimed this was
+purely edge-triggered (a request for `S2EVENT_ONLINE` sent to an
+already-online unit would block until a spurious offline-then-online
+cycle). That was wrong, caught by cross-checking a real shipped SANA-II
+driver (plipbox, github.com/cnvogelg/plipbox) rather than by testing the
+claim: only `S2EVENT_ONLINE`/`S2EVENT_OFFLINE` map to a persistent state
+that can already be "true" at submission time, and for those two, a
+request that already matches the current state completes **immediately**
+-- which is also the behavior a caller actually wants ("tell me once the
+link is up" should return right away if it already is; requiring a
+spurious down-then-up cycle first would be a real bug, not a nicety).
+Only when the requested state does *not* already hold does the request
+queue and wait for the next matching `S2_ONLINE`/`S2_OFFLINE` transition.
+The other event bits (`S2EVENT_ERROR`/`TX`/`RX`/`BUFF`/`HARDWARE`/
+`SOFTWARE`) describe momentary conditions with no current-state concept,
+so they always queue.
 
 ## Buffer management hook (`ios2_BufferManagement`) -- implemented since M1
 

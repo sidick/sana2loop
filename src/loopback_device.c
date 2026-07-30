@@ -87,11 +87,19 @@ struct EchoPacket {
 
 struct Sana2LoopUnit {
     struct Unit su_Unit;              /* standard exec unit header -- must be first */
+    UBYTE       su_Index;             /* this unit's number, for reset_unit() */
     UBYTE       su_Station[6];        /* fake ethernet station address */
     ULONG       su_MTU;
     BOOL        su_Online;
-    struct List su_PendingReads;      /* queued CMD_READ IORequests awaiting data */
-    struct List su_PendingData;       /* echoed packets awaiting a CMD_READ */
+    ULONG       su_RxQueueMax;        /* bounded pending-data depth; 0 = strict
+                                          SANA-II drop semantics (the default --
+                                          M5's config knob overrides this) */
+    ULONG       su_PendingDataCount;  /* current su_PendingData depth */
+    struct Sana2DeviceStats su_Stats;
+    struct List su_PendingReads;      /* queued, TYPED CMD_READ IORequests */
+    struct List su_OrphanReads;       /* queued S2_READORPHAN IORequests (untyped) */
+    struct List su_PendingData;       /* packets awaiting a CMD_READ/S2_READORPHAN,
+                                          bounded by su_RxQueueMax */
     struct List su_EventReqs;         /* queued S2_ONEVENT IORequests */
 };
 
@@ -258,12 +266,13 @@ static void apply_buffer_mgmt_tags(struct Sana2LoopOpen *slo, struct TagItem *ta
  * than hand a freed cookie's hooks to a later packet delivery. */
 static void abort_requests_for_open(struct Sana2LoopUnit *unit, struct Sana2LoopOpen *slo)
 {
-    struct List *lists[2];
+    struct List *lists[3];
     int li;
 
     lists[0] = &unit->su_PendingReads;
-    lists[1] = &unit->su_EventReqs;
-    for (li = 0; li < 2; li++) {
+    lists[1] = &unit->su_OrphanReads;
+    lists[2] = &unit->su_EventReqs;
+    for (li = 0; li < 3; li++) {
         struct IOSana2Req *io, *next;
         Disable();
         for (io = (struct IOSana2Req *)lists[li]->lh_Head;
@@ -298,12 +307,19 @@ static BOOL fill_read_from_packet(struct IOSana2Req *io, struct EchoPacket *pkt)
     return slo->slo_CopyToBuff(io->ios2_Data, pkt->ep_Data, pkt->ep_Length);
 }
 
-/* Complete any queued S2_ONEVENT request whose mask matches `event`.
- * Edge-triggered by design: a request queued while already "true" (e.g.
- * S2_ONEVENT for S2EVENT_ONLINE sent to an already-online unit) waits for
- * the *next* transition, not the current state -- matching how a caller
- * uses it as a wait-for-next-change primitive rather than a status poll
- * (S2_DEVICEQUERY / a future S2_GETGLOBALSTATS is the status-poll path). */
+/* Completes every QUEUED S2_ONEVENT request whose mask matches `event`,
+ * fired on an actual S2_ONLINE/S2_OFFLINE transition. A request whose mask
+ * already matched the CURRENT state at S2_ONEVENT submission time never
+ * reaches this queue at all -- it's completed immediately at dispatch
+ * (see the S2_ONEVENT case in begin_io()). An earlier version of this
+ * device queued unconditionally and called that "edge-triggered by
+ * design," which was wrong: cross-checked against plipbox
+ * (github.com/cnvogelg/plipbox), a real shipped SANA-II driver, which
+ * completes immediately when the requested state already holds. That's
+ * also the more useful behavior for the common case ("tell me once the
+ * link is up," which should return right away if it already is) --
+ * requiring a spurious down-then-up cycle first would be a real
+ * consumer-facing bug, not just a spec nicety. */
 static void fire_event(struct Sana2LoopUnit *unit, ULONG event)
 {
     struct IOSana2Req *io, *next;
@@ -336,8 +352,13 @@ static void drain_unit(struct Sana2LoopUnit *unit)
 
     while ((n = safe_rem_head(&unit->su_PendingData)) != NULL)
         FreeMem(n, sizeof(struct EchoPacket));
+    unit->su_PendingDataCount = 0;
 
     while ((io = (struct IOSana2Req *)safe_rem_head(&unit->su_PendingReads)) != NULL) {
+        io->ios2_Req.io_Error = IOERR_ABORTED;
+        ReplyMsg(&io->ios2_Req.io_Message);
+    }
+    while ((io = (struct IOSana2Req *)safe_rem_head(&unit->su_OrphanReads)) != NULL) {
         io->ios2_Req.io_Error = IOERR_ABORTED;
         ReplyMsg(&io->ios2_Req.io_Message);
     }
@@ -345,6 +366,41 @@ static void drain_unit(struct Sana2LoopUnit *unit)
         io->ios2_Req.io_Error = IOERR_ABORTED;
         ReplyMsg(&io->ios2_Req.io_Message);
     }
+}
+
+/* Resets a unit to a known-clean state: called once per unit at device
+ * load (via init_device) and again every time a unit's open count
+ * transitions 0->1 (see open()) -- the latter is what "config re-read on
+ * next open" (M5) means precisely: a busy unit's live config is never
+ * disturbed, but a fully-idle one starts fresh for whoever opens it next. */
+static void reset_unit(struct Sana2LoopUnit *unit)
+{
+    unit->su_MTU         = SANA2LOOP_DEFAULT_MTU;
+    unit->su_Online      = FALSE;
+    unit->su_RxQueueMax  = 0; /* strict drop by default -- see docs/PLAN.md M2 */
+    unit->su_PendingDataCount = 0;
+
+    /* Locally-administered (bit set in the first octet) fake address,
+     * spelling "S2L" in the middle bytes so it's recognisable in a packet
+     * dump; last byte is the unit number. This is the FACTORY default --
+     * once S2_CONFIGINTERFACE (M3) can change the current address, this
+     * reset is what restores it. */
+    unit->su_Station[0] = 0x02;
+    unit->su_Station[1] = 0x53;
+    unit->su_Station[2] = 0x32;
+    unit->su_Station[3] = 0x4C;
+    unit->su_Station[4] = 0x00;
+    unit->su_Station[5] = unit->su_Index;
+
+    unit->su_Stats.PacketsReceived      = 0;
+    unit->su_Stats.PacketsSent          = 0;
+    unit->su_Stats.BadData              = 0;
+    unit->su_Stats.Overruns             = 0;
+    unit->su_Stats.Unused               = 0;
+    unit->su_Stats.UnknownTypesReceived = 0;
+    unit->su_Stats.Reconfigurations     = 0;
+    unit->su_Stats.LastStart.tv_secs    = 0;
+    unit->su_Stats.LastStart.tv_usec    = 0;
 }
 
 /* Exec's real NewList() isn't reliably declared under this minimal include
@@ -381,19 +437,11 @@ init_device(BPTR seg_list asm("a0"), struct Library *dev asm("d0"))
         struct Sana2LoopUnit *u = &sld->sld_Units[i];
 
         u->su_Unit.unit_OpenCnt = 0;
-        u->su_MTU    = SANA2LOOP_DEFAULT_MTU;
-        u->su_Online = FALSE;
-        /* Locally-administered (bit set in the first octet) fake address,
-         * spelling "S2L" in the middle bytes so it's recognisable in a
-         * packet dump; last byte is the unit number. */
-        u->su_Station[0] = 0x02;
-        u->su_Station[1] = 0x53;
-        u->su_Station[2] = 0x32;
-        u->su_Station[3] = 0x4C;
-        u->su_Station[4] = 0x00;
-        u->su_Station[5] = (UBYTE)i;
+        u->su_Index = (UBYTE)i;
+        reset_unit(u);
 
         list_init(&u->su_PendingReads);
+        list_init(&u->su_OrphanReads);
         list_init(&u->su_PendingData);
         list_init(&u->su_EventReqs);
     }
@@ -426,6 +474,7 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
 {
     struct Sana2LoopDevice *sld = (struct Sana2LoopDevice *)dev;
     struct IOSana2Req *io2 = (struct IOSana2Req *)io;
+    struct Sana2LoopUnit *unit;
     struct Sana2LoopOpen *slo;
 
     io->io_Error = S2ERR_BAD_ARGUMENT;
@@ -434,12 +483,17 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
     if (unitnum >= SANA2LOOP_NUM_UNITS)
         return;
 
+    unit = &sld->sld_Units[unitnum];
+    if (unit->su_Unit.unit_OpenCnt == 0)
+        reset_unit(unit); /* first opener of an idle unit starts clean --
+                              see reset_unit()'s comment */
+
     slo = AllocMem(sizeof(struct Sana2LoopOpen), MEMF_CLEAR);
     if (!slo) {
         io->io_Error = S2ERR_NO_RESOURCES;
         return;
     }
-    slo->slo_Unit  = &sld->sld_Units[unitnum];
+    slo->slo_Unit  = unit;
     slo->slo_Magic = SANA2LOOP_OPEN_MAGIC;
     /* ios2_BufferManagement arrives pointing at the caller's tag list (or
      * NULL); apply_buffer_mgmt_tags() reads it before we overwrite the
@@ -447,7 +501,7 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
     apply_buffer_mgmt_tags(slo, (struct TagItem *)io2->ios2_BufferManagement);
 
     io->io_Device = (struct Device *)dev;
-    io->io_Unit   = &sld->sld_Units[unitnum].su_Unit;
+    io->io_Unit   = &unit->su_Unit;
     io->io_Unit->unit_OpenCnt++;
     dev->lib_OpenCnt++;
     io2->ios2_BufferManagement = slo; /* per SANA-II: the opener must copy
@@ -484,6 +538,69 @@ close(struct Library *dev asm("a6"), struct IORequest *io asm("a1"))
     return 0;
 }
 
+/* Delivers one packet to `unit` (the receiving side -- for echo that's the
+ * same unit the write happened on; a later milestone's crossover mode
+ * calls this on the PEER unit instead, which is the whole reason this is
+ * its own function rather than inlined into CMD_WRITE).
+ *
+ * SANA-II precedence, strictly: a pending CMD_READ queued for this exact
+ * ios2_PacketType, else a pending S2_READORPHAN (any type), else -- only
+ * if the unit's rxqueue allows it -- a bounded pending-data queue, else
+ * drop. Real SANA-II drivers hold no internal buffers; rxqueue defaults to
+ * 0 (strict drop) for that reason, per the proposal's teaching claim --
+ * see docs/PLAN.md's M2 entry for why a nonzero default was considered and
+ * rejected. `pkt` is always consumed by this call: delivered, queued, or
+ * freed, never left dangling.
+ *
+ * Must never be called with a Disable() already held by the caller: it
+ * calls consumer hooks and ReplyMsg, neither of which may run disabled. */
+static void deliver_packet(struct Sana2LoopUnit *unit, struct EchoPacket *pkt)
+{
+    struct IOSana2Req *waiting = NULL;
+    BOOL queued = FALSE;
+
+    Disable();
+    unit->su_Stats.PacketsReceived++;
+    {
+        struct IOSana2Req *io, *next;
+        for (io = (struct IOSana2Req *)unit->su_PendingReads.lh_Head;
+             io->ios2_Req.io_Message.mn_Node.ln_Succ;
+             io = next) {
+            next = (struct IOSana2Req *)io->ios2_Req.io_Message.mn_Node.ln_Succ;
+            if (io->ios2_PacketType == pkt->ep_PacketType) {
+                Remove((struct Node *)io);
+                waiting = io;
+                break;
+            }
+        }
+        if (!waiting)
+            waiting = (struct IOSana2Req *)RemHead(&unit->su_OrphanReads);
+        if (!waiting && unit->su_PendingDataCount < unit->su_RxQueueMax) {
+            AddTail(&unit->su_PendingData, (struct Node *)pkt);
+            unit->su_PendingDataCount++;
+            queued = TRUE;
+        }
+        if (!waiting && !queued)
+            unit->su_Stats.UnknownTypesReceived++;
+    }
+    Enable();
+
+    if (waiting) {
+        if (fill_read_from_packet(waiting, pkt)) {
+            waiting->ios2_Req.io_Error = 0;
+        } else {
+            waiting->ios2_Req.io_Error = S2ERR_NO_RESOURCES;
+            waiting->ios2_WireError = S2WERR_BUFF_ERROR;
+        }
+        FreeMem(pkt, sizeof(struct EchoPacket));
+        if (!(waiting->ios2_Req.io_Flags & IOF_QUICK))
+            ReplyMsg(&waiting->ios2_Req.io_Message);
+    } else if (!queued) {
+        FreeMem(pkt, sizeof(struct EchoPacket));
+    }
+    /* else: queued -- pkt now belongs to su_PendingData, nothing more to do */
+}
+
 /* device dependent beginio function */
 static void __attribute__((used))
 begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
@@ -498,7 +615,6 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
 
     case CMD_WRITE: {
         struct EchoPacket *pkt;
-        struct IOSana2Req *waiting;
         struct Sana2LoopOpen *writer_slo = (struct Sana2LoopOpen *)io->ios2_BufferManagement;
 
         if (!unit->su_Online) {
@@ -533,25 +649,32 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
             break;
         }
 
-        waiting = (struct IOSana2Req *)safe_rem_head(&unit->su_PendingReads);
-        if (waiting) {
-            if (fill_read_from_packet(waiting, pkt)) {
-                waiting->ios2_Req.io_Error = 0;
-            } else {
-                waiting->ios2_Req.io_Error = S2ERR_NO_RESOURCES;
-                waiting->ios2_WireError = S2WERR_BUFF_ERROR;
-            }
-            FreeMem(pkt, sizeof(struct EchoPacket));
-            if (!(waiting->ios2_Req.io_Flags & IOF_QUICK))
-                ReplyMsg(&waiting->ios2_Req.io_Message);
-        } else {
-            safe_add_tail(&unit->su_PendingData, (struct Node *)pkt);
-        }
+        unit->su_Stats.PacketsSent++;
+        deliver_packet(unit, pkt);
         break;
     }
 
     case CMD_READ: {
-        struct EchoPacket *pkt = (struct EchoPacket *)safe_rem_head(&unit->su_PendingData);
+        /* Typed: only a packet whose ep_PacketType matches what the
+         * caller set in ios2_PacketType before submitting satisfies this
+         * read (per SANA-II convention) -- S2_READORPHAN below is the
+         * catch-anything counterpart. */
+        struct EchoPacket *pkt = NULL, *scan, *next;
+
+        Disable();
+        for (scan = (struct EchoPacket *)unit->su_PendingData.lh_Head;
+             scan->ep_Node.ln_Succ;
+             scan = next) {
+            next = (struct EchoPacket *)scan->ep_Node.ln_Succ;
+            if (scan->ep_PacketType == io->ios2_PacketType) {
+                Remove((struct Node *)scan);
+                unit->su_PendingDataCount--;
+                pkt = scan;
+                break;
+            }
+        }
+        Enable();
+
         if (pkt) {
             if (fill_read_from_packet(io, pkt)) {
                 io0->io_Error = 0;
@@ -568,9 +691,38 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
         break;
     }
 
+    case S2_READORPHAN: {
+        /* Untyped: takes whatever's at the head of su_PendingData, which
+         * (by deliver_packet()'s precedence) only ever holds packets that
+         * already failed to match any pending typed read -- i.e. already
+         * orphaned, no further type filtering needed here. */
+        struct EchoPacket *pkt = (struct EchoPacket *)safe_rem_head(&unit->su_PendingData);
+        if (pkt) {
+            Disable();
+            unit->su_PendingDataCount--;
+            Enable();
+            if (fill_read_from_packet(io, pkt)) {
+                io0->io_Error = 0;
+            } else {
+                io0->io_Error = S2ERR_NO_RESOURCES;
+                io->ios2_WireError = S2WERR_BUFF_ERROR;
+            }
+            FreeMem(pkt, sizeof(struct EchoPacket));
+        } else {
+            io0->io_Flags &= ~IOF_QUICK;
+            safe_add_tail(&unit->su_OrphanReads, (struct Node *)io);
+            return; /* completed later by a matching CMD_WRITE, or aborted */
+        }
+        break;
+    }
+
     case CMD_FLUSH: {
         struct IOSana2Req *pending;
         while ((pending = (struct IOSana2Req *)safe_rem_head(&unit->su_PendingReads)) != NULL) {
+            pending->ios2_Req.io_Error = IOERR_ABORTED;
+            ReplyMsg(&pending->ios2_Req.io_Message);
+        }
+        while ((pending = (struct IOSana2Req *)safe_rem_head(&unit->su_OrphanReads)) != NULL) {
             pending->ios2_Req.io_Error = IOERR_ABORTED;
             ReplyMsg(&pending->ios2_Req.io_Message);
         }
@@ -585,8 +737,15 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
 
     case S2_DEVICEQUERY: {
         struct Sana2DeviceQuery *dq = (struct Sana2DeviceQuery *)io->ios2_StatData;
-        ULONG mine = sizeof(struct Sana2DeviceQuery);
-        ULONG given = dq->SizeAvailable;
+        ULONG mine, given;
+
+        if (!dq) {
+            io0->io_Error = S2ERR_BAD_ARGUMENT;
+            io->ios2_WireError = S2WERR_NULL_POINTER;
+            break;
+        }
+        mine = sizeof(struct Sana2DeviceQuery);
+        given = dq->SizeAvailable;
 
         dq->DevQueryFormat = 0;
         dq->DeviceLevel    = 0;
@@ -618,14 +777,58 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
         fire_event(unit, S2EVENT_OFFLINE);
         break;
 
-    case S2_ONEVENT:
+    case S2_ONEVENT: {
+        /* Only ONLINE/OFFLINE map to a persistent state that can already
+         * be "true" at submission time -- the other event bits (ERROR/TX/
+         * RX/BUFF/HARDWARE/SOFTWARE) describe momentary conditions with no
+         * current-state concept, so they always queue. */
+        ULONG immediate = io->ios2_WireError &
+                          (unit->su_Online ? S2EVENT_ONLINE : S2EVENT_OFFLINE);
+        if (immediate) {
+            io->ios2_WireError = immediate;
+            break; /* completes via the normal bottom-of-switch reply below */
+        }
         io0->io_Flags &= ~IOF_QUICK;
         safe_add_tail(&unit->su_EventReqs, (struct Node *)io);
-        return; /* completed later by fire_event() */
+        return; /* completed later by fire_event() on an actual transition */
+    }
+
+    case S2_GETGLOBALSTATS: {
+        /* Unlike Sana2DeviceQuery, Sana2DeviceStats has no SizeAvailable/
+         * SizeSupplied negotiation in the spec -- it's just a fixed struct,
+         * copied whole. LastStart stays zeroed until a virtual tick
+         * counter exists (Phase 3) to fill it deterministically; a real
+         * wall-clock timestamp would work fine functionally but has no
+         * business in a device whose whole point is deterministic replay. */
+        struct Sana2DeviceStats *st = (struct Sana2DeviceStats *)io->ios2_StatData;
+        if (!st) {
+            io0->io_Error = S2ERR_BAD_ARGUMENT;
+            io->ios2_WireError = S2WERR_NULL_POINTER;
+            break;
+        }
+        *st = unit->su_Stats;
+        break;
+    }
+
+    case S2_GETSPECIALSTATS: {
+        /* Zero-record: this device doesn't track any special (per-driver,
+         * non-standard) stats yet. RecordCountMax is the caller's own
+         * buffer capacity (left as they set it); we only report how many
+         * we actually supplied. */
+        struct Sana2SpecialStatHeader *hdr =
+            (struct Sana2SpecialStatHeader *)io->ios2_StatData;
+        if (!hdr) {
+            io0->io_Error = S2ERR_BAD_ARGUMENT;
+            io->ios2_WireError = S2WERR_NULL_POINTER;
+            break;
+        }
+        hdr->RecordCountSupplied = 0;
+        break;
+    }
 
     /* Later phases: S2_CONFIGINTERFACE, S2_ADD/DELMULTICASTADDRESS,
      * S2_MULTICAST/BROADCAST send flags, S2_TRACKTYPE/UNTRACKTYPE,
-     * S2_GETTYPESTATS/GETSPECIALSTATS/GETGLOBALSTATS, S2_READORPHAN. */
+     * S2_GETTYPESTATS. */
     default:
         io0->io_Error = IOERR_NOCMD;
         break;
@@ -643,6 +846,7 @@ abort_io(struct Library *dev asm("a6"), struct IORequest *io asm("a1"))
     (void)dev;
 
     if (safe_unlink_if_queued(&unit->su_PendingReads, (struct Node *)io) ||
+        safe_unlink_if_queued(&unit->su_OrphanReads, (struct Node *)io) ||
         safe_unlink_if_queued(&unit->su_EventReqs, (struct Node *)io)) {
         io->io_Error = IOERR_ABORTED;
         ReplyMsg(&io->io_Message);

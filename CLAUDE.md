@@ -31,28 +31,42 @@ they may require Kickstart 2.0+ where convenient (documented per-tool).
 
 ## Current state
 
-Phase 1 (device skeleton + echo mode + `S2_DEVICEQUERY`/events) is written,
-**compiles cleanly** with the pinned `m68k-amigaos-gcc` toolchain (`make
-docker` -- both `loopback.device` and `SanaInfo` build with
-`-Wall -Wextra -Werror` and no warnings), and is **validated on-target
-under Copperline against a real Kickstart 1.3 ROM** (`make copperline-smoke`,
-see `tests/copperline/`): open, `S2_ONLINE`, `S2_DEVICEQUERY` (correct MTU/
-HardwareType), `S2_GETSTATIONADDRESS`, and the `CMD_WRITE`/`CMD_READ` echo
-path (src/dst swap, payload intact) all pass end to end on real 1.3.
-`S2_ONEVENT` and `S2_OFFLINE` are implemented but not yet exercised by the
-on-target test -- add coverage before trusting those specifically.
+Working through `docs/PLAN.md`'s milestones (M0-M12: spec-correctness
+backfill, then Phases 2-4). **M0-M2 done**, each validated on-target under
+Copperline against both bundled AROS (CI) and a real Kickstart 1.3 ROM
+(`make copperline-smoke` / `KICK=... make copperline-smoke`,
+see `tests/copperline/`) before being considered complete.
 
 - `src/loopback_device.c` -- the device. Hand-rolled Resident/auto-init
-  (see "Architecture" below for why, and for the on-target Guru narrator.wyoming
-  hit that this design avoids). Implements: `CMD_READ`/`CMD_WRITE` echo
-  (unit 0 default -- transmitted packets return as received packets,
-  src/dst swapped), `CMD_FLUSH`, `S2_DEVICEQUERY`, `S2_GETSTATIONADDRESS`,
-  `S2_ONLINE`/`S2_OFFLINE`, `S2_ONEVENT` (edge-triggered), `AbortIO`.
-  4 units pre-allocated in the device base (unit 0 wired for echo; units
-  1-3 exist for Phase 2 crossover pairs but aren't dispatched differently
-  yet). No separate unit task -- echo completes synchronously inside
-  `BeginIO` on the calling task (no dos.library access needed at that
-  point, so nothing about that violates the 1.3 rule).
+  (see "Architecture" below for why, and for the on-target Guru
+  narrator.wyoming hit that this design avoids). Implements:
+  - **Echo** (unit 0 default): `CMD_WRITE` delivers through `deliver_packet()`
+    with real SANA-II precedence -- a queued **typed** `CMD_READ` (matched
+    by `ios2_PacketType`) first, else a queued `S2_READORPHAN`, else
+    (`rxqueue` config, defaults to **0** -- strict drop, no buffering) a
+    bounded queue, else dropped with `Sana2DeviceStats.UnknownTypesReceived`
+    counted. Src/dst addresses swap per the proposal's echo semantics.
+  - **Real SANA-II buffer-management hooks** (M1): `OpenDevice()` parses an
+    incoming `S2_CopyToBuff`/`S2_CopyFromBuff`/`S2_PacketFilter` tag list
+    with a hand-rolled walk (no utility.library), replacing
+    `ios2_BufferManagement` with a per-open cookie every subsequent request
+    must carry -- every packet-payload copy goes through the completing
+    request's own hooks (`CopyMem`-based defaults if none supplied).
+  - `S2_DEVICEQUERY`, `S2_GETSTATIONADDRESS`, `S2_ONLINE`/`S2_OFFLINE`,
+    `S2_ONEVENT` (completes **immediately** if the requested state already
+    holds, else waits for the next transition -- corrected from an earlier,
+    wrong "always edge-triggered" assumption after cross-checking a real
+    driver, plipbox), `S2_GETGLOBALSTATS`, `S2_GETSPECIALSTATS` (zero-record
+    stub), `CMD_FLUSH`, `AbortIO` (covers pending reads, orphan reads, and
+    event waits).
+  - 4 units pre-allocated in the device base (unit 0 wired for echo; units
+    1-3 exist for Phase 2 crossover pairs but aren't dispatched differently
+    yet). A unit fully resets (`reset_unit()`: offline, factory address,
+    stats zeroed, `rxqueue` back to 0) the moment its open count goes
+    0->1 -- this is what "config re-read on next open" (M5) will mean.
+    No separate unit task -- echo completes synchronously inside `BeginIO`
+    on the calling task (no dos.library access needed at that point, so
+    nothing about that violates the 1.3 rule).
 - `src/sanainfo.c` -- `SanaInfo`, the Phase 1 validation tool: opens a unit,
   optionally issues `S2_ONLINE`/`S2_OFFLINE`, prints `S2_DEVICEQUERY` +
   station address. Normal clib2 CLI program (V36+ Exec calls -- see the

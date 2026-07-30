@@ -79,7 +79,7 @@ grep -q '^END' "$OUT" 2>/dev/null || { echo "FAIL: no END marker (raise BENCH?)"
 # just the aggregate RESULT= -- so a regression in one milestone's check
 # names itself instead of being buried in one pass/fail bit. Keep this list
 # in sync with the NAME_* constants in sana2test.c as milestones add more.
-SUBTESTS="online devicequery stationaddress echo offline onevent abortio cmdflush bufferhooks"
+SUBTESTS="online devicequery stationaddress echo offline onevent oneventnow abortio cmdflush bufferhooks delivery"
 fails=0
 for s in $SUBTESTS; do
     grep -q "^SUB=${s}=PASS$" "$OUT" 2>/dev/null || {

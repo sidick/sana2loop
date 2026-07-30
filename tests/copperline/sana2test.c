@@ -95,6 +95,8 @@ static char NAME_ONEVENT[]        = "onevent";
 static char NAME_ABORTIO[]        = "abortio";
 static char NAME_CMDFLUSH[]       = "cmdflush";
 static char NAME_BUFFERHOOKS[]    = "bufferhooks";
+static char NAME_ONEVENTNOW[]     = "oneventnow";
+static char NAME_DELIVERY[]       = "delivery";
 static char DBG_CHECKIO_NULL[]    = "DBG_CHECKIO_NULL=";
 
 /* _start must be the very first thing in the file and contain no data of
@@ -130,6 +132,7 @@ static int test_main(void)
     struct MsgPort *port1, *port2;
     struct IOSana2Req *io1, *io2;
     static UBYTE readbuf[64];
+    static UBYTE readbuf2[64];
     int fails = 0;
 
     SysBase = *(struct ExecBase **)4UL;
@@ -209,6 +212,9 @@ static int test_main(void)
 
         io1->ios2_Req.io_Command = CMD_READ;
         io1->ios2_Data = readbuf;
+        io1->ios2_PacketType = 0x1234; /* CMD_READ is typed: must match
+                                           what the write below sends, or
+                                           M2's strict delivery drops it */
         io1->ios2_Req.io_Flags = 0;
         send_io(io1);
 
@@ -294,6 +300,24 @@ static int test_main(void)
         report(NAME_ONEVENT, ok, &fails);
     }
 
+    /* --- oneventnow: S2_ONEVENT for a condition ALREADY true at
+     * submission time (unit is online now; request asks for
+     * S2EVENT_ONLINE) must complete immediately, not wait for some future
+     * transition. An earlier version of this device queued unconditionally
+     * and called that edge-triggered by design -- wrong, and it would have
+     * hung a caller doing the single most common thing with S2_ONEVENT
+     * ("tell me once the link is up"). Caught by cross-checking a real
+     * shipped SANA-II driver (plipbox) rather than by assumption; see
+     * fire_event()'s comment in the device source. */
+    {
+        BOOL ok;
+        io2->ios2_Req.io_Command = S2_ONEVENT;
+        io2->ios2_WireError = S2EVENT_ONLINE;
+        do_io(io2);
+        ok = (io2->ios2_Req.io_Error == 0) && (io2->ios2_WireError == S2EVENT_ONLINE);
+        report(NAME_ONEVENTNOW, ok, &fails);
+    }
+
     /* --- abortio: a queued CMD_READ with nothing to satisfy it must abort
      * cleanly with IOERR_ABORTED, not hang. --- */
     {
@@ -332,12 +356,18 @@ static int test_main(void)
 
     /* --- bufferhooks: a real S2_CopyToBuff/S2_CopyFromBuff tag pair
      * (chained via TAG_MORE, to exercise that control tag specifically)
-     * must be invoked for both directions of a write+read round trip, and
-     * the data must still arrive correctly through them -- proving the
-     * hooks are wired into the real data path, not just recorded. A
-     * separate third open (io3/port3), since io1/io2 already have default
-     * hooks installed from OpenDevice and hooks are fixed for the life of
-     * an open. */
+     * must actually be invoked, with the data still arriving correctly
+     * through them -- proving the hooks are wired into the real data
+     * path, not just recorded. A separate third open (io3/port3), since
+     * io1/io2 already have default hooks installed from OpenDevice and
+     * hooks are fixed for the life of an open.
+     *
+     * Two independent exchanges with io1/io2 (which have default hooks),
+     * rather than one round trip on io3 alone: under M2's strict rxqueue=0
+     * drop semantics a write with no read already queued is dropped, not
+     * buffered, so each direction needs its own pre-queued reader --
+     * io3 as reader (exercises CopyToBuff) and io3 as writer (exercises
+     * CopyFromBuff) are two separate, independently-queued exchanges. */
     {
         struct MsgPort *port3 = make_port();
         struct IOSana2Req *io3 = port3 ? make_io(port3) : NULL;
@@ -359,30 +389,59 @@ static int test_main(void)
             io3->ios2_BufferManagement = tags1;
             if (open_unit0(io3)) {
                 int i;
+                BOOL to_ok = FALSE, from_ok = FALSE;
                 g_HookToCount = 0;
                 g_HookFromCount = 0;
 
+                /* Exchange A: io3 reads (CopyToBuff), io2 writes (default). */
+                io3->ios2_Req.io_Command = CMD_READ;
+                io3->ios2_Data = readbuf;
+                io3->ios2_PacketType = 0x1234;
+                io3->ios2_Req.io_Flags = 0;
+                send_io(io3);
+
+                io2->ios2_Req.io_Command = CMD_WRITE;
+                for (i = 0; i < SANA2_MAX_ADDR_BYTES; i++)
+                    io2->ios2_DstAddr[i] = (i < 6) ? (UBYTE)(0xBB + i) : 0;
+                io2->ios2_PacketType = 0x1234;
+                io2->ios2_DataLength = sizeof(PAYLOAD) - 1;
+                io2->ios2_Data = (APTR)PAYLOAD;
+                do_io(io2);
+
+                WaitIO((struct IORequest *)io3);
+                to_ok = (io3->ios2_Req.io_Error == 0) && (io2->ios2_Req.io_Error == 0) &&
+                        g_HookToCount >= 1 &&
+                        io3->ios2_DataLength == sizeof(PAYLOAD) - 1;
+                if (to_ok)
+                    for (i = 0; i < (int)io3->ios2_DataLength; i++)
+                        if (readbuf[i] != (UBYTE)PAYLOAD[i])
+                            to_ok = FALSE;
+
+                /* Exchange B: io1 reads (default), io3 writes (CopyFromBuff). */
+                io1->ios2_Req.io_Command = CMD_READ;
+                io1->ios2_Data = readbuf;
+                io1->ios2_PacketType = 0x5678;
+                io1->ios2_Req.io_Flags = 0;
+                send_io(io1);
+
                 io3->ios2_Req.io_Command = CMD_WRITE;
                 for (i = 0; i < SANA2_MAX_ADDR_BYTES; i++)
-                    io3->ios2_DstAddr[i] = (i < 6) ? (UBYTE)(0xBB + i) : 0;
-                io3->ios2_PacketType = 0x1234;
+                    io3->ios2_DstAddr[i] = (i < 6) ? (UBYTE)(0xCC + i) : 0;
+                io3->ios2_PacketType = 0x5678;
                 io3->ios2_DataLength = sizeof(PAYLOAD) - 1;
                 io3->ios2_Data = (APTR)PAYLOAD;
                 do_io(io3);
 
-                if (io3->ios2_Req.io_Error == 0) {
-                    io3->ios2_Req.io_Command = CMD_READ;
-                    io3->ios2_Data = readbuf;
-                    do_io(io3);
+                WaitIO((struct IORequest *)io1);
+                from_ok = (io1->ios2_Req.io_Error == 0) && (io3->ios2_Req.io_Error == 0) &&
+                          g_HookFromCount >= 1 &&
+                          io1->ios2_DataLength == sizeof(PAYLOAD) - 1;
+                if (from_ok)
+                    for (i = 0; i < (int)io1->ios2_DataLength; i++)
+                        if (readbuf[i] != (UBYTE)PAYLOAD[i])
+                            from_ok = FALSE;
 
-                    ok = (io3->ios2_Req.io_Error == 0) &&
-                         g_HookToCount >= 1 && g_HookFromCount >= 1 &&
-                         io3->ios2_DataLength == sizeof(PAYLOAD) - 1;
-                    if (ok)
-                        for (i = 0; i < (int)io3->ios2_DataLength; i++)
-                            if (readbuf[i] != (UBYTE)PAYLOAD[i])
-                                ok = FALSE;
-                }
+                ok = to_ok && from_ok;
                 CloseDevice((struct IORequest *)io3);
             }
             FreeMem(io3, sizeof(struct IOSana2Req));
@@ -393,6 +452,94 @@ static int test_main(void)
         }
 
         report(NAME_BUFFERHOOKS, ok, &fails);
+    }
+
+    /* --- delivery: SANA-II precedence and strict-drop semantics.
+     * (a) With rxqueue=0 (the default), a packet with no read of any kind
+     *     queued for it is dropped, not buffered -- and UnknownTypesReceived
+     *     counts it, per the proposal's "drivers hold no internal buffers"
+     *     teaching claim.
+     * (b) A pending typed CMD_READ takes priority over a pending
+     *     S2_READORPHAN for the very same packet -- the orphan read must
+     *     stay untouched (verified by aborting it afterward: if it had
+     *     wrongly consumed the packet, AbortIO would be a no-op on an
+     *     already-completed request instead of actually aborting it). */
+    {
+        BOOL ok = TRUE;
+        struct Sana2DeviceStats before, after;
+
+        io1->ios2_Req.io_Command = S2_GETGLOBALSTATS;
+        io1->ios2_StatData = &before;
+        do_io(io1);
+
+        io2->ios2_Req.io_Command = CMD_WRITE;
+        {
+            int i;
+            for (i = 0; i < SANA2_MAX_ADDR_BYTES; i++)
+                io2->ios2_DstAddr[i] = (i < 6) ? (UBYTE)(0xDD + i) : 0;
+        }
+        io2->ios2_PacketType = 0x7777;
+        io2->ios2_DataLength = sizeof(PAYLOAD) - 1;
+        io2->ios2_Data = (APTR)PAYLOAD;
+        do_io(io2);
+        ok = ok && (io1->ios2_Req.io_Error == 0) && (io2->ios2_Req.io_Error == 0);
+
+        io1->ios2_Req.io_Command = S2_GETGLOBALSTATS;
+        io1->ios2_StatData = &after;
+        do_io(io1);
+        ok = ok && (io1->ios2_Req.io_Error == 0) &&
+             (after.UnknownTypesReceived == before.UnknownTypesReceived + 1);
+
+        {
+            struct MsgPort *port3 = make_port();
+            struct IOSana2Req *io3 = port3 ? make_io(port3) : NULL;
+            BOOL precedence_ok = FALSE;
+
+            if (io3 && open_unit0(io3)) {
+                int i;
+
+                io1->ios2_Req.io_Command = S2_READORPHAN;
+                io1->ios2_Data = readbuf;
+                io1->ios2_Req.io_Flags = 0;
+                send_io(io1);
+
+                io2->ios2_Req.io_Command = CMD_READ;
+                io2->ios2_Data = readbuf2;
+                io2->ios2_PacketType = 0x8888;
+                io2->ios2_Req.io_Flags = 0;
+                send_io(io2);
+
+                io3->ios2_Req.io_Command = CMD_WRITE;
+                for (i = 0; i < SANA2_MAX_ADDR_BYTES; i++)
+                    io3->ios2_DstAddr[i] = (i < 6) ? (UBYTE)(0xEE + i) : 0;
+                io3->ios2_PacketType = 0x8888;
+                io3->ios2_DataLength = sizeof(PAYLOAD) - 1;
+                io3->ios2_Data = (APTR)PAYLOAD;
+                do_io(io3);
+
+                WaitIO((struct IORequest *)io2);
+                precedence_ok = (io2->ios2_Req.io_Error == 0) && (io3->ios2_Req.io_Error == 0);
+
+                /* io1 (orphan) must still be pending -- prove it by
+                 * aborting it: a no-op AbortIO would mean it had already
+                 * (wrongly) completed. */
+                AbortIO((struct IORequest *)io1);
+                WaitIO((struct IORequest *)io1);
+                precedence_ok = precedence_ok && (io1->ios2_Req.io_Error == IOERR_ABORTED);
+
+                CloseDevice((struct IORequest *)io3);
+            }
+            if (io3)
+                FreeMem(io3, sizeof(struct IOSana2Req));
+            if (port3) {
+                FreeSignal(port3->mp_SigBit);
+                FreeMem(port3, sizeof(struct MsgPort));
+            }
+
+            ok = ok && precedence_ok;
+        }
+
+        report(NAME_DELIVERY, ok, &fails);
     }
 
     CloseDevice((struct IORequest *)io1);
