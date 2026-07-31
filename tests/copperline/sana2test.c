@@ -46,7 +46,13 @@ struct ExecBase *SysBase;
 /* Invocation counters for the bufferhooks sub-test's registered hooks.
  * Plain globals: safe here for the same reason as SysBase above (this is
  * -nostdlib, no -fbaserel small-data model to violate). */
-static ULONG g_HookToCount;
+/* volatile: g_HookToCount is written from real VBlank interrupt context
+ * (via counting_copy_to(), called through deliver_packet() from
+ * vblank_server()) and spin-polled from ordinary task context in
+ * reap_interrupt_io() -- without volatile, GCC would be free to hoist
+ * that loop's read out entirely, since nothing in this translation unit
+ * visibly writes it from the task's own point of view. */
+static volatile ULONG g_HookToCount;
 static ULONG g_HookFromCount;
 
 /* Every message as a NAMED array, never a raw string literal passed
@@ -185,6 +191,7 @@ static BOOL counting_copy_from(APTR to asm("a0"), APTR from asm("a1"), ULONG siz
 static BOOL open_unit0(struct IOSana2Req *io);
 static void send_io(struct IOSana2Req *io);
 static void do_io(struct IOSana2Req *io);
+static void reap_interrupt_io(struct IOSana2Req *io, volatile ULONG *evidence, ULONG want);
 static void flagged_begin_io(struct IOSana2Req *io);
 
 int __attribute__((no_reorder)) _start(void)
@@ -1637,7 +1644,10 @@ static int test_main(void)
             io10b->ios2_Req.io_Command = S2_ONLINE;
             do_io(io10b);
 
-            WaitIO((struct IORequest *)io10a);
+            /* See reap_interrupt_io()'s own comment: this is where a
+             * plain WaitIO() (or a WaitIO() gated on CheckIO()) would
+             * hang on bundled AROS specifically. */
+            reap_interrupt_io(io10a, &g_HookToCount, 1);
             ok = ok && (io10a->ios2_Req.io_Error == 0) &&
                  (io10a->ios2_PacketType == 0x0800) &&
                  (io10a->ios2_DataLength == sizeof(SCHED_PAY0) - 1) &&
@@ -1653,21 +1663,16 @@ static int test_main(void)
                     ok = FALSE;
 
             /* Record 1: due tick 50 (1 real second later at
-             * SANA2LOOP_VBLANK_HZ). CheckIO() right after SendIO() is
-             * logged (DBG_CHECKIO_NULL), same informational-only
-             * treatment as the onevent sub-test's own use of this --
-             * confirmed reliable on real 1.3 but not gated on, since
-             * bundled AROS has its own CheckIO compatibility quirk there. */
+             * SANA2LOOP_VBLANK_HZ). Same reap_interrupt_io() treatment as
+             * record 0 above -- this is the same interrupt-driven
+             * completion path, so it hits the identical bundled-AROS
+             * quirk. */
             io10a->ios2_Req.io_Command = S2_READORPHAN; /* untyped, see record 0's comment above */
             io10a->ios2_Data = readbuf2;
             io10a->ios2_Req.io_Flags = 0;
             send_io(io10a);
 
-            raw_str(DBG_CHECKIO_NULL);
-            raw_u16((unsigned short)(CheckIO((struct IORequest *)io10a) == NULL), 1);
-            raw_str(MSG_CRLF);
-
-            WaitIO((struct IORequest *)io10a);
+            reap_interrupt_io(io10a, &g_HookToCount, 2);
             ok = ok && (io10a->ios2_Req.io_Error == 0) &&
                  (io10a->ios2_PacketType == 0x0801) &&
                  (io10a->ios2_DataLength == sizeof(SCHED_PAY1) - 1) &&
@@ -1858,6 +1863,49 @@ static void do_io(struct IOSana2Req *io)
 {
     io->ios2_Req.io_Message.mn_Node.ln_Type = NT_MESSAGE;
     DoIO((struct IORequest *)io);
+}
+
+/* Reaps an IOSana2Req whose completion is expected to arrive via a REAL
+ * hardware-interrupt-driven ReplyMsg() (M9's vblank_server(), not a
+ * task-context BeginIO() completion like every other sub-test in this
+ * file) -- needed because bundled AROS under Copperline has a real
+ * completion-detection bug for exactly that case: CheckIO() (and, worse,
+ * a plain WaitIO() called right after SendIO()) can both falsely report
+ * the request as already complete before the device has actually
+ * replied it. Confirmed empirically by instrumenting the device itself
+ * (a stashed per-stage progress marker inside deliver_packet() showed it
+ * had never even been entered at the exact moment WaitIO() returned) --
+ * this is a bundled-AROS limitation, not a device bug: this exact
+ * sub-test passes with a plain WaitIO() on real Kickstart 1.3.
+ *
+ * Waiting on `*evidence` reaching `want` instead -- a side effect
+ * (g_HookToCount) only the REAL S2_CopyToBuff hook invocation inside
+ * fill_read_from_packet() can produce -- sidesteps the false positive
+ * entirely, since it can't be satisfied by anything other than genuine
+ * delivery. The bound below is deliberately generous (the actual wait is
+ * usually a single VBlank period; this is just a safety ceiling against
+ * a genuine regression hanging the whole suite) and the loop exits the
+ * instant the real evidence appears.
+ *
+ * AbortIO() then WaitIO() run UNCONDITIONALLY afterward, regardless of
+ * whether the spin found real evidence -- AbortIO() on an
+ * already-completed request is a documented no-op, so this is always
+ * safe, and it's the only way to guarantee `io` is cleanly reaped (out
+ * of su_OrphanReads and its message properly replied) before any later
+ * reuse of the same IORequest: if the spin bound is ever hit for real
+ * (genuine regression, not just the AROS quirk), the alternative --
+ * silently reusing an IORequest that's still actually enqueued in the
+ * device's own pending-reads list -- would double-insert it on the next
+ * SendIO() and corrupt that list, exactly the kind of bug this helper
+ * exists to prevent, not just paper over. */
+static void reap_interrupt_io(struct IOSana2Req *io, volatile ULONG *evidence, ULONG want)
+{
+    long spins;
+
+    for (spins = 0; spins < 50000000L && *evidence < want; spins++)
+        ;
+    AbortIO((struct IORequest *)io);
+    WaitIO((struct IORequest *)io);
 }
 
 /* Neither exec.library's SendIO() nor DoIO() preserve caller-set io_Flags

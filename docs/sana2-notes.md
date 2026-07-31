@@ -581,11 +581,51 @@ loaded replay array is NOT individually-owned per record.
   default), which otherwise fails the guest's `Open(..., MODE_NEWFILE)`
   with `ERROR_DISK_WRITE_PROTECTED` (214) -- found the hard way via a
   standalone write-test program before ever touching the real feature.
-- **Known, unresolved issue: bundled AROS under Copperline hangs once a
-  unit actually uses `replaymode=scheduled` or `record=`** -- see
-  docs/PLAN.md's M9 risk note for the full story (confirmed NOT a simple
-  "AROS doesn't dispatch custom VBlank servers" via an isolated
-  standalone test). Real Kickstart 1.3 passes every M9 assertion cleanly.
+- **Resolved: bundled AROS under Copperline initially hung once a unit
+  actually used `replaymode=scheduled` or `record=`** -- confirmed NOT a
+  simple "AROS doesn't dispatch custom VBlank servers" via an isolated
+  standalone test (it does, verified: 723 hits over 30 emulated seconds).
+  The first theory tried -- `AllocMem()` from real interrupt context
+  (`vblank_server()`'s per-due-record fresh-copy allocation) hitting an
+  AROS-specific allocator limitation -- was tested directly (moved the
+  allocation to `load_replay_file()`'s ordinary task context instead,
+  `su_ReplayDeliveryCopies[]`) and **disproven**: the hang persisted
+  unchanged with zero allocator calls left in the interrupt path. Root
+  cause, found by stashing per-stage progress markers into otherwise-
+  unused `Sana2DeviceStats` fields inside `deliver_packet()`/
+  `vblank_server()` and reading them back through a SECOND, independent
+  `IOSana2Req` (so they stayed visible even if the hung request's own
+  task never resumed): **bundled AROS's `CheckIO()`/`WaitIO()` can both
+  falsely report an `IOSana2Req` as already complete immediately after
+  `SendIO()`, before the device has actually replied it** -- specifically
+  for a request destined to complete via a genuine hardware-interrupt-
+  driven `ReplyMsg()` (M9's `vblank_server()`), unlike every earlier
+  sub-test's task-context completion. The stashed markers proved
+  `deliver_packet()` had not even been entered at the moment a plain
+  `WaitIO()` returned "success" with stale data. The test harness then
+  reusing that (AROS's-eyes-complete, actually-still-enqueued)
+  `IOSana2Req` for the next record double-inserted it into the device's
+  own `su_OrphanReads` list, corrupting it -- THAT corruption (an
+  infinite loop the next time `deliver_packet()` walks the broken list
+  from inside a real interrupt) is what produces the observed full,
+  permanent guest freeze, not the device's own interrupt handling as
+  such. Real Kickstart 1.3 never emits the false-completion signal, which
+  is why this was invisible there. Fixed entirely in
+  `tests/copperline/sana2test.c` (`reap_interrupt_io()`): wait on
+  `g_HookToCount` reaching an expected value -- a side effect only the
+  real `S2_CopyToBuff` hook invocation can produce, immune to the false
+  CheckIO/WaitIO signal -- then unconditionally `AbortIO()` (a documented
+  no-op if genuinely already complete) followed by `WaitIO()`,
+  guaranteeing the request is cleanly reaped either way before any reuse.
+  No device-code change was needed for the actual fix, though
+  `su_ReplayDeliveryCopies[]` was kept as a real (if not root-cause)
+  hygiene improvement. Verified 5/5 clean runs on bundled AROS, 3/3 on
+  real Kickstart 1.3, after the harness change. **Lesson for future
+  interrupt-driven-completion tests in this file**: never trust a bare
+  `CheckIO()`/`WaitIO()` immediately after `SendIO()` for a request whose
+  completion depends on a real hardware interrupt on bundled AROS --
+  either wait on independent evidence of the real side effect, or always
+  reap via `AbortIO()`+`WaitIO()` regardless of what `CheckIO()` claims.
 
 ## `S2_DEVICEQUERY` convention (easy to get backwards)
 

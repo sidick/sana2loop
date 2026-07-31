@@ -32,19 +32,24 @@ they may require Kickstart 2.0+ where convenient (documented per-tool).
 ## Current state
 
 Working through `docs/PLAN.md`'s milestones (M0-M12: spec-correctness
-backfill, then Phases 2-4). **M0-M8 done** (validated on-target under
-Copperline against both bundled AROS (CI) and a real Kickstart 1.3 ROM,
-`make copperline-smoke` / `KICK=... make copperline-smoke`,
-see `tests/copperline/`, before being considered complete). **M9 is
-implemented and fully verified on real Kickstart 1.3** (`make
-copperline-smoke KICK=...` passes every assertion, including the new
-`scheduled`/`record` sub-tests and the post-run `RECORD_VERIFY=PASS`
-check) **but currently hangs under bundled AROS** specifically once a
-unit uses `replaymode=scheduled` or `record=` -- a real, not-yet-root-caused
-AROS/Copperline compatibility issue (confirmed NOT simply "AROS doesn't
-dispatch custom VBlank interrupt servers" -- see docs/PLAN.md's M9 risk
-note for the full investigation). The public `copperline-smoke-aros` CI
-job is expected to fail/hang on this until resolved.
+backfill, then Phases 2-4). **M0-M9 done**, each validated on-target under
+Copperline against both bundled AROS (CI) and a real Kickstart 1.3 ROM
+(`make copperline-smoke` / `KICK=... make copperline-smoke`,
+see `tests/copperline/`) before being considered complete. M9 initially
+shipped with bundled AROS hanging specifically once a unit used
+`replaymode=scheduled` or `record=`, while real Kickstart 1.3 passed
+cleanly -- root-caused (not the AllocMem-in-interrupt theory first
+suspected) to a bundled-AROS `CheckIO()`/`WaitIO()` bug that can falsely
+report an `IOSana2Req` as already complete immediately after `SendIO()`,
+before the device has actually replied it, for requests destined to
+complete via a genuine hardware-interrupt-driven `ReplyMsg()` (M9's
+`vblank_server()`) rather than task-context completion. Fixed entirely in
+the test harness (`reap_interrupt_io()` in `tests/copperline/sana2test.c`,
+waits on a real side-effect of delivery instead of trusting
+CheckIO()/WaitIO(), then unconditionally reaps via AbortIO()+WaitIO()) --
+no device-code change was needed for the actual fix. See docs/PLAN.md's M9
+risk note for the full investigation, including how it was root-caused via
+on-target instrumentation.
 
 - `src/loopback_device.c` -- the device. Hand-rolled Resident/auto-init
   (see "Architecture" below for why, and for the on-target Guru
@@ -221,13 +226,15 @@ job is expected to fail/hang on this until resolved.
     write-then-read-back test, before building the real feature on the
     assumption) that Copperline persists floppy writes to the host ADF
     file, but only once `write_protected = false` is set in
-    `[floppy.dfN]` (defaults to `true`). **Known, unresolved on bundled
-    AROS specifically**: the guest hangs once a unit actually uses
-    `replaymode=scheduled` or `record=` -- confirmed via an isolated
-    standalone test that this is NOT simply "AROS doesn't dispatch custom
-    VBlank interrupt servers" (it does, verified). See `docs/PLAN.md`'s M9
-    risk note and `docs/sana2-notes.md`'s M9 section for the full
-    investigation so far.
+    `[floppy.dfN]` (defaults to `true`). Bundled AROS specifically first
+    shipped hanging once a unit actually used `replaymode=scheduled` or
+    `record=` -- confirmed via an isolated standalone test that this was
+    NOT simply "AROS doesn't dispatch custom VBlank interrupt servers"
+    (it does, verified), and eventually root-caused to a bundled-AROS
+    `CheckIO()`/`WaitIO()` false-completion bug for interrupt-driven
+    replies, fixed in the test harness (`reap_interrupt_io()`), not the
+    device -- see `docs/PLAN.md`'s M9 risk note and
+    `docs/sana2-notes.md`'s M9 section for the full investigation.
   - 12 units pre-allocated in the device base (unit 0 wired for echo by
     default; units 2-3 default-paired for crossover; units 4-11
     spare/echo, each claimed by exactly one on-target test's own config
@@ -253,10 +260,8 @@ job is expected to fail/hang on this until resolved.
   reason specific to itself (not the device): see the comment block at its
   top for a real on-target bug this tripped over and how it was found.
 
-Not yet done: `SanaDump`/`SanaSend` (M11), Aminet packaging (M12). M9
-(VBlank tick-scheduled replay + RAM record) is implemented and real-1.3-verified
-but has an open AROS-under-Copperline compatibility issue -- see "Current
-state" above.
+Not yet done: docs pass (M10), `SanaDump`/`SanaSend` (M11), Aminet
+packaging (M12).
 
 ## Architecture
 
@@ -317,9 +322,7 @@ pinned `ghcr.io/reinauer/container-amiga-gcc` image narrator.wyoming uses
 
 `make docker` has been run successfully in this environment (both binaries
 build clean), and `make copperline-smoke` has confirmed every sub-test
-through M8 on-target against both bundled AROS and real Kickstart 1.3, and
-every M9 sub-test on real Kickstart 1.3 (bundled AROS currently hangs on
-M9's `scheduled` sub-test specifically -- see "Current state" above) (see
+through M9 on-target against both bundled AROS and real Kickstart 1.3 (see
 "Testing under Copperline" below and `tests/copperline/sana2test.c`'s
 `SUB=` list).
 

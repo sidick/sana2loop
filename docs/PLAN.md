@@ -38,7 +38,7 @@ the technical detail behind each one.
 | M6 | ✅ Done | Crossover: config-driven `mode`/`peer` (defaults: units 0–1 echo, 2↔3 crossover), pair validation at first-open, unswapped addressing, receive filtering (station/bcast/mcast/PROM) | `src/loopback_device.c`, `run.sh`, harness (SendIO read on 3 + write on 2; wrong-dst filtered unless PROM) |
 | M7 | ✅ Done | Fault injection: xorshift32 + full pipeline + forced offline/online events + PMTUD black hole | `src/loopback_device.c`, harness (droppct=100 never completes; duppct=100 → 2 reads; fixed-seed reorder → assert exact permutation) |
 | M8 | ✅ Done | pcap core (`src/pcap.h`, both endians) + consume-mode replay; commit fixture bytes | `src/pcap.h`, `src/loopback_device.c`, `fixtures/`, harness |
-| M9 | ⚠️ Implemented, real-1.3-verified; AROS CI lane currently hangs (see risk note below) | VBlank tick server, tick-scheduled replay, RAM record + close-flush, interrupt-context-hook knob, 68000 per-packet overhead measurement (VBlank-count bracketing, tracked not gated). Record test: `run.sh` extracts written pcap off the ADF post-run via xdftool and byte-compares — **verify early that Copperline persists floppy writes to the image** | `src/loopback_device.c`, `run.sh` |
+| M9 | ✅ Done | VBlank tick server, tick-scheduled replay, RAM record + close-flush, interrupt-context-hook knob, 68000 per-packet overhead measurement (VBlank-count bracketing, tracked not gated). Record test: `run.sh` extracts written pcap off the ADF post-run via xdftool and byte-compares — **verify early that Copperline persists floppy writes to the image**. AROS CI lane's earlier hang was root-caused to a bundled-AROS `CheckIO()`/`WaitIO()` false-completion bug (harness-side fix, `reap_interrupt_io()`) — see risk note below | `src/loopback_device.c`, `run.sh` |
 | M10 | | Docs pass: teaching-reference comments through the source, README, sana2-notes refresh. Also stand up a `userdocs/` end-user site (MkDocs Material, adopting sibling project amiauth's pattern in preference to narrator.wyoming's, since amiauth's is the more tried-and-tested one) alongside a `tools/docs2guide.py`-style converter producing an on-Amiga AmigaGuide manual from the same `userdocs/` source -- one docs source feeding both the web site and native Amiga reading, not two to keep in sync by hand | all sources, `docs/`, new `userdocs/`, `mkdocs.yml`, `tools/docs2guide.py` |
 | M11 | | Tools: `src/tools/pcapio.c`, `sana2open.c`, `SanaDump`, `SanaSend`; `host/make_fixtures.py` + `host/lint_pcap.py` (scapy); canonical corpus (ARP, DHCP, TCP handshake) | new `src/tools/*`, `host/*`, `fixtures/`, `Makefile` |
 | M12 | | Aminet packaging + release flow, adopting sibling project amiauth's pattern (in preference to narrator.wyoming's simpler one, since amiauth's is the more tried-and-tested of the two): tag-driven `release.yml` that verifies the pushed tag matches `version.mk` and the `.readme`'s `Version:` field before doing anything else, cross-builds via the pinned Docker image, greps the built binary for its `$VER` string, packages via `make dist` (building a real, archive-capable `lha` from source -- Ubuntu's/Homebrew's is extract-only), validates the readme with `aminet-release-action` in `validate-only` mode, creates the GitHub release (curated notes from the `.readme` for the first release, `--generate-notes` once there's real tag-to-tag history to diff), and only then hands off to a *separate* job gated on a GitHub Environment requiring manual approval for the actual (irreversible-ish) Aminet FTP upload -- human-in-the-loop by construction, not an afterthought | `Makefile`, `version.mk`, `.github/workflows/release.yml`, release docs |
@@ -117,32 +117,43 @@ proper.
   it back post-run via `xdftool type`, byte-identical) before building the
   record-flush feature on top of it. Needed `write_protected = false` in
   `[floppy.dfN]` (defaults to `true`) -- see `machine.toml`.
-- **NEW, UNRESOLVED: bundled AROS under Copperline hangs once a unit
-  actually uses `replaymode=scheduled` or `record=` (M9).** Not simply
-  "AddIntServer(INTB_VERTB,...) doesn't fire under AROS" -- a standalone
-  isolated test (register a server, busy-loop ~2M iterations, read the
-  tick count back) confirms AROS dispatches to a custom-registered VBlank
-  server correctly (723 hits over 30 emulated seconds, comparable to real
-  1.3). The hang is specific to the actual device: once unit 10 (scheduled
-  replay) goes online, Copperline's serial capture shows one
-  `[AmigaVideo:Bitmap] AmigaVideoBM__Root__New: superclass failed to
-  instantiate a suitable bitmap...!!` line (AROS's own internal warning,
-  not something this device prints) immediately followed by the guest
-  never producing another `SUB=`/`END` line again, even with
-  `--benchmark-until` raised to 120s -- while Copperline itself exits 0
-  (not a Copperline crash, the m68k guest is genuinely stuck). Leading
-  theory, not yet confirmed: `AllocMem()` called from real interrupt
-  context (`vblank_server()`'s per-due-record fresh-copy allocation) run
-  into an AROS-specific allocator limitation under this profile's already
-  tight memory headroom (see `SANA2LOOP_MAX_REPLAY_PACKETS`'s own
-  comment) that a real ROM's simpler allocator doesn't share -- untested.
-  Real Kickstart 1.3 is unaffected: `make copperline-smoke KICK=...` passes
-  every M9 sub-test including `scheduled`/`record`, `RESULT=PASS`, and the
-  post-run `RECORD_VERIFY=PASS` check. Until this is root-caused, the
-  `copperline-smoke-aros` CI job (the only lane public CI can run) is
-  expected to fail/hang specifically on the `scheduled` sub-test -- flag
-  this to whoever picks up M9 next before assuming CI red means a real
-  regression elsewhere.
+- ~~bundled AROS under Copperline hangs once a unit actually uses
+  `replaymode=scheduled` or `record=` (M9)~~ -- **resolved, root-caused via
+  on-target instrumentation, not the AllocMem-in-interrupt theory this
+  entry originally named.** That theory was tested directly (moved
+  `vblank_server()`'s per-due-record allocation out to
+  `load_replay_file()`, made at ordinary task-context load time instead --
+  `su_ReplayDeliveryCopies[]`, kept in the source as a real hygiene
+  improvement even though it wasn't the fix) and disproven: the hang
+  persisted unchanged with zero allocator calls left in the interrupt
+  path. The real cause, found by stashing per-stage progress markers into
+  otherwise-unused `Sana2DeviceStats` fields inside `deliver_packet()`/
+  `vblank_server()` and reading them back through a second, independent
+  `IOSana2Req` (so they were visible even if the hung request's own task
+  never resumed): **bundled AROS's `CheckIO()`/`WaitIO()` can both falsely
+  report an `IOSana2Req` as already complete immediately after
+  `SendIO()`, before the device has actually replied it** -- specifically
+  for a request destined to complete via a genuine hardware-interrupt-
+  driven `ReplyMsg()` (M9's `vblank_server()`), unlike every earlier
+  sub-test's task-context completion. The stashed markers proved
+  `deliver_packet()` had not even been entered at the exact moment a
+  plain `WaitIO()` returned "success" with stale data; a test harness that
+  then reuses the same (AROS's-eyes-completed, actually-still-enqueued)
+  `IOSana2Req` for the next record double-inserts it into the device's
+  own `su_OrphanReads` list, corrupting it -- that corruption, not the
+  device's own interrupt handling, is what produces the full, permanent
+  guest freeze (matching the observed symptom: no further `SUB=`/`END`
+  lines, Copperline itself exits 0). Real Kickstart 1.3 never exhibits the
+  false-completion signal, which is why this was invisible there.
+  Fixed entirely in `tests/copperline/sana2test.c`
+  (`reap_interrupt_io()`): wait on `g_HookToCount` reaching an expected
+  value -- a side effect only the real `S2_CopyToBuff` hook invocation can
+  produce, immune to the false CheckIO/WaitIO signal -- then
+  unconditionally `AbortIO()` (a documented no-op if genuinely already
+  complete) followed by `WaitIO()`, guaranteeing the request is cleanly
+  reaped either way before any reuse. No device-code change was needed
+  for the actual fix. Verified: 5/5 clean `RESULT=PASS` runs on bundled
+  AROS, 3/3 on real Kickstart 1.3, after the harness change.
 
 ## Verification
 

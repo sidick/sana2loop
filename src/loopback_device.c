@@ -806,6 +806,21 @@ struct Sana2LoopUnit {
     ULONG       su_ReplayMode;
     ULONG       su_Tick;
     ULONG      *su_ReplayDueTicks;
+    /* SCHEDULED mode only: one individually-AllocMem'd, pre-populated
+     * EchoPacket per record, made ONCE at load time (load_replay_file(),
+     * ordinary task context) rather than lazily inside vblank_server()'s
+     * own interrupt context. su_ReplayDeliveryCopies[i] is NULL once
+     * consumed (ownership handed to deliver_packet(), which owns freeing
+     * it from there per its existing contract) or if this unit isn't in
+     * SCHEDULED mode at all (CONSUME mode never populates this -- its
+     * reads are served directly from su_ReplayPackets/su_ReplayNext,
+     * no ownership transfer, no interrupt involvement). Exists so
+     * vblank_server() never has to call AllocMem() (or anything else
+     * that allocates) from real interrupt context -- a real, if purely
+     * hygienic, improvement, but NOT what fixed this milestone's
+     * bundled-AROS hang; see vblank_server()'s own comment for what
+     * actually did. */
+    struct EchoPacket **su_ReplayDeliveryCopies;
     /* M9 RAM record: `record=<path>` taps deliver_packet() (see
      * record_append()) and appends every packet this unit actually
      * receives, pcap-formatted, into su_RecordBuf -- flushed to
@@ -1453,6 +1468,17 @@ static void reset_unit(struct Sana2LoopUnit *unit)
         FreeMem(unit->su_ReplayDueTicks, SANA2LOOP_MAX_REPLAY_PACKETS * sizeof(ULONG));
         unit->su_ReplayDueTicks = NULL;
     }
+    if (unit->su_ReplayDeliveryCopies) {
+        /* Free any copy that was made but never consumed (unit closed
+         * before every scheduled record's due tick arrived) -- entries
+         * already handed to deliver_packet() are already NULL by then. */
+        ULONG i;
+        for (i = 0; i < SANA2LOOP_MAX_REPLAY_PACKETS; i++)
+            if (unit->su_ReplayDeliveryCopies[i])
+                FreeMem(unit->su_ReplayDeliveryCopies[i], sizeof(struct EchoPacket));
+        FreeMem(unit->su_ReplayDeliveryCopies, SANA2LOOP_MAX_REPLAY_PACKETS * sizeof(struct EchoPacket *));
+        unit->su_ReplayDeliveryCopies = NULL;
+    }
     unit->su_ReplayNext  = NULL;
     unit->su_ReplayCount = 0;
     unit->su_ReplayPos   = 0;
@@ -1549,6 +1575,7 @@ static BOOL __attribute__((noinline)) load_replay_file(struct Sana2LoopUnit *uni
     struct pcap_file_header fh;
     struct EchoPacket *packets;
     ULONG *due_ticks;
+    struct EchoPacket **copies = NULL;
     ULONG magic_raw;
     BOOL swapped;
     ULONG count = 0;
@@ -1654,6 +1681,27 @@ static BOOL __attribute__((noinline)) load_replay_file(struct Sana2LoopUnit *uni
         return FALSE;
     }
 
+    /* SCHEDULED mode only: su_ReplayDeliveryCopies' own array, allocated
+     * here (ordinary task context) rather than left NULL for
+     * vblank_server() to lazily AllocMem() per-record from real interrupt
+     * context. This array holds POINTERS -- sizeof(struct EchoPacket *)
+     * is power-of-2, so indexing it by a runtime count is a safe shift,
+     * unlike su_ReplayPackets itself (see that array's own comment).
+     * CONSUME mode leaves `copies` NULL: its reads are served directly
+     * from su_ReplayPackets/su_ReplayNext with no ownership transfer and
+     * no interrupt involvement, so it needs none of this. */
+    if (unit->su_ReplayMode == SANA2LOOP_REPLAYMODE_SCHEDULED) {
+        copies = AllocMem(SANA2LOOP_MAX_REPLAY_PACKETS * sizeof(struct EchoPacket *), MEMF_CLEAR);
+        if (!copies) {
+            FreeMem(due_ticks, SANA2LOOP_MAX_REPLAY_PACKETS * sizeof(ULONG));
+            FreeMem(packets, SANA2LOOP_MAX_REPLAY_PACKETS * sizeof(struct EchoPacket));
+            Close(file);
+            CloseLibrary((struct Library *)DOSBase);
+            DOSBase = NULL;
+            return FALSE;
+        }
+    }
+
     /* `cur` walks forward one struct EchoPacket at a time via plain
      * pointer increment (cur++ below) -- deliberately NOT `packets[count]`
      * array indexing. struct EchoPacket isn't power-of-2 sized (its
@@ -1730,6 +1778,27 @@ static BOOL __attribute__((noinline)) load_replay_file(struct Sana2LoopUnit *uni
              * the idiom that just broke the `replay=` config-value copy
              * above (see parse_config_line()'s comment); same fix. */
             CopyMem(framebuf + SANA2LOOP_RAW_HDR_SIZE, cur->ep_Data, cur->ep_Length);
+            /* SCHEDULED mode: `cur` is now fully populated, so make its
+             * delivery copy right here -- ordinary task context, same as
+             * everything else in this loop. `copy` is individually
+             * AllocMem'd (not a pointer into the `packets` array) because
+             * deliver_packet() unconditionally takes ownership of
+             * whatever it's given (delivers-then-frees, queues-then-
+             * later-frees, or drops-then-frees -- see its own comment),
+             * and su_ReplayPackets/su_ReplayNext must survive untouched
+             * for CONSUME-mode-style access patterns elsewhere. A failed
+             * AllocMem here fails the whole load (fail-fast, same as a
+             * malformed record) rather than silently producing a capture
+             * with holes in its schedule. */
+            if (copies) {
+                struct EchoPacket *copy = AllocMem(sizeof(struct EchoPacket), MEMF_CLEAR);
+                if (!copy) {
+                    ok = FALSE;
+                    break;
+                }
+                CopyMem(cur, copy, sizeof(struct EchoPacket));
+                copies[count] = copy;
+            }
             /* M9: due tick, whole-second granularity -- (ts_sec -
              * first_sec) is a safe subtraction (monotonic check above
              * guarantees first_sec <= ts_sec), and *50 is a small-constant
@@ -1749,6 +1818,13 @@ static BOOL __attribute__((noinline)) load_replay_file(struct Sana2LoopUnit *uni
     DOSBase = NULL;
 
     if (!ok || count == 0) {
+        if (copies) {
+            ULONG i;
+            for (i = 0; i < count; i++)
+                if (copies[i])
+                    FreeMem(copies[i], sizeof(struct EchoPacket));
+            FreeMem(copies, SANA2LOOP_MAX_REPLAY_PACKETS * sizeof(struct EchoPacket *));
+        }
         FreeMem(packets, SANA2LOOP_MAX_REPLAY_PACKETS * sizeof(struct EchoPacket));
         FreeMem(due_ticks, SANA2LOOP_MAX_REPLAY_PACKETS * sizeof(ULONG));
         return FALSE;
@@ -1759,6 +1835,7 @@ static BOOL __attribute__((noinline)) load_replay_file(struct Sana2LoopUnit *uni
     unit->su_ReplayCount    = count;
     unit->su_ReplayPos      = 0;
     unit->su_ReplayDueTicks = due_ticks;
+    unit->su_ReplayDeliveryCopies = copies; /* NULL unless SCHEDULED mode */
     return TRUE;
 }
 
@@ -1768,18 +1845,34 @@ static BOOL __attribute__((noinline)) load_replay_file(struct Sana2LoopUnit *uni
  * replay or recording (echo/crossover units doing neither pay nothing --
  * the loop still visits them, but the `wants_tick` check short-circuits
  * before touching anything else). Delivering a due SCHEDULED-replay
- * record allocates a fresh heap copy and hands it to the EXISTING
- * deliver_packet() precedence (typed read / orphan read / rxqueue /
- * drop+stats) -- per docs/PLAN.md decision #3's stated goal of ONE
- * delivery path shared by echo, crossover, AND replay, this is not a
- * parallel mechanism. AllocMem() from interrupt context is used
- * deliberately, not accidentally: it's long-established as legal here
- * (Exec's allocator wraps its own list ops in Disable()/Enable(), same
- * discipline this file already uses throughout), and a failed allocation
- * just silently skips that one record (no synchronous caller exists to
- * report a failure to from inside an interrupt anyway) -- matching this
- * file's own established "duppct" precedent (M7) for a best-effort extra
- * copy.
+ * record hands a PRE-ALLOCATED heap copy (su_ReplayDeliveryCopies[pos],
+ * made once at load_replay_file() time, ordinary task context) to the
+ * EXISTING deliver_packet() precedence (typed read / orphan read /
+ * rxqueue / drop+stats) -- per docs/PLAN.md decision #3's stated goal of
+ * ONE delivery path shared by echo, crossover, AND replay, this is not a
+ * parallel mechanism.
+ *
+ * This function calls NO allocator of any kind. An earlier version
+ * called AllocMem()+CopyMem() right here instead of indexing a
+ * pre-made su_ReplayDeliveryCopies[] -- AllocMem() from real interrupt
+ * context is long-established as legal on real AmigaOS (Exec's
+ * allocator wraps its own list ops in Disable()/Enable(), same
+ * discipline this file already uses throughout), and this rewrite was
+ * NOT done because that turned out to be false: it stayed legal, and
+ * removing it did NOT, on its own, fix the bundled-AROS hang this
+ * milestone originally shipped with (see docs/PLAN.md's M9 risk note
+ * and docs/sana2-notes.md's M9 section for the real root cause --
+ * bundled AROS's CheckIO()/WaitIO() can falsely report an IOSana2Req
+ * as already complete immediately after SendIO(), before the device
+ * has actually replied it, specifically for requests destined to
+ * complete via a genuine hardware-interrupt-driven ReplyMsg() rather
+ * than task-context ReplyMsg() -- confirmed by instrumentation and
+ * worked around in tests/copperline/sana2test.c, not here). This
+ * rewrite is kept anyway as a real, independent improvement: avoiding
+ * any allocator call from real interrupt context is more conservative
+ * than relying on Disable()/Enable() coverage holding on every target,
+ * and costs nothing (the copies are already fully known at
+ * load_replay_file() time).
  *
  * Server-type interrupt (VERTB is a shared chain, not an exclusive
  * handler): per the Exec interrupt-server calling convention, entered
@@ -1811,11 +1904,17 @@ static ULONG __attribute__((used)) vblank_server(struct Sana2LoopDevice *sld asm
         if (scheduled) {
             while (unit->su_ReplayPos < unit->su_ReplayCount &&
                    unit->su_ReplayDueTicks[unit->su_ReplayPos] <= unit->su_Tick) {
-                struct EchoPacket *fresh = AllocMem(sizeof(struct EchoPacket), MEMF_CLEAR);
-                if (fresh) {
-                    CopyMem(unit->su_ReplayNext, fresh, sizeof(struct EchoPacket));
+                /* Pointer-array indexing (safe -- see su_ReplayDeliveryCopies'
+                 * own comment), not AllocMem()+CopyMem() -- see this
+                 * function's header comment for why that changed. The
+                 * slot is cleared to NULL here: ownership passes to
+                 * deliver_packet() (which unconditionally frees or hands
+                 * off whatever it's given), so this slot must never be
+                 * read again after this point. */
+                struct EchoPacket *fresh = unit->su_ReplayDeliveryCopies[unit->su_ReplayPos];
+                unit->su_ReplayDeliveryCopies[unit->su_ReplayPos] = NULL;
+                if (fresh)
                     deliver_packet(unit, fresh);
-                }
                 unit->su_ReplayNext++; /* plain pointer step -- see the field's own comment */
                 unit->su_ReplayPos++;
             }
@@ -1966,6 +2065,15 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
             unit->su_OfflineAfter = cfg.offlineafter;
             unit->su_OnlineAfter  = cfg.onlineafter;
 
+            /* M9: applied BEFORE load_replay_file() below (not after, as
+             * an earlier version had it) specifically so that function
+             * can see the real su_ReplayMode and decide whether to
+             * pre-allocate SCHEDULED mode's per-record delivery copies --
+             * see su_ReplayDeliveryCopies' own field comment for why that
+             * matters (avoiding AllocMem() from inside vblank_server()'s
+             * real interrupt context). */
+            unit->su_ReplayMode = cfg.replaymode;
+
             /* M8: mode=replay's source is loaded once, right here -- same
              * 0->1 determinism boundary as everything else this block
              * applies. read_unit_config() already guaranteed replay_path
@@ -1979,7 +2087,6 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
                 io->io_Error = S2ERR_BAD_ARGUMENT;
                 return;
             }
-            unit->su_ReplayMode = cfg.replaymode;
 
             /* M9: `record=<path>` -- allocate the RAM buffer and write its
              * pcap file header immediately (so record_append() below only
