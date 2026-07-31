@@ -87,6 +87,10 @@
       
     </div>
     
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
     
       
 
@@ -965,13 +969,15 @@ test suite — not needed if you're just using a released <code>loopback.device<
 binary.</p>
 <h2 id="cross-building">Cross-building<a class="headerlink" href="#cross-building" title="Permanent link">&para;</a></h2>
 <p>The Amiga build uses the Bebbo <code>m68k-amigaos-gcc</code> cross-toolchain.</p>
-<pre><code>make docker   # cross-compiles build/loopback.device + build/SanaInfo
+<pre><code>make docker   # cross-compiles build/loopback.device plus all four
+              # companion tools (SanaInfo/SanaDump/SanaSend/SanaConform)
               # inside a pinned Docker image -- no local toolchain needed
 </code></pre>
 <p>Or, with a local <code>m68k-amigaos-gcc</code> on <code>PATH</code>:</p>
 <pre><code>make amiga    # same, using your local toolchain
 </code></pre>
-<p><code>make device</code> / <code>make tools</code> build just one binary or the other.</p>
+<p><code>make device</code> / <code>make tools</code> split the device from the companion tools --
+<code>make tools</code> alone builds all four (SanaInfo/SanaDump/SanaSend/SanaConform).</p>
 <h2 id="on-target-testing-under-copperline">On-target testing under Copperline<a class="headerlink" href="#on-target-testing-under-copperline" title="Permanent link">&para;</a></h2>
 <p>sana2loop's test suite runs the actual compiled <code>loopback.device</code> under
 the <a href="https://github.com/CopperlineHQ/Copperline">Copperline</a> Amiga
@@ -1100,7 +1106,7 @@ in sync by hand.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "navigation.footer", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "navigation.footer", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
       <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>

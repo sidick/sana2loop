@@ -87,6 +87,10 @@
       
     </div>
     
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
     
       
 
@@ -1106,9 +1110,9 @@ silently ignoring the typo or falling back to a default. Check:</p>
   number? A crossover unit with no peer, or a peer pointing at itself,
   fails to open.</li>
 <li>For <code>mode=replay</code>: does <code>replay=</code> point at a real, loadable <code>.pcap</code> file
-  with <strong>4 records or fewer</strong>? (See
-  <a href="../Replay-and-Record/">Replay and Record</a> for why the limit is so
-  small.)</li>
+  with <strong>no more than the unit's <code>replaycap</code></strong> (default 4)? (See
+  <a href="../Replay-and-Record/">Replay and Record</a> for what <code>replaycap</code> is and
+  why its default is so small.)</li>
 </ul>
 <p>A <strong>missing</strong> config file is fine and not an error — only a file that
 exists but has a problem fails the open.</p>
@@ -1162,12 +1166,18 @@ receive buffers of their own. <code>Sana2DeviceStats.UnknownTypesReceived</code>
 window instead, set <code>rxqueue=</code> to a nonzero value — see
 <a href="../Configuration-Reference/">Configuration Reference</a>.</p>
 <h2 id="why-is-the-replay-capture-limit-only-4-records">Why is the replay capture limit only 4 records?<a class="headerlink" href="#why-is-the-replay-capture-limit-only-4-records" title="Permanent link">&para;</a></h2>
-<p>Not an arbitrary round number — it was set empirically, after replay
-buffers sized for more records reliably failed to allocate under a
-memory-constrained test profile (see the
-<a href="../Changelog/">Changelog</a> for the story). If you need to test against a
-longer capture, split it into multiple smaller files and load each on a
-different unit, or drive live traffic instead of replay.</p>
+<p>That's only the <em>default</em> — set <code>replaycap=</code> (1–256, per-unit; see
+<a href="../Configuration-Reference/">Configuration Reference</a>) to raise it for a
+unit that needs a longer capture. <code>4</code> isn't an arbitrary round number as
+a default, though: it was set empirically, after replay buffers sized for
+more records reliably failed to allocate under a memory-constrained test
+profile (see the <a href="../Changelog/">Changelog</a> for the story) — so raising
+<code>replaycap</code> is your own responsibility to budget for: the device only
+fails loudly (<code>S2ERR_NO_RESOURCES</code>) if a raised value doesn't actually fit
+in whatever RAM your target has free, it doesn't know that in advance. If
+your capture is too large for the memory you have to spare regardless,
+split it into multiple smaller files and load each on a different unit,
+or drive live traffic instead of replay.</p>
 <h2 id="a-unit-that-used-modereplayrecord-seems-to-hold-onto-memory-after-i-close-it">A unit that used <code>mode=replay</code>/<code>record=</code> seems to hold onto memory after I close it<a class="headerlink" href="#a-unit-that-used-modereplayrecord-seems-to-hold-onto-memory-after-i-close-it" title="Permanent link">&para;</a></h2>
 <p>That's expected — see
 <a href="../Replay-and-Record/#memory-usage-and-freeing-it-manually">Replay and Record: Memory usage, and freeing it manually</a>
@@ -1273,7 +1283,7 @@ you're curious how.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "navigation.footer", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "navigation.footer", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
       <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>

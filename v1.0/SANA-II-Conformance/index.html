@@ -87,6 +87,10 @@
       
     </div>
     
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
     
       
 
@@ -1024,9 +1028,13 @@ probe for them, so a test device is only as useful as its own coverage of
 them.</p>
 <h2 id="whats-implemented">What's implemented<a class="headerlink" href="#whats-implemented" title="Permanent link">&para;</a></h2>
 <h3 id="rev-23-wider-buffer-management-hooks">Rev 2/3 -- wider buffer-management hooks<a class="headerlink" href="#rev-23-wider-buffer-management-hooks" title="Permanent link">&para;</a></h3>
-<p>Beyond the base <code>S2_CopyToBuff</code>/<code>S2_CopyFromBuff</code> (see
-<a href="../Getting-Started/">Buffer management</a> if you haven't read about those
-yet), a caller may also offer <code>S2_CopyToBuff16</code>/<code>S2_CopyFromBuff16</code> and
+<p>Beyond the base <code>S2_CopyToBuff</code>/<code>S2_CopyFromBuff</code> (the hooks a caller
+installs at <code>OpenDevice()</code> time to control exactly how packet payloads
+are copied in and out of its own buffers, rather than leaving the device
+to <code>CopyMem()</code> by default — see
+<a href="../SanaDump-and-SanaSend/#sanadump">SanaDump and SanaSend</a>'s mention of
+<code>sana2open.c</code> for a worked example of installing them), a caller may
+also offer <code>S2_CopyToBuff16</code>/<code>S2_CopyFromBuff16</code> and
 <code>S2_CopyToBuff32</code>/<code>S2_CopyFromBuff32</code> at <code>OpenDevice()</code> time -- same
 calling convention as the base hooks, just an alignment hint. Offering
 them is always accepted; whether the device actually <em>uses</em> one instead
@@ -1104,7 +1112,7 @@ genuinely doesn't apply, is reported as such, not treated as a failure.
 The one exception is the trailing "sana2loop quirk stat" line, which is
 this project's own internal bookkeeping (not a SANA-II spec value) and
 will simply show nothing useful against any other SANA-II driver.</p>
-<p>Like SanaDump/SanaSend, SanaConform is a normal AmigaOS 2.0+ program
+<p>Like SanaDump/SanaSend, SanaConform requires AmigaOS 2.04 (V37) or later
 (V36+ Exec calls), not bound to the device's own Kickstart 1.3 floor.</p>
 
 
@@ -1199,7 +1207,7 @@ will simply show nothing useful against any other SANA-II driver.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "navigation.footer", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "navigation.footer", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
       <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>

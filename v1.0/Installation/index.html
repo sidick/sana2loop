@@ -87,6 +87,10 @@
       
     </div>
     
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
     
       
 
@@ -1015,6 +1019,14 @@
   BeginIO path (only its optional config-file read touches <code>dos.library</code>,
   and only from a real Process opener — see
   <a href="../Configuration-Reference/">Configuration Reference</a>).</li>
+<li><strong>2 MB RAM minimum</strong> — the device's own per-unit state (15 pre-allocated
+  units, each carrying its fault-injection/replay/record bookkeeping)
+  needs headroom beyond a bare 512K+512K trapdoor-only A500; a real
+  Kickstart machine with any reasonable RAM expansion (trapdoor + a
+  Zorro-II fast card, or a chip-RAM upgrade) already comfortably clears
+  this. <code>mode=replay</code>/<code>record=</code> buffers (see
+  <a href="../Replay-and-Record/">Replay and Record</a>) need further headroom on top
+  of this floor, scaled to <code>replaycap=</code>/<code>recordmax=</code>.</li>
 </ul>
 <p><code>SanaInfo</code> (the companion CLI tool):</p>
 <ul>
@@ -1048,7 +1060,7 @@ point it there. So: <code>SanaInfo</code>/<code>SanaDump</code>/<code>SanaSend</
 hand-written test program (which all open it by the plain name) need the
 copy in <code>DEVS:</code>; a real stack's config wizard needs the copy in
 <code>DEVS:Networks/</code>. Keep both if you're doing both kinds of testing.</p>
-<p>Unit numbers <strong>0 through 11</strong> are available (12 units are pre-allocated).
+<p>Unit numbers <strong>0 through 14</strong> are available (15 units are pre-allocated).
 Unit 0 defaults to standalone <strong>echo</strong> mode; units 2 and 3 default to a
 <strong>crossover</strong> pair; every other unit defaults to standalone echo unless you
 give it its own config file. See
@@ -1163,7 +1175,7 @@ SanaInfo 1.0 (30.07.2026)
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "navigation.footer", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "navigation.footer", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
       <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>

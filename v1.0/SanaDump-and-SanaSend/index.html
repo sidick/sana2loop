@@ -87,6 +87,10 @@
       
     </div>
     
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
     
       
 
@@ -984,9 +988,9 @@
 <h1 id="sanadump-and-sanasend">SanaDump and SanaSend<a class="headerlink" href="#sanadump-and-sanasend" title="Permanent link">&para;</a></h1>
 <p>Companion Shell tools for capturing and sending traffic through a
 <code>loopback.device</code> unit without writing your own program against the
-device. Like <a href="../SanaInfo-Reference/">SanaInfo</a>, these are normal AmigaOS
-2.0+ programs (V36+ Exec calls -- <code>ReadArgs()</code>, <code>CreateMsgPort()</code>,
-<code>CreateIORequest()</code>), not bound to the device's own Kickstart 1.3 floor.</p>
+device. Like <a href="../SanaInfo-Reference/">SanaInfo</a>, these require AmigaOS
+2.04 (V37) or later (<code>ReadArgs()</code>, <code>CreateMsgPort()</code>, <code>CreateIORequest()</code>
+are V36+ Exec calls), not bound to the device's own Kickstart 1.3 floor.</p>
 <p>Both open the device through a small shared helper that installs real,
 explicit <code>S2_CopyToBuff</code>/<code>S2_CopyFromBuff</code> hooks (rather than leaving
 <code>ios2_BufferManagement</code> unset and relying on the device's own default) --
@@ -1155,7 +1159,7 @@ not just something that "should be fine".</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "navigation.footer", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "navigation.footer", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
       <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>

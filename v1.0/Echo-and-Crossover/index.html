@@ -87,6 +87,10 @@
       
     </div>
     
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
     
       
 
@@ -1032,8 +1036,8 @@ live-traffic modes.</p>
 you write comes back to a reader on that same open (or a different open of
 the same unit; SANA-II has no concept of "my own" vs "someone else's"
 reader on one unit). Addresses are swapped for a plain <code>CMD_WRITE</code>: the
-reader sees the unit's own station address as the source, and whatever
-address you wrote <em>to</em> as the destination. This is deliberate — there's no
+reader sees whatever address you wrote <em>to</em> as the source, and the unit's
+own station address as the destination. This is deliberate — there's no
 real second party to ask "what's your address", so the simplest useful
 behavior is letting the write specify what the reader should see as its
 sender.</p>
@@ -1182,7 +1186,7 @@ a convenience queue instead.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "navigation.footer", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "navigation.footer", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
       <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>

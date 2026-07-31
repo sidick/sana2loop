@@ -87,6 +87,10 @@
       
     </div>
     
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
     
       
 
@@ -1133,7 +1137,7 @@ mtu=1400
 <td><code>mtu</code></td>
 <td>1–1500</td>
 <td>1500</td>
-<td>Maximum Transmit Unit reported by <code>S2_DEVICEQUERY</code> and enforced on <code>CMD_WRITE</code>/<code>S2_BROADCAST</code>/<code>S2_MULTICAST</code>. <code>SANA2IOF_RAW</code> writes get 14 extra bytes of headroom (Ethernet header size) — see the SANA-II spec's raw-frame convention. This same number (MTU+14) is also reported as <code>RawMTU</code> (SANA-II Rev 4) via <code>S2_DEVICEQUERY</code>.</td>
+<td>Maximum Transmit Unit reported by <code>S2_DEVICEQUERY</code> and enforced on <code>CMD_WRITE</code>/<code>S2_BROADCAST</code>/<code>S2_MULTICAST</code>. <code>SANA2IOF_RAW</code> writes get 14 extra bytes of headroom (Ethernet header size) — see the SANA-II spec's raw-frame convention. This same number (MTU+14) is also reported as <code>RawMTU</code> (SANA-II Rev 4) via <code>S2_DEVICEQUERY</code> — except on a <code>mode=replay</code> unit, which always reports <code>RawMTU=0</code> (no raw writes supported there).</td>
 </tr>
 <tr>
 <td><code>rxqueue</code></td>
@@ -1177,6 +1181,12 @@ mtu=1400
 <td>a <code>dos.library</code>-openable path</td>
 <td>—</td>
 <td>Required for <code>mode=replay</code> — the <code>.pcap</code> capture to load.</td>
+</tr>
+<tr>
+<td><code>replaycap</code></td>
+<td>1–256</td>
+<td>4</td>
+<td>Maximum records a <code>mode=replay</code> unit will load — a capture with more fails the whole open (<code>S2ERR_BAD_ARGUMENT</code>). The default (4) is deliberately small (see <a href="../Replay-and-Record/#replay">Replay and Record</a> for why); raise it per-unit if your capture is bigger and your target has the memory to spare — a value that doesn't actually fit fails with <code>S2ERR_NO_RESOURCES</code> instead, since the device can't know your target's free memory in advance.</td>
 </tr>
 <tr>
 <td><code>replaymode</code></td>
@@ -1384,7 +1394,7 @@ without touching real hardware.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "navigation.footer", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "navigation.footer", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
       <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>

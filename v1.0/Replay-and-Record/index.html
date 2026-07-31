@@ -87,6 +87,10 @@
       
     </div>
     
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
     
       
 
@@ -1055,11 +1059,22 @@ device), Ethernet link type. It's loaded <strong>once</strong>, at first open, s
 A missing or malformed capture file fails the whole <code>OpenDevice()</code> call
 (<code>S2ERR_BAD_ARGUMENT</code>) — unlike a missing plain config file, there's no
 sensible default capture to fall back to.</p>
-<p><strong>A replay unit can hold at most 4 records.</strong> This is a real, deliberately
-small limit — not a nice round number — settled on after two rounds of
-empirical <code>AllocMem()</code> failures under a memory-constrained test profile
-(see the <a href="../Changelog/">Changelog</a> for the story). A capture with more than
-4 records fails to load.</p>
+<p><strong>A replay unit can hold at most <code>replaycap</code> records — 4 by default.</strong>
+This default is a real, deliberately small limit — not a nice round
+number — settled on after two rounds of empirical <code>AllocMem()</code> failures
+under a memory-constrained test profile (see the <a href="../Changelog/">Changelog</a>
+for the story). A capture with more records than the active cap (default
+or configured) fails to load. If your capture has more than 4 records and
+your target has the memory to spare, raise the ceiling per-unit:</p>
+<pre><code>mode=replay
+replay=S:sana2loop/mycapture.pcap
+replaycap=16
+</code></pre>
+<p>See <a href="../Configuration-Reference/">Configuration Reference</a> for
+<code>replaycap</code>'s valid range and the memory-budgeting responsibility that
+comes with raising it (the device only fails loudly with
+<code>S2ERR_NO_RESOURCES</code> if a raised value doesn't actually fit — it doesn't
+know your target's own free memory in advance).</p>
 <p><code>CMD_WRITE</code>/<code>S2_BROADCAST</code>/<code>S2_MULTICAST</code> on a replay unit always fail
 <code>S2ERR_NOT_SUPPORTED</code> — there's no live traffic to write into a scripted
 playback.</p>
@@ -1105,7 +1120,14 @@ make room. Query how many packets were dropped this way via
 <code>S2_GETSPECIALSTATS</code>: one record, type <code>1</code>
 (<code>SANA2LOOP_SPECIALSTAT_RECORD_OVERFLOW</code>), <code>Count</code> = packets dropped —
 present only if recording is active and at least one packet has actually
-overflowed; zero records otherwise.</p>
+overflowed.</p>
+<p>A second, independent <code>S2_GETSPECIALSTATS</code> record type also exists since
+SANA-II Rev 7 conformance work: type <code>2</code>, <code>Count</code> = how many opens on this
+unit have offered a Rev 7 DMA buffer-management hook (accepted but never
+invoked — see <a href="../SANA-II-Conformance/#rev-7-dma-capable-buffer-hooks">SANA-II Conformance</a>).
+<code>S2_GETSPECIALSTATS</code> returns <strong>zero records</strong> only when <em>neither</em> condition
+applies for a given unit (no overflow has ever happened, and no opener has
+ever offered a DMA hook) — it's not exclusively tied to <code>record=</code>.</p>
 <h2 id="memory-usage-and-freeing-it-manually">Memory usage, and freeing it manually<a class="headerlink" href="#memory-usage-and-freeing-it-manually" title="Permanent link">&para;</a></h2>
 <p>Replay and record buffers (<code>su_ReplayPackets</code>/<code>su_ReplayDueTicks</code>/
 <code>su_ReplayDeliveryCopies</code> for <code>mode=replay</code>, <code>su_RecordBuf</code> for <code>record=</code>)
@@ -1263,7 +1285,7 @@ points) on the target Amiga (or its emulated disk image).</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "navigation.footer", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "navigation.footer", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
       <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>

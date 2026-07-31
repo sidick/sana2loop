@@ -87,6 +87,10 @@
       
     </div>
     
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
     
       
 
@@ -967,7 +971,7 @@ unit 0 (standalone echo, the default), bringing it online, and using
 <p>With <code>loopback.device</code> in <code>DEVS:</code> (see <a href="../Installation/">Installation</a>):</p>
 <pre><code>&gt; SanaInfo
 MTU: 1500
-BPS: 0
+BPS: 10000000
 HardwareType: 1 (1=Ethernet)
 AddrFieldSize: 48 bits
 Station address: 02:53:32:4c:00:00
@@ -982,7 +986,7 @@ one of these unless a program calls <code>S2_CONFIGINTERFACE</code> to change it
 <pre><code>&gt; SanaInfo 0 ONLINE
 SanaInfo: unit 0 set ONLINE (io_Error=0)
 MTU: 1500
-BPS: 0
+BPS: 10000000
 HardwareType: 1 (1=Ethernet)
 AddrFieldSize: 48 bits
 Station address: 02:53:32:4c:00:00
@@ -1006,8 +1010,8 @@ branches:</p>
 <li><code>CMD_WRITE</code> some bytes with any destination address and packet type you
    like.</li>
 <li><code>WaitIO()</code> the queued read — it completes with your data, the packet
-   type you wrote, and addresses swapped (your own station address as the
-   source, whatever you wrote to as the destination).</li>
+   type you wrote, and addresses swapped (whatever you wrote to as the
+   source, your own station address as the destination).</li>
 </ol>
 <p>No special configuration is needed for this — echo is unit 0's (and every
 unconfigured unit's) default mode. See
@@ -1117,7 +1121,7 @@ pairing two units together instead of echoing to yourself.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "navigation.footer", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "navigation.footer", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
       <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
