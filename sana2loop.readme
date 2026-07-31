@@ -1,4 +1,4 @@
-Short:        Hardware-free SANA-II loopback network device + tools
+Short:        Hardware-free SANA-II loopback device
 Author:       simond@irrelevant.org (Simon Dick)
 Uploader:     simond@irrelevant.org (Simon Dick)
 Type:         comm/net
@@ -6,29 +6,32 @@ Version:      1.0
 Architecture: m68k-amigaos
 Distribution: Aminet
 
-sana2loop builds loopback.device, a hardware-free SANA-II network device for
-AmigaOS: echo, crossover, and pcap replay/capture modes, plus companion
-Shell tools (SanaInfo, SanaDump, SanaSend, SanaConform). No null/dummy
-SANA-II device has ever existed before this, despite being the obvious
-first tool for testing any network stack, shim, or driver-consuming
-software - deterministically, with zero hardware and zero emulator network
-support required.
+sana2loop builds loopback.device, a hardware-free SANA-II network
+device for AmigaOS: echo, crossover, and pcap replay/capture modes,
+plus companion Shell tools (SanaInfo, SanaDump, SanaSend, SanaConform).
+No null/dummy SANA-II device has ever existed before this, despite
+being the obvious first tool for testing any network stack, shim, or
+driver-consuming software - deterministically, with zero hardware and
+zero emulator network support required.
 
 Features
 --------
   - Echo mode: a CMD_WRITE is delivered straight back to a matching queued
     CMD_READ (typed, orphan, or a bounded rxqueue), with real SANA-II
     src/dst address semantics.
-  - Crossover mode: pair two units so traffic written to one is delivered to
-    the other, with real unswapped addressing and unicast/broadcast/
-    multicast/promiscuous receive filtering.
+  - Crossover mode: pair two units so traffic written to one is
+    delivered to the other, with real unswapped addressing and
+    unicast/broadcast/multicast/promiscuous receive filtering.
   - Real SANA-II buffer-management hooks (S2_CopyToBuff/CopyFromBuff/
     PacketFilter), broadcast/multicast writes and group membership,
     S2_ONEVENT, global/type/special stats, and per-unit config files
     (ENV:/S: sana2loop/unitN.config).
   - Fault injection pipeline, all off by default: packet drop, duplicate,
-    truncate, reorder, a PMTUD "oversilent" black hole, and forced
-    online/offline flapping - all seeded and reproducible.
+    truncate, reorder, forced online/offline flapping, and an
+    "oversilent" PMTUD black hole - an overlong crossover write
+    vanishes silently instead of erroring, so a stack's actual PMTUD
+    black-hole detection/recovery can be tested, not just assumed - all
+    seeded and reproducible.
   - pcap replay (on-demand or real-time VBlank-scheduled) and pcap
     recording, both driven off a hand-rolled classic pcap reader/writer
     with no host dependency.
@@ -46,8 +49,8 @@ Features
 Requirements
 ------------
   - loopback.device: any Amiga, from a stock 68000 upwards, Kickstart 1.3
-    (V34) or later. No utility.library, no dos.library calls from the
-    unit's own I/O path.
+    (V34) or later, 2 MB RAM minimum. No utility.library, no dos.library
+    calls from the unit's own I/O path.
   - SanaInfo/SanaDump/SanaSend/SanaConform: AmigaOS 2.04 (V37) or later
     (CreateMsgPort()/CreateIORequest() are V36+ Exec calls, but V36 itself
     never shipped outside early pre-release hardware, so 2.04 is the
@@ -75,12 +78,12 @@ Installation
 
 Quick start
 -----------
-  SanaInfo UNIT=0                       open unit 0, print DEVICEQUERY info
-  SanaDump UNIT=0 FILE=capture.pcap      capture unit 0's traffic to a file
-  SanaSend UNIT=0 FILE=capture.pcap      replay a pcap file's frames onto
-                                          unit 0
-  SanaConform 0                          probe unit 0's SANA-II Rev 2/3/4/7
-                                          conformance
+  SanaInfo 0                          open unit 0, print DEVICEQUERY info
+  SanaDump UNIT=0 FILE=capture.pcap   capture unit 0's traffic to a file
+  SanaSend UNIT=0 FILE=capture.pcap   replay a pcap file's frames onto
+                                       unit 0
+  SanaConform 0                       probe unit 0's SANA-II Rev 2/3/4/7
+                                       conformance
 
 AI disclosure
 -------------

@@ -356,6 +356,40 @@ proper.
   regressions... not a substitute for confirming against real 1.3" (see
   CLAUDE.md's "Testing under Copperline" section), extended here to a
   genuine memory-budget gap rather than a behavioral difference.
+- **Pre-launch review (2026-07-31)**: an independent multi-agent review
+  (device code, tools, tests/CI/build, docs accuracy, release readiness)
+  found 20 real issues (#1-#20 on GitHub), each fixed and verified
+  on-target before closing. Highlights: four real device-code concurrency
+  bugs (unprotected M7 reorder-buffer mutation; unprotected consume-mode
+  replay reads; two list-walk functions resuming from a stale `next`
+  pointer across a dropped `Disable()` window; `close()`/`reset_unit()`
+  letting a drained unit's queue get silently repopulated); a
+  `parse_ulong()` overflow that defeated the config parser's own
+  fail-fast contract; `S2_DEVICEQUERY` writing past a caller's honestly-
+  advertised `SizeAvailable`; `open()` never clearing `LIBF_DELEXP`;
+  the per-open cookie magic being written but never validated; a
+  recorded-pcap timestamp field actually holding raw VBlank ticks instead
+  of real seconds; and a genuine gap in the DOS-I/O-under-broken-Forbid
+  concurrency story (partially closed -- `lib_OpenCnt` now bumped before
+  any dos.library I/O in `open()`, closing a real use-after-free via
+  concurrent `expunge()`; the remaining cross-unit race is documented,
+  not fixed, a deliberate scope call). Also a `SanaDump` capture-buffer
+  overflow on a legal `SANA2IOF_RAW`-sized delivery, several companion-
+  tool robustness fixes, a missing AmigaGuide page, inverted echo-address
+  docs, a Linux-runner `release.yml` root-ownership bug, Makefile
+  dependency gaps, and five new on-target sub-tests (`truncate=`,
+  `SanaInfo` execution, `recordmax=` overflow, `rxqueue>0`'s actual
+  bound, plus a fixed vacuous grep). See CLAUDE.md's own entry for the
+  fuller account, including two real AROS-specific environmental findings
+  this surfaced along the way (both resolved, neither a device bug): new
+  on-target test units initially broke an unrelated, pre-existing
+  sub-test on bundled AROS via memory pressure (resolved by reusing
+  existing units instead of growing `SANA2LOOP_NUM_UNITS`), and the
+  recorded-timestamp fix's own small per-unit struct growth did the same
+  on its own -- resolved by raising `machine.toml`'s documented minimum
+  RAM floor from 1 MB to 2 MB rather than re-shrinking future fixes
+  indefinitely (a deliberate, user-approved decision, now documented in
+  `userdocs/Installation.md`).
 
 ## Verification
 

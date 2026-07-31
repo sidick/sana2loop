@@ -43,7 +43,25 @@ fast = "1M"
 
 [floppy]
 drives = 1
-speed = 0
+# Realistic timing (100 = real-time; 0 = turbo/instant DMA), NOT turbo,
+# as of the pre-launch-review pass adding SanaInfo as a 4th program to
+# this same boot session -- with speed=0 (this file's original setting,
+# matching machine.toml's own turbo default), adding SanaInfo reliably
+# corrupted BOTH captured.pcap (SanaDump's own already-flushed file,
+# written and closed well before SanaInfo even ran) and SanaConform's own
+# output -- symptoms matching the general shape of the M13-documented
+# Copperline/AROS floppy write-back ordering quirk (a later DOS I/O
+# operation disturbing an earlier file's already-flushed blocks before
+# --benchmark-until's cutoff), but broader here (multiple files, not
+# just the adjacent one). speed=100 alone fixed captured.pcap; raising
+# run-tools.sh's own BENCH default (40 -> 90, to give the now-realistic,
+# no-longer-instant floppy I/O enough wall-clock room) fixed the rest.
+# Root cause not fully isolated beyond "turbo floppy timing interacts
+# badly with 4+ DOS I/O operations sharing one session" -- empirically
+# resolved, not fully explained; a real Amiga's own floppy timing was
+# never turbo either, so this is arguably the more realistic setting
+# regardless.
+speed = 100
 
 [floppy.df0]
 path = "tools-boot.adf"   # built fresh by run-tools.sh via xdftool

@@ -15,9 +15,9 @@ silently ignoring the typo or falling back to a default. Check:
   number? A crossover unit with no peer, or a peer pointing at itself,
   fails to open.
 - For `mode=replay`: does `replay=` point at a real, loadable `.pcap` file
-  with **4 records or fewer**? (See
-  [Replay and Record](Replay-and-Record.md) for why the limit is so
-  small.)
+  with **no more than the unit's `replaycap`** (default 4)? (See
+  [Replay and Record](Replay-and-Record.md) for what `replaycap` is and
+  why its default is so small.)
 
 A **missing** config file is fine and not an error — only a file that
 exists but has a problem fails the open.
@@ -84,12 +84,18 @@ window instead, set `rxqueue=` to a nonzero value — see
 
 ## Why is the replay capture limit only 4 records?
 
-Not an arbitrary round number — it was set empirically, after replay
-buffers sized for more records reliably failed to allocate under a
-memory-constrained test profile (see the
-[Changelog](Changelog.md) for the story). If you need to test against a
-longer capture, split it into multiple smaller files and load each on a
-different unit, or drive live traffic instead of replay.
+That's only the *default* — set `replaycap=` (1–256, per-unit; see
+[Configuration Reference](Configuration-Reference.md)) to raise it for a
+unit that needs a longer capture. `4` isn't an arbitrary round number as
+a default, though: it was set empirically, after replay buffers sized for
+more records reliably failed to allocate under a memory-constrained test
+profile (see the [Changelog](Changelog.md) for the story) — so raising
+`replaycap` is your own responsibility to budget for: the device only
+fails loudly (`S2ERR_NO_RESOURCES`) if a raised value doesn't actually fit
+in whatever RAM your target has free, it doesn't know that in advance. If
+your capture is too large for the memory you have to spare regardless,
+split it into multiple smaller files and load each on a different unit,
+or drive live traffic instead of replay.
 
 ## A unit that used `mode=replay`/`record=` seems to hold onto memory after I close it
 

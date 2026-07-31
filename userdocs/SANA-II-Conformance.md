@@ -11,9 +11,13 @@ them.
 
 ### Rev 2/3 -- wider buffer-management hooks
 
-Beyond the base `S2_CopyToBuff`/`S2_CopyFromBuff` (see
-[Buffer management](Getting-Started.md) if you haven't read about those
-yet), a caller may also offer `S2_CopyToBuff16`/`S2_CopyFromBuff16` and
+Beyond the base `S2_CopyToBuff`/`S2_CopyFromBuff` (the hooks a caller
+installs at `OpenDevice()` time to control exactly how packet payloads
+are copied in and out of its own buffers, rather than leaving the device
+to `CopyMem()` by default — see
+[SanaDump and SanaSend](SanaDump-and-SanaSend.md#sanadump)'s mention of
+`sana2open.c` for a worked example of installing them), a caller may
+also offer `S2_CopyToBuff16`/`S2_CopyFromBuff16` and
 `S2_CopyToBuff32`/`S2_CopyFromBuff32` at `OpenDevice()` time -- same
 calling convention as the base hooks, just an alignment hint. Offering
 them is always accepted; whether the device actually *uses* one instead
@@ -101,5 +105,5 @@ The one exception is the trailing "sana2loop quirk stat" line, which is
 this project's own internal bookkeeping (not a SANA-II spec value) and
 will simply show nothing useful against any other SANA-II driver.
 
-Like SanaDump/SanaSend, SanaConform is a normal AmigaOS 2.0+ program
+Like SanaDump/SanaSend, SanaConform requires AmigaOS 2.04 (V37) or later
 (V36+ Exec calls), not bound to the device's own Kickstart 1.3 floor.

@@ -134,6 +134,8 @@ static char NAME_DNSADDRESS[]      = "dnsaddress";
 static char NAME_BUFFHOOKS[]       = "buffhooks";
 static char NAME_DMAHOOKS[]        = "dmahooks";
 static char NAME_REPLAYCAP[]       = "replaycap";
+static char NAME_FAULTTRUNCATE[]   = "faulttruncate";
+static char NAME_FAULTRXQUEUE[]    = "faultrxqueue";
 static char DBG_CHECKIO_NULL[]    = "DBG_CHECKIO_NULL=";
 
 /* M13: this toolchain's <devices/sana2.h> lacks Rev 4's RawMTU field --
@@ -159,6 +161,13 @@ struct Sana2LoopDeviceQuery {
 #define S2_GETDNSADDRESS     0xC003
 #define S2_DMACopyToBuff64   (S2_Dummy + 10)
 #define S2_DMACopyFromBuff64 (S2_Dummy + 11)
+
+/* M9: this device's own S2_GETSPECIALSTATS record type for record=
+ * overflow (loopback_device.c's SANA2LOOP_SPECIALSTAT_RECORD_OVERFLOW --
+ * same "driver-defined, not a spec value" reasoning as the DMA-hooks one
+ * below). Added to the test harness by the pre-launch review pass --
+ * the device side has had this since M9, but nothing here checked it. */
+#define SANA2LOOP_SPECIALSTAT_RECORD_OVERFLOW 1
 
 /* M13: this device's own S2_GETSPECIALSTATS record type for DMA-hook
  * negotiation (loopback_device.c's SANA2LOOP_SPECIALSTAT_DMA_HOOKS_OFFERED
@@ -2115,8 +2124,16 @@ static int test_main(void)
         struct IOSana2Req *io14c = port14c ? make_io(port14c) : NULL;
 
         if (io14c) {
-            ok = (OpenDevice((STRPTR)DEVICE_NAME, 14, (struct IORequest *)io14c, 0) != 0);
-            if (!ok)
+            /* Not just "did OpenDevice fail" -- WHY: pre-launch review
+             * pointed out that any open failure at all (e.g. an
+             * unrelated AllocMem() failure) would false-PASS the
+             * original `!= 0` check. This is pure config validation
+             * (replaycap=0 is out of range), so it must fail with
+             * exactly S2ERR_BAD_ARGUMENT, same as the "config" sub-test's
+             * own malformed-value check. */
+            BOOL failed = (OpenDevice((STRPTR)DEVICE_NAME, 14, (struct IORequest *)io14c, 0) != 0);
+            ok = failed && (io14c->ios2_Req.io_Error == S2ERR_BAD_ARGUMENT);
+            if (!failed)
                 CloseDevice((struct IORequest *)io14c); /* shouldn't happen; clean up if it does */
         }
         if (io14c)
@@ -2129,26 +2146,235 @@ static int test_main(void)
         report(NAME_REPLAYCAP, ok, &fails);
     }
 
-    /* --- record: unit 11 (`record=S:sana2loop/recorded.pcap`,
-     * recordmax=4096) taps 3 known echo writes into a RAM buffer, flushed
-     * to that file at CloseDevice() (last close). No queued reader is
-     * needed -- a plain CMD_WRITE with nobody listening still "succeeds"
-     * from the writer's perspective under this device's strict rxqueue=0
-     * default (the packet is simply dropped after delivery, per M2), and
-     * record_append() taps deliver_packet() unconditionally regardless of
-     * that outcome. run.sh extracts the flushed file off the ADF
-     * post-run (via xdftool) and byte-compares it against these same 3
-     * writes -- this sub-test only proves the writes themselves succeed;
-     * the actual recorded-bytes assertion lives in run.sh, since verifying
-     * what ended up on the host-side ADF is inherently a host-side
-     * question, not something the on-target harness can check about
-     * itself. --- */
+    /* --- faulttruncate: pre-launch-review coverage for the one M7 fault
+     * knob that had none (droppct/duppct/reorder/oversilent/offlineafter-
+     * onlineafter all already had a dedicated unit). Reuses unit 1 (its
+     * own earlier "config" sub-test already closed it, so this is a
+     * genuine fresh 0->1 open, re-reading unit1.config's now-added
+     * truncate=20 -- see that fixture's own comment for why this reuses
+     * unit 1 rather than a new dedicated unit) -- must cap any delivered
+     * payload LONGER than 20 bytes at exactly 20, with the first 20
+     * bytes unchanged, and must leave a SHORTER payload completely alone
+     * (truncate only ever caps, never pads). --- */
     {
         BOOL ok = TRUE;
+        static char LONG_PAY[] = "this-payload-is-definitely-over-twenty-bytes-long";
+        struct MsgPort *port1t = make_port();
+        struct IOSana2Req *io1t = port1t ? make_io(port1t) : NULL;
+
+        if (io1t && OpenDevice((STRPTR)DEVICE_NAME, 1, (struct IORequest *)io1t, 0) == 0) {
+            struct MsgPort *port1tw = make_port();
+            struct IOSana2Req *io1tw = port1tw ? make_io(port1tw) : NULL;
+
+            io1t->ios2_Req.io_Command = S2_ONLINE;
+            do_io(io1t);
+            ok = (io1t->ios2_Req.io_Error == 0);
+
+            if (io1tw && OpenDevice((STRPTR)DEVICE_NAME, 1, (struct IORequest *)io1tw, 0) == 0) {
+                int i;
+
+                /* Over the cap: must arrive truncated to exactly 20 bytes,
+                 * with those 20 bytes matching the original's own first 20. */
+                io1t->ios2_Req.io_Command = CMD_READ;
+                io1t->ios2_Data = readbuf;
+                io1t->ios2_PacketType = 0x7500;
+                io1t->ios2_Req.io_Flags = 0;
+                send_io(io1t);
+
+                io1tw->ios2_Req.io_Command = CMD_WRITE;
+                io1tw->ios2_PacketType = 0x7500;
+                io1tw->ios2_DataLength = sizeof(LONG_PAY) - 1;
+                io1tw->ios2_Data = (APTR)LONG_PAY;
+                for (i = 0; i < SANA2_MAX_ADDR_BYTES; i++)
+                    io1tw->ios2_DstAddr[i] = (i < 6) ? (UBYTE)(0x75 + i) : 0;
+                do_io(io1tw);
+                ok = ok && (io1tw->ios2_Req.io_Error == 0);
+
+                WaitIO((struct IORequest *)io1t);
+                ok = ok && (io1t->ios2_Req.io_Error == 0) && (io1t->ios2_DataLength == 20);
+                if (ok)
+                    for (i = 0; i < 20; i++)
+                        if (readbuf[i] != (UBYTE)LONG_PAY[i])
+                            ok = FALSE;
+
+                /* Under the cap: must arrive completely unchanged, no
+                 * padding out to 20 bytes. */
+                io1t->ios2_Req.io_Command = CMD_READ;
+                io1t->ios2_Data = readbuf;
+                io1t->ios2_PacketType = 0x7501;
+                io1t->ios2_Req.io_Flags = 0;
+                send_io(io1t);
+
+                io1tw->ios2_Req.io_Command = CMD_WRITE;
+                io1tw->ios2_PacketType = 0x7501;
+                io1tw->ios2_DataLength = sizeof(PAYLOAD) - 1;
+                io1tw->ios2_Data = (APTR)PAYLOAD;
+                do_io(io1tw);
+                ok = ok && (io1tw->ios2_Req.io_Error == 0);
+
+                WaitIO((struct IORequest *)io1t);
+                ok = ok && (io1t->ios2_Req.io_Error == 0) &&
+                     (io1t->ios2_DataLength == sizeof(PAYLOAD) - 1);
+                if (ok)
+                    for (i = 0; i < (int)(sizeof(PAYLOAD) - 1); i++)
+                        if (readbuf[i] != (UBYTE)PAYLOAD[i])
+                            ok = FALSE;
+
+                CloseDevice((struct IORequest *)io1tw);
+            } else {
+                ok = FALSE;
+            }
+            if (io1tw)
+                FreeMem(io1tw, sizeof(struct IOSana2Req));
+            if (port1tw) {
+                FreeSignal(port1tw->mp_SigBit);
+                FreeMem(port1tw, sizeof(struct MsgPort));
+            }
+
+            CloseDevice((struct IORequest *)io1t);
+        } else {
+            ok = FALSE;
+        }
+        if (io1t)
+            FreeMem(io1t, sizeof(struct IOSana2Req));
+        if (port1t) {
+            FreeSignal(port1t->mp_SigBit);
+            FreeMem(port1t, sizeof(struct MsgPort));
+        }
+
+        report(NAME_FAULTTRUNCATE, ok, &fails);
+    }
+
+    /* --- faultrxqueue: pre-launch-review coverage for rxqueue=N's bound
+     * actually being REACHED and enforced -- the existing "delivery"
+     * sub-test only ever proves the rxqueue=0 strict-drop DEFAULT.
+     * Reuses unit 1 again (a fresh 0->1 open, same reasoning as
+     * faulttruncate above -- its own config now also carries
+     * rxqueue=2): must queue the first 2 unread writes and DROP the 3rd,
+     * counted in Sana2DeviceStats.UnknownTypesReceived -- then
+     * S2_READORPHAN must still drain exactly the 2 that made it in, in
+     * arrival order. --- */
+    {
+        BOOL ok = TRUE;
+        struct MsgPort *port1r = make_port();
+        struct IOSana2Req *io1r = port1r ? make_io(port1r) : NULL;
+
+        if (io1r && OpenDevice((STRPTR)DEVICE_NAME, 1, (struct IORequest *)io1r, 0) == 0) {
+            struct Sana2DeviceStats before, after;
+            int i;
+
+            io1r->ios2_Req.io_Command = S2_ONLINE;
+            do_io(io1r);
+            ok = (io1r->ios2_Req.io_Error == 0);
+
+            io1r->ios2_Req.io_Command = S2_GETGLOBALSTATS;
+            io1r->ios2_StatData = &before;
+            do_io(io1r);
+            ok = ok && (io1r->ios2_Req.io_Error == 0);
+
+            /* 3 writes, nobody reading yet: first 2 must queue (rxqueue=2),
+             * the 3rd must be silently dropped -- all 3 "succeed" from the
+             * writer's own point of view either way (SANA-II has no
+             * write-side signal for a full receive queue). */
+            for (i = 0; i < 3; i++) {
+                int k;
+                io1r->ios2_Req.io_Command = CMD_WRITE;
+                io1r->ios2_PacketType = 0x1600 + i;
+                io1r->ios2_DataLength = sizeof(PAYLOAD) - 1;
+                io1r->ios2_Data = (APTR)PAYLOAD;
+                for (k = 0; k < SANA2_MAX_ADDR_BYTES; k++)
+                    io1r->ios2_DstAddr[k] = (k < 6) ? (UBYTE)(0x16 + k) : 0;
+                do_io(io1r);
+                ok = ok && (io1r->ios2_Req.io_Error == 0);
+            }
+
+            io1r->ios2_Req.io_Command = S2_GETGLOBALSTATS;
+            io1r->ios2_StatData = &after;
+            do_io(io1r);
+            ok = ok && (io1r->ios2_Req.io_Error == 0) &&
+                 (after.UnknownTypesReceived == before.UnknownTypesReceived + 1);
+
+            /* Drain via S2_READORPHAN: exactly 2 must be waiting (the two
+             * that made it into the bounded queue), then a 3rd read finds
+             * nothing and must queue rather than complete. */
+            io1r->ios2_Req.io_Command = S2_READORPHAN;
+            io1r->ios2_Data = readbuf;
+            io1r->ios2_Req.io_Flags = 0;
+            do_io(io1r);
+            ok = ok && (io1r->ios2_Req.io_Error == 0) && (io1r->ios2_PacketType == 0x1600);
+
+            io1r->ios2_Req.io_Command = S2_READORPHAN;
+            io1r->ios2_Data = readbuf;
+            io1r->ios2_Req.io_Flags = 0;
+            do_io(io1r);
+            ok = ok && (io1r->ios2_Req.io_Error == 0) && (io1r->ios2_PacketType == 0x1601);
+
+            io1r->ios2_Req.io_Command = S2_READORPHAN;
+            io1r->ios2_Data = readbuf;
+            io1r->ios2_Req.io_Flags = 0;
+            send_io(io1r);
+            AbortIO((struct IORequest *)io1r); /* nothing left queued -- prove it */
+            WaitIO((struct IORequest *)io1r);
+            ok = ok && (io1r->ios2_Req.io_Error == IOERR_ABORTED);
+
+            CloseDevice((struct IORequest *)io1r);
+        } else {
+            ok = FALSE;
+        }
+        if (io1r)
+            FreeMem(io1r, sizeof(struct IOSana2Req));
+        if (port1r) {
+            FreeSignal(port1r->mp_SigBit);
+            FreeMem(port1r, sizeof(struct MsgPort));
+        }
+
+        report(NAME_FAULTRXQUEUE, ok, &fails);
+    }
+
+    /* --- record: unit 11 (`record=S:sana2loop/recorded.pcap`,
+     * recordmax=150 as of the pre-launch review pass -- see
+     * unit11.config's own comment) taps 3 known echo writes into a RAM
+     * buffer, flushed to that file at CloseDevice() (last close). No
+     * queued reader is needed -- a plain CMD_WRITE with nobody listening
+     * still "succeeds" from the writer's perspective under this device's
+     * strict rxqueue=0 default (the packet is simply dropped after
+     * delivery, per M2), and record_append() taps deliver_packet()
+     * unconditionally regardless of that outcome. run.sh extracts the
+     * flushed file off the ADF post-run (via xdftool) and byte-compares
+     * it against these same 3 writes -- this sub-test only proves the
+     * writes themselves succeed; the actual recorded-bytes assertion
+     * lives in run.sh, since verifying what ended up on the host-side
+     * ADF is inherently a host-side question, not something the
+     * on-target harness can check about itself.
+     *
+     * A 4th write (RECORD_OVERFLOW_PAY, not one of the 3 RECORD_* arrays
+     * run.sh/verify_record.py know about) is added AFTER those 3,
+     * deliberately sized so it can no longer fit in the 150-byte budget
+     * the first 3 already filled to 146 -- proving S2_GETSPECIALSTATS'
+     * Type-1 overflow-count record (SANA2LOOP_SPECIALSTAT_RECORD_OVERFLOW,
+     * present on this device since M9, but never actually checked by any
+     * on-target test until the pre-launch review pass). The write itself
+     * must still "succeed" (io_Error==0) -- record overflow is silent,
+     * per record_append()'s own contract -- and, critically, must NOT
+     * end up in the flushed file, so run.sh's byte-exact 3-record
+     * comparison stays valid. --- */
+    {
+        BOOL ok = TRUE;
+        static char RECORD_OVERFLOW_PAY[] = "this-write-must-overflow-recordmax";
         struct MsgPort *port11 = make_port();
         struct IOSana2Req *io11 = port11 ? make_io(port11) : NULL;
 
         if (io11 && OpenDevice((STRPTR)DEVICE_NAME, 11, (struct IORequest *)io11, 0) == 0) {
+            /* Single struct, not two separate locals -- the real SANA-II
+             * convention needs the RecordCountMax record slots CONTIGUOUS
+             * with the header in the SAME ios2_StatData buffer, which two
+             * independent stack locals do not guarantee (the compiler is
+             * free to lay them out non-adjacently); matches the dmahooks
+             * sub-test's own identical pattern above. */
+            struct {
+                struct Sana2SpecialStatHeader hdr;
+                struct Sana2SpecialStatRecord recs[1];
+            } stats;
             int i;
 
             io11->ios2_Req.io_Command = S2_ONLINE;
@@ -2166,6 +2392,24 @@ static int test_main(void)
                 do_io(io11);
                 ok = ok && (io11->ios2_Req.io_Error == 0);
             }
+
+            io11->ios2_Req.io_Command = CMD_WRITE;
+            io11->ios2_PacketType = 0x1103;
+            io11->ios2_DataLength = sizeof(RECORD_OVERFLOW_PAY) - 1;
+            io11->ios2_Data = (APTR)RECORD_OVERFLOW_PAY;
+            for (i = 0; i < SANA2_MAX_ADDR_BYTES; i++)
+                io11->ios2_DstAddr[i] = (i < 6) ? RECORD_WROTE_TO[i] : 0;
+            do_io(io11);
+            ok = ok && (io11->ios2_Req.io_Error == 0);
+
+            stats.hdr.RecordCountMax = 1;
+            io11->ios2_Req.io_Command = S2_GETSPECIALSTATS;
+            io11->ios2_StatData = &stats;
+            do_io(io11);
+            ok = ok && (io11->ios2_Req.io_Error == 0) &&
+                 (stats.hdr.RecordCountSupplied == 1) &&
+                 (stats.recs[0].Type == SANA2LOOP_SPECIALSTAT_RECORD_OVERFLOW) &&
+                 (stats.recs[0].Count >= 1);
 
             CloseDevice((struct IORequest *)io11);
         } else {

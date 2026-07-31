@@ -70,11 +70,42 @@ enum { ARG_UNIT, ARG_FILE, ARG_TYPE, ARG_PROM, ARG_COUNT, ARG_COUNT_TOTAL };
 
 /* SANA2LOOP_MAX_PACKET-equivalent from the device's own header isn't
  * shared with tools (that header is device-internal) -- 1514 is the
- * standard Ethernet MTU (1500) plus its 14-byte header, generous enough
- * for anything this project's own loopback.device can ever deliver
- * (its own default MTU is 1500 -- see userdocs/Configuration-Reference.md). */
+ * largest PAYLOAD this project's own loopback.device can ever deliver:
+ * the standard Ethernet MTU (1500, its own default -- see
+ * userdocs/Configuration-Reference.md) plus the 14 bytes a SANA2IOF_RAW
+ * writer's relaxed MTU check allows on top of that. Note that's payload
+ * alone, addresses/type excluded -- see frame[]'s own comment below. */
 #define MAX_FRAME 1514
 #define ETH_HDR_SIZE 14
+
+/* Parses a bare-hex packet type ("0800", any case -- exactly the form the
+ * usage text and userdocs/SanaDump-and-SanaSend.md document; no "0x"
+ * prefix, since none is documented) into a 16-bit value. FALSE on
+ * anything else. A bare strtoul() here would silently turn garbage into
+ * type 0 and wave through values past 0xFFFF -- and a wrong TYPE is
+ * exactly as fatal as a malformed pcap record elsewhere in this project
+ * (fail-fast, not a silent best-effort parse). Kept byte-for-byte
+ * identical to sanasend.c's own copy. */
+static BOOL parse_type(const char *s, ULONG *out)
+{
+    char *end;
+    unsigned long v;
+    const char *p;
+
+    if (*s == '\0')
+        return FALSE;
+    for (p = s; *p != '\0'; p++) {
+        if (!((*p >= '0' && *p <= '9') ||
+              (*p >= 'a' && *p <= 'f') ||
+              (*p >= 'A' && *p <= 'F')))
+            return FALSE;
+    }
+    v = strtoul(s, &end, 16);
+    if (*end != '\0' || v > 0xFFFFUL)
+        return FALSE;
+    *out = (ULONG)v;
+    return TRUE;
+}
 
 int main(int argc, char **argv)
 {
@@ -88,7 +119,13 @@ int main(int argc, char **argv)
     BOOL typed = FALSE;
     ULONG flags = 0;
     ULONG captured = 0;
-    static UBYTE frame[MAX_FRAME]; /* not a stack local -- see stack_cookie's own comment */
+    /* Not a stack local -- see stack_cookie's own comment. Sized
+     * MAX_FRAME + ETH_HDR_SIZE, not MAX_FRAME: the PAYLOAD alone can be a
+     * full MAX_FRAME bytes (a SANA2IOF_RAW writer gets the MTU check
+     * relaxed by 14 -- see docs/sana2-notes.md's M4 section), and the
+     * hook writes it at frame + ETH_HDR_SIZE, so the header room must be
+     * ON TOP of the maximum payload, not carved out of it. */
+    static UBYTE frame[MAX_FRAME + ETH_HDR_SIZE];
     int rc = 0;
 
     (void)argc;
@@ -103,7 +140,12 @@ int main(int argc, char **argv)
 
     unit = (ULONG)*(LONG *)args[ARG_UNIT];
     if (args[ARG_TYPE]) {
-        type  = strtoul((char *)args[ARG_TYPE], NULL, 16);
+        if (!parse_type((char *)args[ARG_TYPE], &type)) {
+            fprintf(stderr, "SanaDump: bad TYPE %s (want bare hex 0000-ffff, e.g. 0800)\n",
+                    (char *)args[ARG_TYPE]);
+            FreeArgs(rda);
+            return 20;
+        }
         typed = TRUE;
     }
     if (args[ARG_PROM])
@@ -122,7 +164,10 @@ int main(int argc, char **argv)
     so.io->ios2_Req.io_Command = S2_ONLINE;
     DoIO((struct IORequest *)so.io);
 
-    if (!pcapio_open_write(&writer, (char *)args[ARG_FILE], MAX_FRAME, PCAP_LINKTYPE_ETHERNET)) {
+    /* Snaplen advertises the largest record this file may contain -- a
+     * full MAX_FRAME payload plus the 14-byte header this tool prepends,
+     * matching frame[]'s own size above. */
+    if (!pcapio_open_write(&writer, (char *)args[ARG_FILE], ETH_HDR_SIZE + MAX_FRAME, PCAP_LINKTYPE_ETHERNET)) {
         fprintf(stderr, "SanaDump: can't create %s\n", (char *)args[ARG_FILE]);
         sana2_close(&so);
         FreeArgs(rda);
@@ -193,7 +238,15 @@ int main(int argc, char **argv)
         captured++;
     }
 
-    pcapio_close_write(&writer);
+    /* Close() is where a filesystem's deferred flush errors finally
+     * surface (see pcapio_close_write()'s own comment) -- a capture tool
+     * that reports success over a file the filesystem never finished
+     * writing is worse than useless. */
+    if (!pcapio_close_write(&writer)) {
+        fprintf(stderr, "SanaDump: closing %s failed -- capture may be incomplete\n",
+                (char *)args[ARG_FILE]);
+        rc = 10;
+    }
     sana2_close(&so);
     FreeArgs(rda);
 

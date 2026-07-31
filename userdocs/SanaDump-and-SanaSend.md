@@ -2,9 +2,9 @@
 
 Companion Shell tools for capturing and sending traffic through a
 `loopback.device` unit without writing your own program against the
-device. Like [SanaInfo](SanaInfo-Reference.md), these are normal AmigaOS
-2.0+ programs (V36+ Exec calls -- `ReadArgs()`, `CreateMsgPort()`,
-`CreateIORequest()`), not bound to the device's own Kickstart 1.3 floor.
+device. Like [SanaInfo](SanaInfo-Reference.md), these require AmigaOS
+2.04 (V37) or later (`ReadArgs()`, `CreateMsgPort()`, `CreateIORequest()`
+are V36+ Exec calls), not bound to the device's own Kickstart 1.3 floor.
 
 Both open the device through a small shared helper that installs real,
 explicit `S2_CopyToBuff`/`S2_CopyFromBuff` hooks (rather than leaving

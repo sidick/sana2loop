@@ -11,7 +11,7 @@ With `loopback.device` in `DEVS:` (see [Installation](Installation.md)):
 ```
 > SanaInfo
 MTU: 1500
-BPS: 0
+BPS: 10000000
 HardwareType: 1 (1=Ethernet)
 AddrFieldSize: 48 bits
 Station address: 02:53:32:4c:00:00
@@ -30,7 +30,7 @@ Bring the unit online and query again:
 > SanaInfo 0 ONLINE
 SanaInfo: unit 0 set ONLINE (io_Error=0)
 MTU: 1500
-BPS: 0
+BPS: 10000000
 HardwareType: 1 (1=Ethernet)
 AddrFieldSize: 48 bits
 Station address: 02:53:32:4c:00:00
@@ -57,8 +57,8 @@ branches:
 4. `CMD_WRITE` some bytes with any destination address and packet type you
    like.
 5. `WaitIO()` the queued read — it completes with your data, the packet
-   type you wrote, and addresses swapped (your own station address as the
-   source, whatever you wrote to as the destination).
+   type you wrote, and addresses swapped (whatever you wrote to as the
+   source, your own station address as the destination).
 
 No special configuration is needed for this — echo is unit 0's (and every
 unconfigured unit's) default mode. See

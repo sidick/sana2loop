@@ -42,6 +42,12 @@ markdown_extensions:
   - toc:
       permalink: true
 
+# Enables the mike-based version picker in the theme header -- matches
+# the mike-versioned deploy in .github/workflows/docs.yml.
+extra:
+  version:
+    provider: mike
+
 nav:
   - Home: index.md
   - Getting going:

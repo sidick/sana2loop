@@ -37,6 +37,7 @@ PAGES = [
     ('Fault-Injection', 'Fault Injection'),
     ('SanaInfo-Reference', 'SanaInfo Reference'),
     ('SanaDump-and-SanaSend', 'SanaDump and SanaSend'),
+    ('SANA-II-Conformance', 'SANA-II Conformance'),
     ('Troubleshooting-and-FAQ', 'Troubleshooting and FAQ'),
     ('Building-and-Testing', 'Building and Testing'),
     ('Changelog', 'Changelog'),

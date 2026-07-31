@@ -56,9 +56,22 @@ TEST_BIN    := $(BUILD)/sana2test
 
 # --- Docker (same pinned image as narrator.wyoming's Bebbo toolchain) ---
 IMAGE      ?= ghcr.io/reinauer/container-amiga-gcc@sha256:75eee7a55bcffdde76e0a4f42ca025b89796053807e8f1b05bab9294b640f4e8
-DOCKER_RUN := docker run --rm -v "$(CURDIR)":/work -w /work $(IMAGE)
+# --user matches the container process's UID/GID to the host caller's, so
+# every file `make amiga` creates under build/ (bind-mounted, not a
+# container-private volume) is host-owned, not root-owned. Without this,
+# a Linux Docker host (unlike Docker Desktop on macOS, which already maps
+# bind-mount ownership to the host user regardless of --user) runs the
+# container as root by default, leaving build/ root-owned on the host --
+# release.yml's later `make dist` step, run natively as the `runner`
+# user, then can't write into that same build/ directory (mkdir/cp under
+# it fails with EACCES). Verified locally (macOS/arm64, under QEMU
+# emulation for this amd64 image) that --user doesn't break the build
+# itself; the actual root-vs-host-user distinction this fixes is a
+# Linux-specific Docker behavior this platform can't fully reproduce, so
+# the real proof is release.yml's own CI run succeeding end to end.
+DOCKER_RUN := docker run --rm --user "$$(id -u):$$(id -g)" -v "$(CURDIR)":/work -w /work $(IMAGE)
 
-.PHONY: all device tools amiga test-harness docker docker-test-harness copperline-smoke guide dist clean version
+.PHONY: all device tools amiga test-harness docker docker-test-harness copperline-smoke copperline-smoke-tools guide dist clean version
 
 all: amiga
 
@@ -67,21 +80,27 @@ tools:  $(TOOL_BIN) $(SANADUMP_BIN) $(SANASEND_BIN) $(SANACONFORM_BIN)
 amiga:  $(DEV_BIN) $(TOOL_BIN) $(SANADUMP_BIN) $(SANASEND_BIN) $(SANACONFORM_BIN)
 test-harness: $(TEST_BIN)
 
-$(DEV_BIN): $(DEV_SRC)
+# version.mk is a prerequisite of every binary below (not just `include`d
+# above): VERSION/REVISION feed each one's $VER string via -D, so a local
+# version bump without this would let an incremental `make dist` package
+# binaries still carrying the OLD $VER (release CI always builds from a
+# clean checkout, so this is a local-only hazard -- release.yml's own
+# $VER grep would still catch it there).
+$(DEV_BIN): $(DEV_SRC) src/pcap.h version.mk
 	@mkdir -p $(BUILD)
 	$(CC) $(DEV_CFLAGS) -o $@ $(DEV_SRC)
 
-$(TOOL_BIN): $(SRCDIR)/sanainfo.c
+$(TOOL_BIN): $(SRCDIR)/sanainfo.c version.mk
 	@mkdir -p $(BUILD)
 	$(CC) $(TOOL_CFLAGS) -DSANAINFO_VERSION=$(VERSION) -DSANAINFO_REVISION=$(REVISION) \
 	      -o $@ $(SRCDIR)/sanainfo.c
 
-$(SANADUMP_BIN): $(TOOLS_SRCDIR)/sanadump.c $(TOOLS_COMMON) $(TOOLS_SRCDIR)/pcapio.h $(TOOLS_SRCDIR)/sana2open.h
+$(SANADUMP_BIN): $(TOOLS_SRCDIR)/sanadump.c $(TOOLS_COMMON) $(TOOLS_SRCDIR)/pcapio.h $(TOOLS_SRCDIR)/sana2open.h version.mk
 	@mkdir -p $(BUILD)
 	$(CC) $(TOOL_CFLAGS) -DSANADUMP_VERSION=$(VERSION) -DSANADUMP_REVISION=$(REVISION) \
 	      -o $@ $(TOOLS_SRCDIR)/sanadump.c $(TOOLS_COMMON)
 
-$(SANASEND_BIN): $(TOOLS_SRCDIR)/sanasend.c $(TOOLS_COMMON) $(TOOLS_SRCDIR)/pcapio.h $(TOOLS_SRCDIR)/sana2open.h
+$(SANASEND_BIN): $(TOOLS_SRCDIR)/sanasend.c $(TOOLS_COMMON) $(TOOLS_SRCDIR)/pcapio.h $(TOOLS_SRCDIR)/sana2open.h version.mk
 	@mkdir -p $(BUILD)
 	$(CC) $(TOOL_CFLAGS) -DSANASEND_VERSION=$(VERSION) -DSANASEND_REVISION=$(REVISION) \
 	      -o $@ $(TOOLS_SRCDIR)/sanasend.c $(TOOLS_COMMON)
@@ -90,7 +109,7 @@ $(SANASEND_BIN): $(TOOLS_SRCDIR)/sanasend.c $(TOOLS_COMMON) $(TOOLS_SRCDIR)/pcap
 # its own manual OpenDevice() with a richer Rev 2/3/7 tag list than
 # sana2open.c's fixed 3-tag helper carries (see sanaconform.c's own
 # header comment), and never touches pcap files at all.
-$(SANACONFORM_BIN): $(TOOLS_SRCDIR)/sanaconform.c
+$(SANACONFORM_BIN): $(TOOLS_SRCDIR)/sanaconform.c version.mk
 	@mkdir -p $(BUILD)
 	$(CC) $(TOOL_CFLAGS) -DSANACONFORM_VERSION=$(VERSION) -DSANACONFORM_REVISION=$(REVISION) \
 	      -o $@ $(TOOLS_SRCDIR)/sanaconform.c
@@ -109,6 +128,18 @@ docker-test-harness:
 # (see tests/copperline/run.sh); KICK= optionally points at a real Kickstart.
 copperline-smoke: docker docker-test-harness
 	sh tests/copperline/run.sh
+
+# SanaDump/SanaSend/SanaConform on-target round-trip, in its OWN separate
+# Copperline boot session -- see tests/copperline/run-tools.sh's own
+# comment for why (short version: the device's own copperline-smoke run
+# above leaves too little memory for a second clib2 program in the same
+# session). Only needs the built binaries (`docker`), not the freestanding
+# test harness `copperline-smoke` also builds. Previously had no Makefile
+# target at all, making it easy to skip in the documented local
+# pre-release flow (`sh tests/copperline/run-tools.sh` by hand still
+# works too). KICK= optionally points at a real Kickstart, same as above.
+copperline-smoke-tools: docker
+	sh tests/copperline/run-tools.sh
 
 version:
 	@echo "$(VERSION).$(REVISION)"

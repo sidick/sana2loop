@@ -13,6 +13,14 @@ sana2loop has **no installer**: copy two files into place and it works.
   BeginIO path (only its optional config-file read touches `dos.library`,
   and only from a real Process opener — see
   [Configuration Reference](Configuration-Reference.md)).
+- **2 MB RAM minimum** — the device's own per-unit state (15 pre-allocated
+  units, each carrying its fault-injection/replay/record bookkeeping)
+  needs headroom beyond a bare 512K+512K trapdoor-only A500; a real
+  Kickstart machine with any reasonable RAM expansion (trapdoor + a
+  Zorro-II fast card, or a chip-RAM upgrade) already comfortably clears
+  this. `mode=replay`/`record=` buffers (see
+  [Replay and Record](Replay-and-Record.md)) need further headroom on top
+  of this floor, scaled to `replaycap=`/`recordmax=`.
 
 `SanaInfo` (the companion CLI tool):
 
@@ -50,7 +58,7 @@ hand-written test program (which all open it by the plain name) need the
 copy in `DEVS:`; a real stack's config wizard needs the copy in
 `DEVS:Networks/`. Keep both if you're doing both kinds of testing.
 
-Unit numbers **0 through 11** are available (12 units are pre-allocated).
+Unit numbers **0 through 14** are available (15 units are pre-allocated).
 Unit 0 defaults to standalone **echo** mode; units 2 and 3 default to a
 **crossover** pair; every other unit defaults to standalone echo unless you
 give it its own config file. See

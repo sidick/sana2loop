@@ -925,9 +925,10 @@ available on the system's lists, which is **fast RAM if any is fitted,
 chip only as the fallback**. This device has no chip-memory-specific
 requirement of its own; test runs that reported chip-RAM exhaustion
 (M11's on-target findings, `docs/PLAN.md`) were a property of the
-deliberately minimal `machine.toml` profile (no `[memory] fast` at all,
-matching the device's stated bare-1MB target floor), not a device
-preference for chip memory.
+deliberately minimal `machine.toml` profile in effect at the time (no
+`[memory] fast` at all, matching the device's then-1MB target floor --
+raised to 2MB by the pre-launch-review pass, see `machine.toml`'s own
+comment), not a device preference for chip memory.
 
 The device also never calls `AddMemHandler()` -- it does not register
 itself with Exec's low-memory recovery protocol (the mechanism that lets

@@ -121,10 +121,20 @@ BOOL pcapio_write_packet(struct PcapWriter *w, ULONG ts_sec, ULONG ts_usec,
     return TRUE;
 }
 
-void pcapio_close_write(struct PcapWriter *w)
+BOOL pcapio_close_write(struct PcapWriter *w)
 {
+    BOOL ok = TRUE;
+
+    /* Close()'s return value matters HERE, unlike pcapio_close_read()'s:
+     * a filesystem may defer buffered writes until close, so this is the
+     * last (sometimes only) place a write failure ever surfaces -- drop
+     * it and the caller reports a "successful" capture over a file the
+     * filesystem never finished writing. A read handle has no such
+     * deferred state, so the read-side close stays void. */
     if (w->fh) {
-        Close(w->fh);
+        if (Close(w->fh) == DOSFALSE)
+            ok = FALSE;
         w->fh = 0;
     }
+    return ok;
 }

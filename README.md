@@ -9,7 +9,8 @@ driver-consuming software -- deterministically, with zero hardware and
 zero emulator network support required.
 
 Targets plain 68000 and Kickstart 1.3 -- a test tool's value is
-universality, and nothing here needs more.
+universality, and nothing here needs more. 2 MB RAM minimum (see
+[Installation](https://sidick.github.io/sana2loop/Installation/)).
 
 **Full user documentation: [sidick.github.io/sana2loop](https://sidick.github.io/sana2loop/)**
 (source in [`userdocs/`](userdocs/), built as a MkDocs site -- see
@@ -22,23 +23,54 @@ reference and implementation notes this project has accumulated, and
 
 ## Status
 
-**M0 through M13 done.** M0-M11 validated on-target under the Copperline
+**M0 through M14 done.** M0-M11 validated on-target under the Copperline
 emulator against both a real Kickstart 1.3 ROM and a bundled,
 redistributable AROS Kickstart replacement: echo and crossover modes, real
 SANA-II buffer-management hooks, per-unit configuration files, a fault
-injection pipeline (drop/duplicate/truncate/reorder/oversilent/online-flap),
-pcap replay (on-demand and real-time-scheduled), pcap recording, and the
+injection pipeline (drop/duplicate/truncate/reorder/online-flap, plus an
+`oversilent` PMTUD black hole -- a crossover write that exceeds the
+*peer's* MTU vanishes silently instead of failing loudly, the exact
+failure mode a real PMTUD black hole produces, for testing whether a
+stack actually detects and recovers from one), pcap replay (on-demand and
+real-time-scheduled), pcap recording, and the
 `SanaDump`/`SanaSend` companion tools. M12 built the Aminet packaging +
 release pipeline (`make dist`, `.github/workflows/release.yml`) and
 verified it locally end-to-end; the repo is now public and the `aminet`
 GitHub Environment has its required-reviewer gate in place. M13 added
 SANA-II Rev 2/3/4/7 conformance (wider buffer-management hooks, peer/DNS
 address queries, `RawMTU`, Rev 7 DMA hook negotiation) plus a new
-`SanaConform` probe tool. **No release tag has been pushed yet** -- see
-[`docs/PLAN.md`](docs/PLAN.md)'s
-milestone table for what's left.
+`SanaConform` probe tool. M14 made the replay-record ceiling a per-unit
+config knob (`replaycap=1`..`256`, see
+[`userdocs/Changelog.md`](userdocs/Changelog.md)). **No release tag has
+been pushed yet** -- see [`docs/PLAN.md`](docs/PLAN.md)'s milestone table
+for what's left.
 
 Not yet done: cutting and publishing a first tagged release.
+
+## Quick start
+
+```
+SanaInfo 0                          open unit 0, print DEVICEQUERY info
+SanaDump UNIT=0 FILE=capture.pcap   capture unit 0's traffic to a file
+SanaSend UNIT=0 FILE=capture.pcap   replay a pcap file's frames onto
+                                     unit 0
+SanaConform 0                       probe unit 0's SANA-II Rev 2/3/4/7
+                                     conformance
+```
+
+Example `SanaInfo` output, unit 0's factory defaults:
+
+```
+> SanaInfo
+MTU: 1500
+BPS: 10000000
+HardwareType: 1 (1=Ethernet)
+AddrFieldSize: 48 bits
+Station address: 02:53:32:4c:00:00
+```
+
+See [Getting Started](userdocs/Getting-Started.md) for a full walkthrough,
+and [Installation](userdocs/Installation.md) for where each file goes.
 
 ## AI-assisted development
 
@@ -58,6 +90,16 @@ See the Makefile for building with a locally-installed
 `m68k-amigaos-gcc` instead, and
 [`userdocs/Building-and-Testing.md`](userdocs/Building-and-Testing.md) for
 running the on-target test suite.
+
+## Contributing
+
+Issues and pull requests are welcome -- small, focused PRs are easier to
+review and land than large ones. `loopback.device` itself targets plain
+68000 and Kickstart 1.3 as a deliberate, non-negotiable design constraint
+(see `CLAUDE.md` and the [proposal](https://github.com/sidick/project-ideas/blob/main/sana2loop-proposal.md)
+for why); the companion Shell tools aren't held to that floor. Check
+[`docs/PLAN.md`](docs/PLAN.md) for the current milestone state before
+starting anything substantial.
 
 ## License
 

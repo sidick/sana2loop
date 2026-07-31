@@ -14,7 +14,7 @@ Requires AmigaOS 2.04 (V37) or later — see
 SanaInfo [unit] [ONLINE|OFFLINE]
 ```
 
-- `unit` — a unit number (0–11). Defaults to `0` if omitted.
+- `unit` — a unit number (0–14). Defaults to `0` if omitted.
 - `ONLINE` / `OFFLINE` — if given, issues `S2_ONLINE` or
   `S2_OFFLINE` before querying, and reports the result.
 
@@ -30,7 +30,7 @@ Query unit 0 (the default) without changing its state:
 ```
 > SanaInfo
 MTU: 1500
-BPS: 0
+BPS: 10000000
 HardwareType: 1 (1=Ethernet)
 AddrFieldSize: 48 bits
 Station address: 02:53:32:4c:00:00
@@ -42,7 +42,7 @@ Bring unit 3 online, then query it:
 > SanaInfo 3 ONLINE
 SanaInfo: unit 3 set ONLINE (io_Error=0)
 MTU: 1500
-BPS: 0
+BPS: 10000000
 HardwareType: 1 (1=Ethernet)
 AddrFieldSize: 48 bits
 Station address: 02:53:32:4c:00:03

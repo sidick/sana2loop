@@ -566,6 +566,100 @@ locally, consistent with this project's existing AROS-is-a-weaker-
 stand-in stance (see "Testing under Copperline" below). See
 `docs/PLAN.md`'s M14 risk note for the full investigation.
 
+**Pre-launch review (2026-07-31)**: an independent multi-agent review
+pass (device code, companion tools, tests/CI/build, docs accuracy,
+release readiness) surfaced 20 real findings, filed as GitHub issues and
+fixed one at a time with on-target verification before each was closed.
+Device-code fixes (all verified via `make copperline-smoke` across
+bundled AROS + real Kickstart 1.3 + 3.1): four real concurrency bugs
+(`reorder_push()`/`reorder_flush()` mutating the M7 reorder buffer with
+no `Disable()`; consume-mode replay's take-and-advance racing the same
+way; `fire_event()`/`abort_requests_for_open()` resuming a list walk from
+a stale `next` pointer across a dropped critical section; `close()`
+repopulating a just-drained unit via `reorder_flush()` running after
+`drain_unit()`, plus `reset_unit()` never freeing `su_PendingData`
+itself), `parse_ulong()` silently wrapping on overflow, `S2_DEVICEQUERY`
+writing base fields regardless of the caller's `SizeAvailable`, `open()`
+never clearing `LIBF_DELEXP`, the recorded pcap's `ts_sec` field being
+raw VBlank ticks instead of real "virtual seconds" (`su_TickSec`, a new
+per-unit field -- see below for why this one nearly got reverted),
+`SANA2LOOP_OPEN_MAGIC` being written but never validated (now checked
+inside `fill_read_from_packet()`/`do_write()`), and a narrower, partial
+fix for the long-documented DOS-I/O-under-broken-Forbid gap (`open()` now
+bumps `dev->lib_OpenCnt` before any dos.library I/O, closing the specific
+concurrent-`expunge()`-during-a-slow-open use-after-free; the remaining
+cross-unit DOS-I/O race is real but deliberately left as a documented,
+scoped TODO rather than risking a bigger structural change under time
+pressure -- see the `DOSBase` global's own comment). Also fixed:
+`load_replay_file()` now genuinely distinguishes `S2ERR_NO_RESOURCES`
+(a real `AllocMem()` failure) from `S2ERR_BAD_ARGUMENT` (every other
+cause), matching what the docs already promised but the code didn't do.
+
+Companion-tool fixes (all in `src/tools/`): `SanaDump`'s capture buffer
+was 14 bytes too small for a legal `SANA2IOF_RAW`-sized delivery (fixed,
+same class of exposure fixed in `SanaConform`'s own probe buffer);
+`SanaConform` freed an IORequest via raw `FreeMem()` instead of
+`DeleteIORequest()`; `SanaDump`/`SanaSend`'s `TYPE=` argument silently
+accepted garbage as type 0 via a bare `strtoul()` (now a shared, strict
+`parse_type()`); `SanaSend`'s `DELAY=` accepted a negative value that
+became a multi-year `Delay()` call; `pcapio_close_write()` ignored a
+real `Close()` failure (a filesystem's own deferred-write error), now
+reported and propagated.
+
+Also fixed: `tools/docs2guide.py`'s `PAGES` list never got M13's
+SANA-II-Conformance page added (the shipped `.guide` was missing it
+entirely, with two dead cross-references); the echo-mode address-swap
+direction was stated backwards in two userdocs pages; several smaller
+docs inaccuracies (`BPS: 0` in example output vs the real `10000000`,
+stale `0-11` unit-count references, the FAQ never mentioning `replaycap=`
+as the actual fix for "only 4 records", `SanaInfo UNIT=0` vs the tool's
+real plain-argv usage); `release.yml`'s `make docker` step left `build/`
+root-owned on a real Linux runner (fixed via `--user` on the Docker
+invocation, verified locally end-to-end including a full `make dist` +
+`lha l`); Makefile dependency gaps (the device didn't rebuild on a
+`pcap.h` edit; nothing rebuilt on a `version.mk` bump; no target wrapped
+`run-tools.sh` at all, now `copperline-smoke-tools`); a handful of
+on-target test-coverage gaps (`truncate=` had zero coverage, `SanaInfo`
+was never executed by any automated test, `recordmax=` overflow and
+`rxqueue>0`'s actual bound-hit were both unasserted, and a vacuous
+`run-tools.sh` grep that would false-PASS a real special-stats
+regression) -- all closed out, two items (config-driven `mode=`/`peer=`,
+and cleaning up a leaked-open-on-sibling-failure pattern in a few M7
+sub-tests) deliberately scoped out as lower-value than the time they'd
+cost. See each closed GitHub issue (#1-#20) for the full verification
+account per fix.
+
+**Two real, unplanned findings surfaced while adding the new test
+coverage, both resolved, neither a device bug**: (1) the first attempt at
+covering `truncate=`/`rxqueue=` used two brand-new dedicated units --
+this reliably broke the pre-existing, unrelated `scheduled` sub-test on
+bundled AROS specifically (passed cleanly on real Kickstart 1.3/3.1),
+confirming even small per-unit struct growth measurably shrinks AROS's
+already-tight free-memory headroom for later allocations, the same class
+of regression M9/M14 already hit. Resolved by reusing existing units (1,
+11) instead of growing `SANA2LOOP_NUM_UNITS` at all. (2) Separately, the
+`su_TickSec`/`su_TickSub` fields added for the recorded-pcap-timestamp
+fix ALSO tipped `scheduled` over on bundled AROS by themselves, with zero
+new units involved -- confirming this device's per-unit memory margin on
+bundled AROS was already razor-thin before this whole pass started.
+Rather than re-shrinking future correctness fixes indefinitely to fit an
+increasingly tight artificial ceiling, `machine.toml`'s own floor moved
+from 1 MB to 2 MB (512K chip + 512K slow, capped by Copperline's own
+A500-trapdoor limit, + 1M fast) -- a deliberate, user-approved decision
+("most people using this will have 4mb min at a guess"), now documented
+as the device's real minimum in `userdocs/Installation.md`,
+`sana2loop.readme`, and `README.md`. (3) Adding `SanaInfo` to
+`run-tools.sh`'s own session then corrupted multiple already-written
+files on bundled AROS with `[floppy] speed=0` (turbo) -- a broader
+instance of the M13-documented floppy write-back ordering quirk, resolved
+empirically via `speed=100` (real-time) plus raising `run-tools.sh`'s own
+`BENCH` default 40 -> 90; root cause not re-isolated beyond "turbo timing
+interacts badly with 4+ DOS I/O operations sharing one session". All
+three resolved via the same AROS-is-a-weaker-stand-in stance this project
+has applied consistently since M9: confirm real hardware is unaffected,
+then treat the AROS-specific symptom as an environment artifact to work
+around, not a device bug to chase further.
+
 No further milestones remain unscheduled except Aminet packaging's own
 "cut and publish a first tagged release" step (the M12 pipeline itself
 is built and tested, but no tag has been pushed) -- see docs/PLAN.md.

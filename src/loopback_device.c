@@ -171,14 +171,21 @@ struct Sana2LoopDeviceQuery {
  * echo-default units that on-target tests claim one at a time via their
  * own config fixture, specifically so no two tests' expectations ever
  * collide on the same unit (see tests/copperline/run.sh's per-unit
- * config fixture layout for the current allocation: 1=M5 mtu override,
+ * config fixture layout for the current allocation: 1=M5 mtu override
+ * (also, as of the pre-launch review pass, truncate=/rxqueue= -- inert
+ * for M5's own DEVICEQUERY-only check, picked up fresh by later,
+ * separate reopens instead; see unit1.config's own comment for why this
+ * reuses unit 1 rather than adding new units at all),
  * 2/3=M6 crossover pair (also M7's oversilent/PMTUD pair, since neither
  * milestone's own assertions care about the other's config additions
  * there; M13 also reuses this pair, read-only, for its S2_GETPEERADDRESS
  * success-path check), 4=M5 malformed-config-fails, 5=M7 droppct,
  * 6=M7 duppct, 7=M7 reorder, 8=M7 offlineafter/onlineafter,
  * 9=M8 consume-mode replay (M13 also reuses this, read-only, for its
- * RawMTU=0-on-replay check), 10=M9 scheduled replay, 11=M9 RAM record,
+ * RawMTU=0-on-replay check), 10=M9 scheduled replay, 11=M9 RAM record
+ * (also, as of the pre-launch review pass, a smaller recordmax=150
+ * exercising S2_GETSPECIALSTATS' overflow-count record too -- see
+ * unit11.config's own comment),
  * 12=M11 SanaDump/SanaSend on-target round-trip, 13=M13 buffhooks=32,
  * 14=M14 replaycap=0 (out-of-range config value, open must FAIL at pure
  * validation -- see SANA2LOOP_CONFIG_MAX_REPLAYCAP's own comment for why
@@ -188,7 +195,16 @@ struct Sana2LoopDeviceQuery {
  * which empirically exceeds bundled AROS's tight 512K+512K profile at
  * this point in the sequence even at the historical default cap size;
  * verified instead via real Kickstart 1.3/3.1 locally, see
- * docs/PLAN.md's M14 risk note). */
+ * docs/PLAN.md's M14 risk note). Pre-launch-review `truncate=`/
+ * `rxqueue=`-bound-hit/`recordmax=`-overflow coverage all deliberately
+ * reuse EXISTING units (1 and 11) rather than adding new ones -- see
+ * unit1.config's and unit11.config's own comments: even UNOPENED extra
+ * units measurably shrink bundled AROS's already-tight free-memory
+ * headroom for later dynamic allocations elsewhere in the session (this
+ * was tried and reliably broke the unrelated "scheduled" sub-test's own
+ * replay-buffer allocation on bundled AROS specifically -- the same
+ * class of AROS memory-pressure regression M9/M14 already hit, this
+ * time avoided by not growing this constant at all). */
 #define SANA2LOOP_NUM_UNITS   15
 #define SANA2LOOP_DEFAULT_MTU 1500
 /* Ethernet dst[6]+src[6]+type[2] -- the allowance SANA2IOF_RAW adds on top
@@ -295,11 +311,32 @@ struct ExecBase *SysBase;
  * `extern struct DosLibrary *DOSBase` -- matching that exact type here is
  * what actually supplies its storage. Unlike SysBase, NOT set once at
  * init: dos.library isn't always available/needed (a device targeting
- * Kickstart 1.3 doesn't open it at load time), so read_unit_config() --
- * the only place this file ever touches dos.library -- opens it, uses
- * it, and closes it again within that single function call, every time
- * (see that function's own comment for the known, accepted concurrency
- * gap this leaves). */
+ * Kickstart 1.3 doesn't open it at load time), so each of the three
+ * places this file ever touches dos.library -- read_unit_config(),
+ * load_replay_file(), flush_record() -- opens it, uses it, and closes it
+ * again within that single function call, every time.
+ *
+ * KNOWN, ACCEPTED CONCURRENCY GAP: none of those three calls run under
+ * any lock against each other or against a concurrent open()/close() on
+ * a DIFFERENT unit, so two overlapping DOS-I/O windows on this shared
+ * global (and the `static` scratch buffers each of those three functions
+ * uses -- see their own comments) can corrupt each other's in-flight
+ * work, and DOSBase itself can go NULL out from under a caller still
+ * mid-sequence if another caller's matching CloseLibrary() runs first.
+ * open() DOES now bump dev->lib_OpenCnt before doing any of this DOS I/O
+ * (see open()'s own comment) specifically to close the one sub-case that
+ * was a genuine use-after-free rather than "just" data corruption: a
+ * concurrent Avail-FLUSH-triggered expunge() freeing the whole device
+ * base while an open() call was still blocked inside a DOS Wait(). The
+ * remaining gap (concurrent DOS I/O corrupting EACH OTHER's static
+ * buffers/DOSBase) is real but was deliberately NOT fixed here -- doing
+ * so properly needs a real SignalSemaphore serializing every dos.library
+ * touch in this file, a genuinely bigger structural change than fits
+ * this pass, and this device's single-file test-tool nature makes the
+ * realistic trigger (two DIFFERENT units' first-opens, or a close's
+ * record flush, racing from separate tasks at the exact same moment)
+ * rare enough that documenting it precisely here (rather than a vaguer
+ * "known gap" with no detail) was judged the right tradeoff for now. */
 struct DosLibrary *DOSBase;
 
 /* M5 config-file infrastructure: ENV:sana2loop/unitN.config, falling back
@@ -484,9 +521,23 @@ static BOOL parse_ulong(const char *s, const char *end, ULONG *out)
     if (s >= end)
         return FALSE;
     for (; s < end; s++) {
+        ULONG d;
         if (*s < '0' || *s > '9')
             return FALSE;
-        v = v * 10 + (ULONG)(*s - '0');
+        d = (ULONG)(*s - '0');
+        /* Overflow guard BEFORE the multiply-and-add, not after: an
+         * unchecked `v = v*10 + d` silently wraps ULONG, and every caller
+         * of this function then range-checks the WRAPPED value -- so
+         * e.g. `rxqueue=4294967296` wraps to 0 and passes as a valid
+         * "strict drop" setting, exactly the "config typo silently
+         * reinterpreted" outcome this function's own header comment says
+         * never happens. 429496729/5 are 0xFFFFFFFF/10 and 0xFFFFFFFF%10
+         * as compile-time-constant literals (10's divisor is a literal,
+         * so the compiler folds this at compile time -- no runtime
+         * division, keeping this libgcc-free like the rest of the parser). */
+        if (v > 429496729UL || (v == 429496729UL && d > 5UL))
+            return FALSE;
+        v = v * 10 + d;
     }
     *out = v;
     return TRUE;
@@ -988,6 +1039,21 @@ struct Sana2LoopUnit {
      * comment for why not microsecond-exact). */
     ULONG       su_ReplayMode;
     ULONG       su_Tick;
+    /* Whole-VBlank-second counter for record_append()'s pcap ts_sec, kept
+     * SEPARATE from su_Tick: su_Tick is a raw per-VBlank counter (50/sec,
+     * SANA2LOOP_VBLANK_HZ) used for scheduled-replay due-tick comparisons
+     * (su_ReplayDueTicks[] is also in raw-tick units, so that math needs
+     * no conversion) -- but record_append() used to write su_Tick
+     * directly into a field the pcap format itself defines as SECONDS,
+     * stretching every recorded inter-packet gap by 50x if fed back as a
+     * scheduled-replay capture, and displaying a 2-second session as 100
+     * seconds in a real tool like Wireshark. su_TickSub counts VBlanks
+     * 0..49 (division-free -- see vblank_server()) and rolls su_TickSec
+     * forward once per real virtual second. (This per-unit growth is
+     * what pushed machine.toml's own memory floor from 1 MB to 2 MB --
+     * see that file's own comment for the full account.) */
+    ULONG       su_TickSec;
+    UBYTE       su_TickSub;
     ULONG      *su_ReplayDueTicks;
     /* SCHEDULED mode only: one individually-AllocMem'd, pre-populated
      * EchoPacket per record, made ONCE at load time (load_replay_file(),
@@ -1352,6 +1418,20 @@ static int find_mcast_locked(struct Sana2LoopUnit *unit, const UBYTE *addr)
     return -1;
 }
 
+/* Exec's real NewList() isn't reliably declared under this minimal include
+ * set (a freestanding -nostdlib build, deliberately not pulling in more of
+ * the NDK than needed) -- it's three pointer stores, so just do them.
+ * Moved up here (was originally defined just before reset_unit(), its
+ * first caller) so abort_requests_for_open()/fire_event() below can use
+ * it too, for a private local list to collect nodes onto outside any
+ * Disable() window -- see their own comments. */
+static void list_init(struct List *list)
+{
+    list->lh_Head     = (struct Node *)&list->lh_Tail;
+    list->lh_Tail      = NULL;
+    list->lh_TailPred  = (struct Node *)&list->lh_Head;
+}
+
 /* Aborts any request still queued (reads or event waits) under a cookie
  * that's about to be freed -- a well-behaved consumer closes with nothing
  * outstanding, but a test device should survive one that doesn't rather
@@ -1365,7 +1445,24 @@ static void abort_requests_for_open(struct Sana2LoopUnit *unit, struct Sana2Loop
     lists[1] = &unit->su_OrphanReads;
     lists[2] = &unit->su_EventReqs;
     for (li = 0; li < 3; li++) {
+        struct List collected;
         struct IOSana2Req *io, *next;
+        struct Node *n;
+
+        list_init(&collected);
+
+        /* Unlink every matching node onto a private local list under ONE
+         * Disable(), instead of the earlier pattern of dropping Disable()
+         * around each ReplyMsg() and resuming the walk from a `next`
+         * captured before the drop: in that window a concurrent AbortIO,
+         * CMD_FLUSH, or vblank_server() delivery (interrupts ignore
+         * Forbid, so this applies even inside close()'s Forbid) can
+         * Remove() and reply the very node `next` points at. Resuming
+         * from a stale `next` then either Remove()s an already-unlinked
+         * node (corrupting its now-stale Succ/Pred's neighbours) or
+         * ReplyMsg()s the same message twice. Collecting first and
+         * replying after Enable() never resumes a walk across a dropped
+         * critical section. */
         Disable();
         for (io = (struct IOSana2Req *)lists[li]->lh_Head;
              io->ios2_Req.io_Message.mn_Node.ln_Succ;
@@ -1374,12 +1471,13 @@ static void abort_requests_for_open(struct Sana2LoopUnit *unit, struct Sana2Loop
             if ((struct Sana2LoopOpen *)io->ios2_BufferManagement == slo) {
                 Remove((struct Node *)io);
                 io->ios2_Req.io_Error = IOERR_ABORTED;
-                Enable();
-                ReplyMsg(&io->ios2_Req.io_Message);
-                Disable();
+                AddTail(&collected, (struct Node *)io);
             }
         }
         Enable();
+
+        while ((n = RemHead(&collected)) != NULL)
+            ReplyMsg(&((struct IOSana2Req *)n)->ios2_Req.io_Message);
     }
 }
 
@@ -1391,6 +1489,22 @@ static void abort_requests_for_open(struct Sana2LoopUnit *unit, struct Sana2Loop
 static BOOL fill_read_from_packet(struct IOSana2Req *io, struct EchoPacket *pkt)
 {
     struct Sana2LoopOpen *slo = (struct Sana2LoopOpen *)io->ios2_BufferManagement;
+
+    /* SANA2LOOP_OPEN_MAGIC catches a consumer that never copied the
+     * per-open cookie OpenDevice() installed (see the field's own
+     * comment) into THIS request -- until now, nothing actually checked
+     * it, so a caller leaving ios2_BufferManagement pointing at its
+     * original OpenDevice() tag list (or NULL) fell straight through to
+     * pick_copy_to_buff() dereferencing whatever garbage was there and
+     * calling through it as a function pointer. Folding this into the
+     * function's EXISTING "FALSE = hook failure" contract means every
+     * call site already handles it correctly (S2ERR_NO_RESOURCES/
+     * S2WERR_BUFF_ERROR) with no changes needed there. Reading slo_Magic
+     * through a bad pointer is safe on this no-MMU 68000 target -- no
+     * page faults, just a read of whatever ordinary RAM happens to be at
+     * that address (0 itself is SysBase, always mapped). */
+    if (!slo || slo->slo_Magic != SANA2LOOP_OPEN_MAGIC)
+        return FALSE;
 
     CopyMem(pkt->ep_SrcAddr, io->ios2_SrcAddr, SANA2_MAX_ADDR_BYTES);
     CopyMem(pkt->ep_DstAddr, io->ios2_DstAddr, SANA2_MAX_ADDR_BYTES);
@@ -1444,7 +1558,17 @@ static BOOL fill_read_from_packet(struct IOSana2Req *io, struct EchoPacket *pkt)
 static void fire_event(struct Sana2LoopUnit *unit, ULONG event)
 {
     struct IOSana2Req *io, *next;
+    struct List collected;
+    struct Node *n;
 
+    list_init(&collected);
+
+    /* Collect matching nodes onto a private local list under ONE
+     * Disable(), same reasoning as abort_requests_for_open()'s own
+     * comment: dropping Disable() mid-walk to ReplyMsg() and resuming
+     * from a `next` captured before the drop risks a concurrent
+     * AbortIO/CMD_FLUSH/vblank_server() delivery unlinking that exact
+     * node first. */
     Disable();
     for (io = (struct IOSana2Req *)unit->su_EventReqs.lh_Head;
          io->ios2_Req.io_Message.mn_Node.ln_Succ;
@@ -1454,13 +1578,16 @@ static void fire_event(struct Sana2LoopUnit *unit, ULONG event)
             Remove((struct Node *)io);
             io->ios2_WireError = io->ios2_WireError & event;
             io->ios2_Req.io_Error = 0;
-            Enable();
-            if (!(io->ios2_Req.io_Flags & IOF_QUICK))
-                ReplyMsg(&io->ios2_Req.io_Message);
-            Disable();
+            AddTail(&collected, (struct Node *)io);
         }
     }
     Enable();
+
+    while ((n = RemHead(&collected)) != NULL) {
+        io = (struct IOSana2Req *)n;
+        if (!(io->ios2_Req.io_Flags & IOF_QUICK))
+            ReplyMsg(&io->ios2_Req.io_Message);
+    }
 }
 
 /* Forward declaration: reorder_push()/reorder_flush() below need to call
@@ -1543,16 +1670,35 @@ static BOOL prng_hits_pct(ULONG *state, ULONG pct)
  * forced out, not an unbounded shuffle. */
 static void reorder_push(struct Sana2LoopDevice *sld, struct Sana2LoopUnit *writer, struct EchoPacket *pkt)
 {
-    writer->su_ReorderBuf[writer->su_ReorderCount++] = pkt;
-    if (writer->su_ReorderCount == writer->su_ReorderWindow) {
-        ULONG idx = prng_index(&writer->su_PrngState, writer->su_ReorderWindow);
-        struct EchoPacket *evicted = writer->su_ReorderBuf[idx];
-        ULONG k;
-        for (k = idx; k + 1 < writer->su_ReorderCount; k++)
-            writer->su_ReorderBuf[k] = writer->su_ReorderBuf[k + 1];
-        writer->su_ReorderCount--;
-        deliver_packet(delivery_target(sld, writer), evicted);
+    struct EchoPacket *evicted = NULL;
+
+    /* Multiple tasks can call do_write() -> here concurrently on the same
+     * unit (the device's own multi-opener premise -- every other piece of
+     * shared unit state gets the same treatment). Without Disable(), two
+     * concurrent pushes can both increment su_ReorderCount past
+     * su_ReorderWindow before either evaluates the eviction check: one
+     * write then lands past the end of the fixed-size su_ReorderBuf
+     * array, into adjacent struct fields, and (with the original `==`
+     * check) the eviction path is skipped forever afterward. Pop the
+     * evicted packet under Disable, but call deliver_packet() outside it
+     * -- same "act outside Disable" discipline the rest of this file
+     * uses for ReplyMsg/consumer hooks. */
+    Disable();
+    if (writer->su_ReorderCount < writer->su_ReorderWindow) {
+        writer->su_ReorderBuf[writer->su_ReorderCount++] = pkt;
+        if (writer->su_ReorderCount >= writer->su_ReorderWindow) {
+            ULONG idx = prng_index(&writer->su_PrngState, writer->su_ReorderWindow);
+            ULONG k;
+            evicted = writer->su_ReorderBuf[idx];
+            for (k = idx; k + 1 < writer->su_ReorderCount; k++)
+                writer->su_ReorderBuf[k] = writer->su_ReorderBuf[k + 1];
+            writer->su_ReorderCount--;
+        }
     }
+    Enable();
+
+    if (evicted)
+        deliver_packet(delivery_target(sld, writer), evicted);
 }
 
 /* Delivers everything still sitting in `writer`'s reorder buffer, in
@@ -1563,10 +1709,29 @@ static void reorder_push(struct Sana2LoopDevice *sld, struct Sana2LoopUnit *writ
 static void reorder_flush(struct Sana2LoopDevice *sld, struct Sana2LoopUnit *writer)
 {
     struct Sana2LoopUnit *target = delivery_target(sld, writer);
+    /* Snapshotted under Disable(), not walked live: this can run
+     * concurrently with reorder_push() above (CMD_FLUSH/S2_OFFLINE/close
+     * on one open racing a CMD_WRITE on another), and deliver_packet()
+     * must never be called with interrupts/scheduling disabled -- same
+     * "pop under Disable, act outside" discipline as everywhere else in
+     * this file. SANA2LOOP_MAX_REORDER bounds the copy. Via CopyMem(), not
+     * a plain element-by-element loop -- a raw loop here got recognized
+     * by -O2 and replaced with a call to `memcpy`, which doesn't exist in
+     * this freestanding -nostdlib build (the exact same class of
+     * miscompile M8/M13 already hit and fixed the identical way; see
+     * S2_GETTYPESTATS' own comment). */
+    struct EchoPacket *snapshot[SANA2LOOP_MAX_REORDER];
+    ULONG count;
     ULONG i;
-    for (i = 0; i < writer->su_ReorderCount; i++)
-        deliver_packet(target, writer->su_ReorderBuf[i]);
+
+    Disable();
+    count = writer->su_ReorderCount;
+    CopyMem(writer->su_ReorderBuf, snapshot, count * sizeof(struct EchoPacket *));
     writer->su_ReorderCount = 0;
+    Enable();
+
+    for (i = 0; i < count; i++)
+        deliver_packet(target, snapshot[i]);
 }
 
 /* The last step of the fault pipeline: either buffer `pkt` for later,
@@ -1674,6 +1839,22 @@ static void reset_unit(struct Sana2LoopUnit *unit)
     unit->su_MTU         = SANA2LOOP_DEFAULT_MTU;
     unit->su_Online      = FALSE;
     unit->su_RxQueueMax  = 0; /* strict drop by default -- see docs/PLAN.md M2 */
+    /* Free anything still sitting in su_PendingData before zeroing its
+     * count, not just the count alone: close()'s own drain_unit() call
+     * already does this at last-close, but nothing forces a unit offline
+     * at close, so a scheduled-replay unit left online can keep
+     * delivering via vblank_server() (which ignores Forbid, unlike a
+     * task-context caller) into the idle window between last-close and
+     * this reset -- repopulating su_PendingData after drain_unit() already
+     * ran. Freeing here too closes that gap regardless of what happened
+     * in between, matching this function's own "unit fully resets"
+     * contract; a unit that was never idle-and-online this way just finds
+     * the list already empty and this is a no-op. */
+    {
+        struct Node *pn;
+        while ((pn = safe_rem_head(&unit->su_PendingData)) != NULL)
+            FreeMem(pn, sizeof(struct EchoPacket));
+    }
     unit->su_PendingDataCount = 0;
     unit->su_Configured  = FALSE;
     unit->su_BuffHooks   = 8; /* M13: always the base hook by default --
@@ -1787,6 +1968,8 @@ static void reset_unit(struct Sana2LoopUnit *unit)
     unit->su_ReplayCap   = SANA2LOOP_MAX_REPLAY_PACKETS;
     unit->su_ReplayMode  = SANA2LOOP_REPLAYMODE_CONSUME;
     unit->su_Tick        = 0;
+    unit->su_TickSec     = 0;
+    unit->su_TickSub     = 0;
 
     /* M9 RAM record: free any buffer allocated by a PREVIOUS lifetime,
      * same reasoning as the replay buffer above. */
@@ -1809,16 +1992,6 @@ static void reset_unit(struct Sana2LoopUnit *unit)
     unit->su_Stats.Reconfigurations     = 0;
     unit->su_Stats.LastStart.tv_secs    = 0;
     unit->su_Stats.LastStart.tv_usec    = 0;
-}
-
-/* Exec's real NewList() isn't reliably declared under this minimal include
- * set (a freestanding -nostdlib build, deliberately not pulling in more of
- * the NDK than needed) -- it's three pointer stores, so just do them. */
-static void list_init(struct List *list)
-{
-    list->lh_Head     = (struct Node *)&list->lh_Tail;
-    list->lh_Tail      = NULL;
-    list->lh_TailPred  = (struct Node *)&list->lh_Head;
 }
 
 /* M8: reads and parses `path` (a dos.library-openable pcap capture) into
@@ -1868,7 +2041,20 @@ static void list_init(struct List *list)
  * struct further should re-check for the same failure (rebuild, look for
  * `undefined reference to '__mulsi3'`) -- the exact byte count that tips
  * this over isn't something to reason about in advance, just verify. */
-static BOOL __attribute__((noinline)) load_replay_file(struct Sana2LoopUnit *unit, const char *path)
+/* `out_ioerr` is only meaningful when this returns FALSE: set to
+ * S2ERR_NO_RESOURCES for a genuine AllocMem() failure (the capture itself
+ * was fine; there just wasn't enough free memory to hold `cap` records --
+ * matching userdocs/Replay-and-Record.md's/Configuration-Reference.md's
+ * own documented `replaycap=` contract, "the device only fails loudly
+ * with S2ERR_NO_RESOURCES if a raised value doesn't actually fit"), or
+ * S2ERR_BAD_ARGUMENT for every other failure (missing/malformed file,
+ * wrong linktype, non-monotonic timestamps, more records than `cap`) --
+ * there's no sensible default capture to substitute, so those stay a
+ * plain "this open's arguments don't work" rejection. Before this, every
+ * failure here was reported as S2ERR_BAD_ARGUMENT regardless of cause,
+ * contradicting the documented contract above -- see docs/PLAN.md's
+ * pre-launch-review entry for the finding. */
+static BOOL __attribute__((noinline)) load_replay_file(struct Sana2LoopUnit *unit, const char *path, ULONG *out_ioerr)
 {
     static UBYTE filehdr[PCAP_FILE_HEADER_SIZE];
     static UBYTE rechdr[PCAP_PKTHDR_SIZE];
@@ -1884,6 +2070,14 @@ static BOOL __attribute__((noinline)) load_replay_file(struct Sana2LoopUnit *uni
     BOOL swapped;
     ULONG count = 0;
     BOOL ok = TRUE;
+    BOOL resource_fail = FALSE; /* set alongside ok=FALSE ONLY at the
+                                    mid-loop per-record copy AllocMem()
+                                    below -- distinguishes that one
+                                    genuine resource failure from every
+                                    other `ok=FALSE` cause (malformed
+                                    record, too many records, non-
+                                    monotonic timestamps), which all stay
+                                    S2ERR_BAD_ARGUMENT. */
     /* M14: cached from unit->su_ReplayCap (already applied by open()
      * before this call) -- a plain local, not re-read via the pointer on
      * every use, matching this function's existing style elsewhere.
@@ -1906,6 +2100,7 @@ static BOOL __attribute__((noinline)) load_replay_file(struct Sana2LoopUnit *uni
 
     DOSBase = (struct DosLibrary *)OpenLibrary((STRPTR)"dos.library", 0);
     if (!DOSBase) {
+        *out_ioerr = S2ERR_BAD_ARGUMENT;
         return FALSE;
     }
 
@@ -1921,6 +2116,7 @@ static BOOL __attribute__((noinline)) load_replay_file(struct Sana2LoopUnit *uni
     if (!file) {
         CloseLibrary((struct Library *)DOSBase);
         DOSBase = NULL;
+        *out_ioerr = S2ERR_BAD_ARGUMENT;
         return FALSE;
     }
 
@@ -1928,6 +2124,7 @@ static BOOL __attribute__((noinline)) load_replay_file(struct Sana2LoopUnit *uni
         Close(file);
         CloseLibrary((struct Library *)DOSBase);
         DOSBase = NULL;
+        *out_ioerr = S2ERR_BAD_ARGUMENT;
         return FALSE;
     }
 
@@ -1946,6 +2143,7 @@ static BOOL __attribute__((noinline)) load_replay_file(struct Sana2LoopUnit *uni
         Close(file);
         CloseLibrary((struct Library *)DOSBase);
         DOSBase = NULL;
+        *out_ioerr = S2ERR_BAD_ARGUMENT;
         return FALSE;
     }
     pcap_parse_file_header(filehdr, swapped, &fh);
@@ -1953,6 +2151,7 @@ static BOOL __attribute__((noinline)) load_replay_file(struct Sana2LoopUnit *uni
         Close(file);
         CloseLibrary((struct Library *)DOSBase);
         DOSBase = NULL;
+        *out_ioerr = S2ERR_BAD_ARGUMENT;
         return FALSE;
     }
 
@@ -1998,6 +2197,7 @@ static BOOL __attribute__((noinline)) load_replay_file(struct Sana2LoopUnit *uni
         Close(file);
         CloseLibrary((struct Library *)DOSBase);
         DOSBase = NULL;
+        *out_ioerr = S2ERR_NO_RESOURCES;
         return FALSE;
     }
     /* Due ticks: ULONG is power-of-2 sized, so (unlike su_ReplayPackets)
@@ -2008,6 +2208,7 @@ static BOOL __attribute__((noinline)) load_replay_file(struct Sana2LoopUnit *uni
         Close(file);
         CloseLibrary((struct Library *)DOSBase);
         DOSBase = NULL;
+        *out_ioerr = S2ERR_NO_RESOURCES;
         return FALSE;
     }
 
@@ -2028,6 +2229,7 @@ static BOOL __attribute__((noinline)) load_replay_file(struct Sana2LoopUnit *uni
             Close(file);
             CloseLibrary((struct Library *)DOSBase);
             DOSBase = NULL;
+            *out_ioerr = S2ERR_NO_RESOURCES;
             return FALSE;
         }
     }
@@ -2124,6 +2326,7 @@ static BOOL __attribute__((noinline)) load_replay_file(struct Sana2LoopUnit *uni
                 struct EchoPacket *copy = AllocMem(sizeof(struct EchoPacket), MEMF_CLEAR);
                 if (!copy) {
                     ok = FALSE;
+                    resource_fail = TRUE;
                     break;
                 }
                 CopyMem(cur, copy, sizeof(struct EchoPacket));
@@ -2157,6 +2360,11 @@ static BOOL __attribute__((noinline)) load_replay_file(struct Sana2LoopUnit *uni
         }
         FreeMem(packets, cap * sizeof(struct EchoPacket));
         FreeMem(due_ticks, cap * sizeof(ULONG));
+        /* count == 0 (empty capture) is a malformed-input case, not a
+         * resource one, even though ok may still be TRUE in that case --
+         * only the mid-loop per-record copy AllocMem() failure above
+         * (resource_fail) is ever a genuine resource cause here. */
+        *out_ioerr = resource_fail ? S2ERR_NO_RESOURCES : S2ERR_BAD_ARGUMENT;
         return FALSE;
     }
 
@@ -2230,6 +2438,13 @@ static ULONG __attribute__((used)) vblank_server(struct Sana2LoopDevice *sld asm
             continue;
 
         unit->su_Tick++;
+        /* Division-free whole-seconds rollover for record_append()'s
+         * pcap ts_sec -- see su_TickSec's own field comment for why this
+         * is a separate counter from su_Tick itself. */
+        if (++unit->su_TickSub >= SANA2LOOP_VBLANK_HZ) {
+            unit->su_TickSub = 0;
+            unit->su_TickSec++;
+        }
 
         if (scheduled) {
             while (unit->su_ReplayPos < unit->su_ReplayCount &&
@@ -2278,12 +2493,20 @@ init_device(BPTR seg_list asm("a0"), struct Library *dev asm("d0"))
 
         u->su_Unit.unit_OpenCnt = 0;
         u->su_Index = (UBYTE)i;
-        reset_unit(u);
 
+        /* Lists must be list_init()'d BEFORE reset_unit(): reset_unit()
+         * now drains su_PendingData itself (freeing anything left over
+         * from a scheduled-replay delivery between last-close and this
+         * reset -- see its own comment), and an AllocMem(MEMF_CLEAR)'d
+         * struct List (all-NULL) is not a valid empty list under Exec's
+         * sentinel-node convention -- RemHead() on it would dereference
+         * a NULL node. */
         list_init(&u->su_PendingReads);
         list_init(&u->su_OrphanReads);
         list_init(&u->su_PendingData);
         list_init(&u->su_EventReqs);
+
+        reset_unit(u);
     }
 
     /* M9: one VBlank server for the device's whole lifetime -- see
@@ -2351,6 +2574,22 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
         return;
 
     unit = &sld->sld_Units[unitnum];
+
+    /* dev->lib_OpenCnt bumped here, BEFORE any dos.library I/O below
+     * (read_unit_config()/load_replay_file() can each legitimately
+     * Wait() internally -- see read_unit_config()'s own comment on the
+     * accepted DOS-I/O-under-broken-Forbid gap this leaves), not at the
+     * very end of a successful open as before: with the old placement,
+     * dev->lib_OpenCnt stayed at its PRE-open value for this entire DOS
+     * I/O window, so a concurrent `Avail FLUSH` on another task (seeing
+     * lib_OpenCnt still 0 for what looks like an idle device) could
+     * expunge() the device base out from under this open() call, which
+     * would then resume inside freed code/data once its DOS Wait
+     * returns. Decremented back on every failure path below that returns
+     * before a successful open completes -- this call never actually
+     * became "an open" if it didn't reach the end. */
+    dev->lib_OpenCnt++;
+
     if (unit->su_Unit.unit_OpenCnt == 0) {
         reset_unit(unit); /* first opener of an idle unit starts clean --
                               see reset_unit()'s comment */
@@ -2390,6 +2629,8 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
             cfg.replaycap    = unit->su_ReplayCap;
             if (!read_unit_config(&cfg, unit->su_Index)) {
                 io->io_Error = S2ERR_BAD_ARGUMENT;
+                dev->lib_OpenCnt--; /* this attempt never became an open --
+                                        see the early increment's own comment */
                 return;
             }
             unit->su_MTU          = cfg.mtu;
@@ -2428,14 +2669,24 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
              * 0->1 determinism boundary as everything else this block
              * applies. read_unit_config() already guaranteed replay_path
              * is non-empty whenever cfg.mode is SANA2LOOP_MODE_REPLAY. A
-             * load failure fails the WHOLE open (S2ERR_BAD_ARGUMENT) --
-             * unlike a missing config file, there's no sensible default
-             * to fall back to for a specifically-named, missing/malformed
-             * capture; see load_replay_file()'s own comment. */
-            if (unit->su_Mode == SANA2LOOP_MODE_REPLAY &&
-                !load_replay_file(unit, cfg.replay_path)) {
-                io->io_Error = S2ERR_BAD_ARGUMENT;
-                return;
+             * load failure fails the WHOLE open -- unlike a missing
+             * config file, there's no sensible default to fall back to
+             * for a specifically-named, missing/malformed capture. The
+             * actual io_Error is load_replay_file()'s own choice now (M14
+             * follow-up): S2ERR_NO_RESOURCES for a genuine AllocMem()
+             * failure (the capture was fine; there just wasn't enough
+             * free memory for `cap` records), S2ERR_BAD_ARGUMENT for
+             * everything else -- see that function's own out_ioerr
+             * comment and userdocs/Configuration-Reference.md's
+             * `replaycap=` row, which already documented this exact
+             * distinction. */
+            if (unit->su_Mode == SANA2LOOP_MODE_REPLAY) {
+                ULONG replay_ioerr = S2ERR_BAD_ARGUMENT;
+                if (!load_replay_file(unit, cfg.replay_path, &replay_ioerr)) {
+                    io->io_Error = replay_ioerr;
+                    dev->lib_OpenCnt--; /* see the early increment's own comment */
+                    return;
+                }
             }
 
             /* M9: `record=<path>` -- allocate the RAM buffer and write its
@@ -2451,6 +2702,7 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
                 unit->su_RecordBuf = AllocMem(unit->su_RecordMax, MEMF_CLEAR);
                 if (!unit->su_RecordBuf) {
                     io->io_Error = S2ERR_NO_RESOURCES;
+                    dev->lib_OpenCnt--; /* see the early increment's own comment */
                     return;
                 }
                 CopyMem(cfg.record_path, unit->su_RecordPath, sizeof(unit->su_RecordPath));
@@ -2464,6 +2716,7 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
     slo = AllocMem(sizeof(struct Sana2LoopOpen), MEMF_CLEAR);
     if (!slo) {
         io->io_Error = S2ERR_NO_RESOURCES;
+        dev->lib_OpenCnt--; /* see the early increment's own comment */
         return;
     }
     slo->slo_Unit  = unit;
@@ -2492,7 +2745,17 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
     io->io_Device = (struct Device *)dev;
     io->io_Unit   = &unit->su_Unit;
     io->io_Unit->unit_OpenCnt++;
-    dev->lib_OpenCnt++;
+    /* dev->lib_OpenCnt itself was already bumped at the top of this
+     * function, before any dos.library I/O -- see that increment's own
+     * comment. Nothing to do here for it. */
+    /* Standard Exec convention: a successful open cancels a pending
+     * delayed expunge. Without this, once something (e.g. an `Avail
+     * FLUSH` racing an earlier open/close window) has set LIBF_DELEXP,
+     * the flag persists across any number of later successful opens, and
+     * the device self-expunges at the next transient open-count-zero --
+     * surprising for open/close-cycling consumers like the documented
+     * SanaDump/SanaSend `Run` pattern (see userdocs/SanaDump-and-SanaSend.md). */
+    dev->lib_Flags &= ~LIBF_DELEXP;
     io2->ios2_BufferManagement = slo; /* per SANA-II: the opener must copy
                                           this into every future request */
     io->io_Error = 0;
@@ -2547,12 +2810,21 @@ close(struct Library *dev asm("a6"), struct IORequest *io asm("a1"))
     abort_requests_for_open(unit, slo);
 
     if (--unit->su_Unit.unit_OpenCnt == 0) {
-        drain_unit(unit);
-        /* M7: last-close also flushes anything this unit has buffered as
-         * a WRITER in its own reorder window, per docs/PLAN.md's M7
-         * entry -- otherwise a packet could sit there forever once
-         * nobody's left to ever write another one and push it back out. */
+        /* M7's reorder_flush() runs BEFORE drain_unit(), not after: for
+         * an ECHO unit (or any crossover pair somehow peered to itself),
+         * reorder_flush() delivers straight back into THIS SAME unit's
+         * own su_PendingData if rxqueue>0 -- draining first and flushing
+         * second would silently repopulate the very queue drain_unit()
+         * just emptied, leaving packets sitting there with no reader left
+         * to ever collect them (nobody's open anymore) until the unit's
+         * next open reclaims them via reset_unit()'s own drain. Flushing
+         * first means drain_unit() sweeps up anything reorder_flush() just
+         * queued back onto this same unit, matching "last-close leaves
+         * nothing queued behind" for the common (non-crossover) case; a
+         * genuine crossover peer delivery is a DIFFERENT unit's queue
+         * either way, so the order doesn't affect that case at all. */
         reorder_flush((struct Sana2LoopDevice *)dev, unit);
+        drain_unit(unit);
         /* M9: same last-close boundary flushes any RAM-recorded traffic
          * to its named output file. */
         flush_record(unit);
@@ -2610,7 +2882,7 @@ static BOOL dest_matches_unit(struct Sana2LoopUnit *unit, const UBYTE *dst, BOOL
  * regardless of whether a consumer was there to read it, matching how
  * su_Stats.PacketsReceived already counts unconditionally too).
  *
- * Timestamps are su_Tick itself (whole "virtual seconds", ts_usec always
+ * Timestamps are su_TickSec (whole "virtual seconds", ts_usec always
  * 0) -- NOT real wall-clock time; see SANA2LOOP_VBLANK_HZ's own comment
  * for why this device only ever deals in tick-granularity time. Once
  * su_RecordMax would be exceeded, further packets are silently NOT
@@ -2634,7 +2906,7 @@ static void record_append(struct Sana2LoopUnit *unit, struct EchoPacket *pkt)
     }
 
     p = unit->su_RecordBuf + unit->su_RecordUsed;
-    pcap_build_pkthdr(p, unit->su_Tick, 0, frame_len, frame_len);
+    pcap_build_pkthdr(p, unit->su_TickSec, 0, frame_len, frame_len);
     CopyMem(pkt->ep_DstAddr, p + PCAP_PKTHDR_SIZE, 6);
     CopyMem(pkt->ep_SrcAddr, p + PCAP_PKTHDR_SIZE + 6, 6);
     pcap_write_u16(p + PCAP_PKTHDR_SIZE + 12, (UWORD)pkt->ep_PacketType);
@@ -2788,6 +3060,17 @@ static void do_write(struct Sana2LoopDevice *sld, struct Sana2LoopUnit *unit,
     ULONG max_len = unit->su_MTU;
     BOOL swap_to_self;
     int k;
+
+    /* Same SANA2LOOP_OPEN_MAGIC check as fill_read_from_packet()'s own
+     * comment: a writer that never copied its open cookie into this
+     * request would otherwise reach pick_copy_from_buff() below with a
+     * garbage writer_slo, calling through whatever function pointer
+     * happens to be at that address. */
+    if (!writer_slo || writer_slo->slo_Magic != SANA2LOOP_OPEN_MAGIC) {
+        io0->io_Error = S2ERR_BAD_ARGUMENT;
+        io->ios2_WireError = S2WERR_BUFF_ERROR;
+        return;
+    }
 
     if (io->ios2_Req.io_Flags & SANA2IOF_RAW)
         max_len += SANA2LOOP_RAW_HDR_SIZE;
@@ -2974,19 +3257,40 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
          * grab whatever's next on demand -- see SANA2LOOP_REPLAYMODE_*'s
          * own comment. */
         if (unit->su_Mode == SANA2LOOP_MODE_REPLAY &&
-            unit->su_ReplayMode == SANA2LOOP_REPLAYMODE_CONSUME &&
-            unit->su_ReplayPos < unit->su_ReplayCount) {
-            struct EchoPacket *rp = unit->su_ReplayNext;
-            unit->su_ReplayNext++; /* plain pointer step -- see the field's
-                                       own comment for why not su_ReplayPackets[su_ReplayPos] */
-            unit->su_ReplayPos++;
-            if (fill_read_from_packet(io, rp)) {
-                io0->io_Error = 0;
-            } else {
-                io0->io_Error = S2ERR_NO_RESOURCES;
-                io->ios2_WireError = S2WERR_BUFF_ERROR;
+            unit->su_ReplayMode == SANA2LOOP_REPLAYMODE_CONSUME) {
+            /* Take-and-advance under Disable(): multiple tasks can issue
+             * CMD_READ/S2_READORPHAN on the same consume-mode unit
+             * concurrently, and without this, two readers racing the
+             * last record can both pass the su_ReplayPos < su_ReplayCount
+             * check before either increments -- the loser then gets a
+             * su_ReplayNext one whole struct EchoPacket PAST the loaded
+             * allocation, and fill_read_from_packet() trusts its garbage
+             * ep_Length as a CopyMem length into the reader's buffer.
+             * fill_read_from_packet() itself (a consumer hook call) stays
+             * outside Disable() per this file's own discipline. */
+            struct EchoPacket *rp = NULL;
+
+            Disable();
+            if (unit->su_ReplayPos < unit->su_ReplayCount) {
+                rp = unit->su_ReplayNext;
+                unit->su_ReplayNext++; /* plain pointer step -- see the
+                                           field's own comment for why not
+                                           su_ReplayPackets[su_ReplayPos] */
+                unit->su_ReplayPos++;
             }
-            break;
+            Enable();
+
+            if (rp) {
+                if (fill_read_from_packet(io, rp)) {
+                    io0->io_Error = 0;
+                } else {
+                    io0->io_Error = S2ERR_NO_RESOURCES;
+                    io->ios2_WireError = S2WERR_BUFF_ERROR;
+                }
+                break;
+            }
+            /* else: exhausted -- falls through to normal queuing below,
+               same as every non-replay unit with no traffic waiting. */
         }
 
         Disable();
@@ -3032,19 +3336,32 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
          * replay-mode unit: both just mean "give me the next captured
          * frame, whatever type it turns out to be". */
         if (unit->su_Mode == SANA2LOOP_MODE_REPLAY &&
-            unit->su_ReplayMode == SANA2LOOP_REPLAYMODE_CONSUME &&
-            unit->su_ReplayPos < unit->su_ReplayCount) {
-            struct EchoPacket *rp = unit->su_ReplayNext;
-            unit->su_ReplayNext++; /* plain pointer step -- see the field's
-                                       own comment for why not su_ReplayPackets[su_ReplayPos] */
-            unit->su_ReplayPos++;
-            if (fill_read_from_packet(io, rp)) {
-                io0->io_Error = 0;
-            } else {
-                io0->io_Error = S2ERR_NO_RESOURCES;
-                io->ios2_WireError = S2WERR_BUFF_ERROR;
+            unit->su_ReplayMode == SANA2LOOP_REPLAYMODE_CONSUME) {
+            /* Take-and-advance under Disable() -- same concurrent-reader
+             * race as CMD_READ's identical block above; see its comment
+             * for the failure scenario this avoids. */
+            struct EchoPacket *rp = NULL;
+
+            Disable();
+            if (unit->su_ReplayPos < unit->su_ReplayCount) {
+                rp = unit->su_ReplayNext;
+                unit->su_ReplayNext++; /* plain pointer step -- see the
+                                           field's own comment for why not
+                                           su_ReplayPackets[su_ReplayPos] */
+                unit->su_ReplayPos++;
             }
-            break;
+            Enable();
+
+            if (rp) {
+                if (fill_read_from_packet(io, rp)) {
+                    io0->io_Error = 0;
+                } else {
+                    io0->io_Error = S2ERR_NO_RESOURCES;
+                    io->ios2_WireError = S2WERR_BUFF_ERROR;
+                }
+                break;
+            }
+            /* else: exhausted -- falls through to normal queuing below. */
         }
 
         pkt = (struct EchoPacket *)safe_rem_head(&unit->su_PendingData);
@@ -3092,13 +3409,22 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
     case S2_DEVICEQUERY: {
         /* M13: struct Sana2LoopDeviceQuery (this file's own extended copy
          * of the header's struct, see its own comment near the top of
-         * this file) adds Rev 4's RawMTU past HardwareType. dq->MTU etc.
-         * below are written unconditionally regardless of `given`, same
-         * as this handler did before M13 -- not changed here. RawMTU
-         * itself IS gated on `given` covering the extended struct's full
-         * size, so a pre-Rev-4 caller with a Sana2DeviceQuery-sized
-         * buffer never has this field touched, matching what
-         * dq->SizeSupplied honestly reports was actually written. */
+         * this file) adds Rev 4's RawMTU past HardwareType. Every field
+         * past SizeAvailable/SizeSupplied is now gated on `given`
+         * actually covering it -- docs/sana2-notes.md's own
+         * "S2_DEVICEQUERY convention" section already documents step 2
+         * as "fills as many fields as fit," which this handler didn't
+         * actually do before this fix: it wrote DevQueryFormat through
+         * HardwareType unconditionally, so a caller that honestly
+         * advertised a SizeAvailable smaller than the base struct (while
+         * still >= the SizeAvailable/SizeSupplied header itself, which
+         * must already exist for `given` to have been readable at all)
+         * had its buffer overrun by however many bytes those fields
+         * needed past `given`, even though dq->SizeSupplied correctly
+         * reported the smaller number. Byte offsets are computed via
+         * pointer arithmetic against the actual compiled struct layout,
+         * not hand-derived, so this stays correct regardless of any
+         * m68k alignment padding. */
         struct Sana2LoopDeviceQuery *dq = (struct Sana2LoopDeviceQuery *)io->ios2_StatData;
         ULONG mine, given;
 
@@ -3110,12 +3436,24 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
         mine = sizeof(struct Sana2LoopDeviceQuery);
         given = dq->SizeAvailable;
 
-        dq->DevQueryFormat = 0;
-        dq->DeviceLevel    = 0;
-        dq->AddrFieldSize  = 48;
-        dq->MTU            = unit->su_MTU;
-        dq->BPS            = 10000000;
-        dq->HardwareType   = S2WireType_Ethernet;
+#define SANA2LOOP_DQ_FITS(field) \
+        (given >= (ULONG)((UBYTE *)&dq->field - (UBYTE *)dq) + sizeof(dq->field))
+
+        if (SANA2LOOP_DQ_FITS(DevQueryFormat))
+            dq->DevQueryFormat = 0;
+        if (SANA2LOOP_DQ_FITS(DeviceLevel))
+            dq->DeviceLevel = 0;
+        if (SANA2LOOP_DQ_FITS(AddrFieldSize))
+            dq->AddrFieldSize = 48;
+        if (SANA2LOOP_DQ_FITS(MTU))
+            dq->MTU = unit->su_MTU;
+        if (SANA2LOOP_DQ_FITS(BPS))
+            dq->BPS = 10000000;
+        if (SANA2LOOP_DQ_FITS(HardwareType))
+            dq->HardwareType = S2WireType_Ethernet;
+
+#undef SANA2LOOP_DQ_FITS
+
         dq->SizeSupplied   = (given < mine) ? given : mine;
         dq->SizeAvailable  = mine;
         if (given >= mine) {

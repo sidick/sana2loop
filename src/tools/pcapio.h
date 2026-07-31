@@ -73,6 +73,11 @@ BOOL pcapio_open_write(struct PcapWriter *w, const char *path,
 BOOL pcapio_write_packet(struct PcapWriter *w, ULONG ts_sec, ULONG ts_usec,
                          const UBYTE *data, ULONG len);
 
-void pcapio_close_write(struct PcapWriter *w);
+/* Closes the write handle. FALSE if dos.library's Close() itself fails --
+ * a filesystem may defer buffered writes until close, making this the
+ * last place a write error can surface, so callers must treat FALSE as a
+ * real write failure, not a cleanup nicety. (The read-side close stays
+ * void: a read handle has no deferred writes for Close() to fail on.) */
+BOOL pcapio_close_write(struct PcapWriter *w);
 
 #endif /* SANA2LOOP_PCAPIO_H */

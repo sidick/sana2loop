@@ -316,7 +316,14 @@ int main(int argc, char **argv)
     if (wio)
         wio->ios2_BufferManagement = tags;
     if (wio && OpenDevice((STRPTR)"loopback.device", (LONG)unit, (struct IORequest *)wio, 0) == 0) {
-        static UBYTE readbuf[64];
+        /* Static (see stack_cookie's own comment), and sized for a FULL
+         * maximum delivery, not just this probe's own tiny payload: the
+         * queued CMD_READ below matches on packet type alone, so any
+         * queued/concurrent packet of type 0x53C0 -- up to 1514 bytes,
+         * the device's default MTU (1500) plus a SANA2IOF_RAW writer's
+         * extra 14 (see sanadump.c's MAX_FRAME comment) -- could be what
+         * the hook actually copies in here. */
+        static UBYTE readbuf[1514];
         static char payload[] = "SanaConform-probe-payload";
         int waited;
 
@@ -369,7 +376,10 @@ int main(int argc, char **argv)
                (unsigned long)unit);
     }
     if (wio)
-        FreeMem(wio, sizeof(struct IOSana2Req));
+        DeleteIORequest((struct IORequest *)wio); /* paired with CreateIORequest()
+                                                     above, same as `io`'s own
+                                                     teardown below -- never a
+                                                     raw FreeMem() */
     if (wport)
         DeleteMsgPort(wport);
 

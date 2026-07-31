@@ -18,8 +18,8 @@ A `CMD_WRITE` on an echo-mode unit delivers to **the same unit** — whatever
 you write comes back to a reader on that same open (or a different open of
 the same unit; SANA-II has no concept of "my own" vs "someone else's"
 reader on one unit). Addresses are swapped for a plain `CMD_WRITE`: the
-reader sees the unit's own station address as the source, and whatever
-address you wrote *to* as the destination. This is deliberate — there's no
+reader sees whatever address you wrote *to* as the source, and the unit's
+own station address as the destination. This is deliberate — there's no
 real second party to ask "what's your address", so the simplest useful
 behavior is letting the write specify what the reader should see as its
 sender.

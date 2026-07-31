@@ -101,6 +101,35 @@ static BOOL parse_mac(const char *s, UBYTE *out)
     return *s == '\0';
 }
 
+/* Parses a bare-hex packet type ("0800", any case -- exactly the form the
+ * usage text and userdocs/SanaDump-and-SanaSend.md document; no "0x"
+ * prefix, since none is documented) into a 16-bit value. FALSE on
+ * anything else. A bare strtoul() here would silently turn garbage into
+ * type 0 and wave through values past 0xFFFF -- and a wrong TYPE is
+ * exactly as fatal as a malformed pcap record elsewhere in this project
+ * (fail-fast, not a silent best-effort parse). Kept byte-for-byte
+ * identical to sanadump.c's own copy. */
+static BOOL parse_type(const char *s, ULONG *out)
+{
+    char *end;
+    unsigned long v;
+    const char *p;
+
+    if (*s == '\0')
+        return FALSE;
+    for (p = s; *p != '\0'; p++) {
+        if (!((*p >= '0' && *p <= '9') ||
+              (*p >= 'a' && *p <= 'f') ||
+              (*p >= 'A' && *p <= 'F')))
+            return FALSE;
+    }
+    v = strtoul(s, &end, 16);
+    if (*end != '\0' || v > 0xFFFFUL)
+        return FALSE;
+    *out = (ULONG)v;
+    return TRUE;
+}
+
 int main(int argc, char **argv)
 {
     LONG args[ARG_COUNT_TOTAL];
@@ -140,11 +169,28 @@ int main(int argc, char **argv)
         dest_override = TRUE;
     }
     if (args[ARG_TYPE]) {
-        type = strtoul((char *)args[ARG_TYPE], NULL, 16);
+        if (!parse_type((char *)args[ARG_TYPE], &type)) {
+            fprintf(stderr, "SanaSend: bad TYPE %s (want bare hex 0000-ffff, e.g. 0800)\n",
+                    (char *)args[ARG_TYPE]);
+            FreeArgs(rda);
+            return 20;
+        }
         type_override = TRUE;
     }
-    if (args[ARG_DELAY])
-        delay_ticks = (ULONG)*(LONG *)args[ARG_DELAY];
+    if (args[ARG_DELAY]) {
+        /* ReadArgs /N parses a SIGNED LONG -- a negative DELAY cast
+         * straight into a ULONG would hand Delay() a count in the
+         * billions of ticks (years of wall-clock hang, uninterruptible
+         * short of a reboot), so reject it here, same fail-fast stance
+         * as a malformed DEST above. */
+        LONG d = *(LONG *)args[ARG_DELAY];
+        if (d < 0) {
+            fprintf(stderr, "SanaSend: bad DELAY %ld (must be >= 0)\n", (long)d);
+            FreeArgs(rda);
+            return 20;
+        }
+        delay_ticks = (ULONG)d;
+    }
 
     if (!pcapio_open_read(&reader, (char *)args[ARG_FILE])) {
         fprintf(stderr, "SanaSend: can't open %s as a pcap capture\n", (char *)args[ARG_FILE]);

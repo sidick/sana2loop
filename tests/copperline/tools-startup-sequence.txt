@@ -38,3 +38,11 @@ SanaSend 12 S:sana2loop/arp.pcap
 ; file's own header comment), so redirected to a file for run-tools.sh's
 ; post-run xdftool extraction + grep check instead.
 SanaConform 0 >S:sana2loop/sanaconform.out
+
+; Pre-launch-review addition: SanaInfo had never once been executed by any
+; automated test, despite being built, shipped in the dist archive, and
+; $VER-grepped by release.yml -- a launch-blocking crash in it (e.g. a
+; ReadArgs/argument-parsing bug) would have passed every existing check.
+; Also unit 0 (same reasoning as SanaConform above); redirected to a file
+; for the same stdout-doesn't-reach-serial reason.
+SanaInfo 0 >S:sana2loop/sanainfo.out

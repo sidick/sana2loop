@@ -9,7 +9,8 @@ binary.
 The Amiga build uses the Bebbo `m68k-amigaos-gcc` cross-toolchain.
 
 ```
-make docker   # cross-compiles build/loopback.device + build/SanaInfo
+make docker   # cross-compiles build/loopback.device plus all four
+              # companion tools (SanaInfo/SanaDump/SanaSend/SanaConform)
               # inside a pinned Docker image -- no local toolchain needed
 ```
 
@@ -19,7 +20,8 @@ Or, with a local `m68k-amigaos-gcc` on `PATH`:
 make amiga    # same, using your local toolchain
 ```
 
-`make device` / `make tools` build just one binary or the other.
+`make device` / `make tools` split the device from the companion tools --
+`make tools` alone builds all four (SanaInfo/SanaDump/SanaSend/SanaConform).
 
 ## On-target testing under Copperline
 

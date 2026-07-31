@@ -99,7 +99,15 @@ make room. Query how many packets were dropped this way via
 `S2_GETSPECIALSTATS`: one record, type `1`
 (`SANA2LOOP_SPECIALSTAT_RECORD_OVERFLOW`), `Count` = packets dropped —
 present only if recording is active and at least one packet has actually
-overflowed; zero records otherwise.
+overflowed.
+
+A second, independent `S2_GETSPECIALSTATS` record type also exists since
+SANA-II Rev 7 conformance work: type `2`, `Count` = how many opens on this
+unit have offered a Rev 7 DMA buffer-management hook (accepted but never
+invoked — see [SANA-II Conformance](SANA-II-Conformance.md#rev-7-dma-capable-buffer-hooks)).
+`S2_GETSPECIALSTATS` returns **zero records** only when *neither* condition
+applies for a given unit (no overflow has ever happened, and no opener has
+ever offered a DMA hook) — it's not exclusively tied to `record=`.
 
 ## Memory usage, and freeing it manually
 

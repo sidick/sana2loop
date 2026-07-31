@@ -1,8 +1,22 @@
 # Copperline machine profile for sana2loop's headless on-target smoke test.
 #
-# Plain 68000, 1 MB -- loopback.device's actual target floor (see
-# docs/sana2-notes.md), so if this passes here it passes on the floor of
-# what the device claims to support.
+# Plain 68000, 2 MB -- loopback.device's documented minimum RAM floor
+# (see docs/sana2-notes.md, userdocs/Installation.md), so if this passes
+# here it passes on the floor of what the device claims to support.
+# Raised from the original 1 MB (512K chip + 512K slow) by the
+# pre-launch-review pass: bundled AROS's own overhead (it has to load its
+# own Kickstart replacement INTO whatever this profile provides, unlike a
+# real ROM in true ROM space -- see docs/sana2-notes.md's M8/M9/M14/M11
+# investigation sections for the full historical account of how tight
+# that made 1 MB specifically) meant even small per-unit struct growth
+# could tip an existing, already-passing on-target test over the edge --
+# confirmed via a real regression (the "scheduled" sub-test failing on
+# bundled AROS only, passing cleanly on both real Kickstart 1.3 and 3.1)
+# while adding correctness-fix fields that needed no more than a few
+# dozen extra bytes total. Rather than keep shaving new correctness fixes
+# down to fit an increasingly tight artificial ceiling, the floor itself
+# moved to 2 MB -- comfortably within what real Kickstart-1.3-class
+# hardware/emulation this device already targets actually has.
 #
 # Boots from a minimal bootable ADF (built fresh by run.sh via xdftool: a
 # blank OFS floppy with just DEVS:loopback.device, C:sana2test, and a
@@ -27,8 +41,18 @@
 model = "68000"
 
 [memory]
+# chip/slow stay at their real A500-trapdoor maximums (512K each --
+# Copperline itself rejects a bigger slow value: "slow RAM ... exceeds
+# A500 trapdoor/fake-fast maximum"); the extra 1M needed to reach the
+# new 2 MB floor goes in as `fast` (Zorro-II-style) instead -- a
+# perfectly ordinary real-world A500 configuration (trapdoor + a fast
+# card), and this device has no chip-memory-specific requirement of its
+# own (every allocation is plain MEMF_CLEAR, which prefers fast RAM
+# automatically when any is fitted -- see docs/sana2-notes.md's "Memory
+# lifetime" section).
 chip = "512K"
 slow = "512K"
+fast = "1M"
 
 [floppy]
 drives = 1
