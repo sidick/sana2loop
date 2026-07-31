@@ -2,11 +2,47 @@
  * Copyright (c) 2026 Simon Dick
  */
 
-/* loopback_device.c -- sana2loop's loopback.device, Phase 1.
+/* loopback_device.c -- sana2loop's loopback.device.
  *
- * A hardware-free SANA-II device: echo mode, S2_DEVICEQUERY, S2_ONLINE/
- * S2_OFFLINE, and S2_ONEVENT. Crossover pairs, fault injection, and pcap
- * replay/record are later phases (see the project proposal).
+ * A hardware-free SANA-II device. Every unit is, at any time, in exactly
+ * one of three modes (config-only concept, `mode=` -- see
+ * read_unit_config()): standalone **echo** (a write comes straight back to
+ * a reader on the same unit, addresses swapped -- unit 0's default and
+ * every otherwise-unconfigured unit's), **crossover** (paired with exactly
+ * one other unit via `peer=`, real unswapped addressing and standard
+ * 802.3-style receive filtering -- units 2 and 3 by default), or **replay**
+ * (plays back a loaded `.pcap` capture -- see pcap.h -- either on-demand,
+ * `replaymode=consume`, or on its own captured real-time-relative
+ * schedule via a VBlank interrupt server, `replaymode=scheduled`; writes to
+ * a replay unit fail S2ERR_NOT_SUPPORTED). Independent of mode, `record=`
+ * taps the same delivery path to capture whatever a unit actually receives
+ * back out to its own `.pcap` file. A configurable fault-injection
+ * pipeline (do_write(): MTU/PMTUD-black-hole, drop, truncate, duplicate,
+ * reorder, plus config-driven forced online/offline flapping) sits between
+ * every write and delivery, off by default. See userdocs/ (built as a
+ * MkDocs site, `make guide` for an on-Amiga AmigaGuide version) for the
+ * full user-facing reference to all of this; docs/PLAN.md for the
+ * milestone-by-milestone design history and reasoning behind each piece;
+ * docs/sana2-notes.md for the SANA-II protocol details this header
+ * doesn't spell out.
+ *
+ * One delivery path (deliver_packet()) is shared by echo, crossover, AND
+ * replay -- real SANA-II precedence, strictly: a queued **typed**
+ * CMD_READ first, else a queued S2_READORPHAN, else (config `rxqueue`,
+ * defaults to 0 -- strict drop, no buffering, matching "real drivers hold
+ * no internal buffers") a bounded queue, else dropped with
+ * Sana2DeviceStats.UnknownTypesReceived counted.
+ *
+ * No separate unit task anywhere in this file: echo/crossover/reorder-
+ * flush all complete synchronously inside BeginIO on the calling task
+ * (ReplyMsg from there is perfectly legal -- it just posts to whatever
+ * port the reader's IORequest names); scheduled-replay/record instead
+ * complete from a real VBlank hardware interrupt (vblank_server()) via the
+ * SAME deliver_packet() precedence, deliberately not a parallel mechanism.
+ * Both the pending-reads/orphan-reads lists and the pending-echoed-data
+ * list are wrapped in Disable()/Enable() critical sections throughout,
+ * since multiple tasks (and, for the VBlank case, real interrupt context)
+ * can touch the same unit's lists concurrently.
  *
  * Freestanding: hand-rolled Resident/auto-init, NOT libnix's devinit.o.
  * Reason: echo mode needs state SHARED across every independent OpenDevice()
@@ -23,10 +59,11 @@
  * are fine here -- this build has no A4 small-data model to violate.
  *
  * 68000 / Kickstart 1.3 baseline throughout: no utility.library, no
- * ReadArgs, no dos.library from the unit's perspective (there is no
- * separate unit task in Phase 1 -- echo completes synchronously inside
- * BeginIO on the calling task, matching from the caller's write straight to
- * a queued reader's CMD_READ).
+ * ReadArgs, no dos.library from the unit's perspective. The one exception
+ * is the config-file read (read_unit_config()) and, downstream of it,
+ * load_replay_file()/the record-flush at last close -- all three touch
+ * dos.library, and all three do so only from a real Process opener,
+ * never from a bare Task, preserving the guarantee for everyone else.
  */
 
 #include <exec/types.h>
@@ -57,14 +94,24 @@
 #define XSTR(s) STR(s)
 
 #define DEVICE_NAME       "loopback.device"
-#define DEVICE_DATE       "(30 Jul 2026)"
+/* dd.mm.yyyy, not a month name -- the AmigaDOS Version command's "$VER:"
+ * cookie parses this field as three decimal numbers (day/month/year), so
+ * a textual month wouldn't parse as a date at all (see DEVICE_ID_STRING's
+ * own comment). */
+#define DEVICE_DATE       "(30.07.2026)"
 #ifndef DEVICE_VERSION
 #define DEVICE_VERSION 1
 #endif
 #ifndef DEVICE_REVISION
 #define DEVICE_REVISION 0
 #endif
-#define DEVICE_ID_STRING  "sana2loop " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) " " DEVICE_DATE
+/* Doubles as both lib_IdString (Exec's own "what is this module"
+ * convention -- see init_device()) AND the standard AmigaDOS "$VER:"
+ * version cookie the Shell's Version command scans a loaded module's
+ * segments for (RKRM: DOS, "The Version Cookie") -- one string serving
+ * both, the idiomatic pattern most shipped libraries/devices use, rather
+ * than a second copy of the same information. */
+#define DEVICE_ID_STRING  "$VER: sana2loop " XSTR(DEVICE_VERSION) "." XSTR(DEVICE_REVISION) " " DEVICE_DATE
 #define DEVICE_PRIORITY   0
 
 /* Unit 0 is the Phase-1 echo default (per the proposal's mode-selection

@@ -24,6 +24,26 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define STR(s)  #s
+#define XSTR(s) STR(s)
+
+#ifndef SANAINFO_VERSION
+#define SANAINFO_VERSION 1
+#endif
+#ifndef SANAINFO_REVISION
+#define SANAINFO_REVISION 0
+#endif
+
+/* Standard AmigaDOS "$VER:" version cookie (RKRM: DOS, "The Version
+ * Cookie") -- what the Shell's Version command scans a compiled
+ * executable's segments for. `static volatile` (not `static const`) so
+ * -O2 can't conclude the never-read array is dead and drop it -- the
+ * whole point is that ITS BYTES are read by an external tool, not by
+ * this program. dd.mm.yyyy: the cookie's date field is three decimal
+ * numbers, not a textual month. */
+static volatile char version[] =
+    "$VER: SanaInfo " XSTR(SANAINFO_VERSION) "." XSTR(SANAINFO_REVISION) " (30.07.2026)";
+
 static void print_addr(const char *label, const UBYTE *addr)
 {
     printf("%s: %02x:%02x:%02x:%02x:%02x:%02x\n", label,

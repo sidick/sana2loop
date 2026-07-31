@@ -33,7 +33,8 @@ DEV_SRC    := $(SRCDIR)/loopback_device.c
 DEV_BIN    := $(BUILD)/loopback.device
 
 # --- SanaInfo: a normal CLI program (clib2 runtime, standard startfiles) ---
-TOOL_CFLAGS := -O2 -Wall -Wextra -Werror -m68000 -msoft-float -mcrt=clib2
+TOOL_CFLAGS := -O2 -Wall -Wextra -Werror -m68000 -msoft-float -mcrt=clib2 \
+               -DSANAINFO_VERSION=$(VERSION) -DSANAINFO_REVISION=$(REVISION)
 TOOL_BIN    := $(BUILD)/SanaInfo
 
 # --- Copperline on-target smoke test harness (tests/copperline/) ---
@@ -47,7 +48,7 @@ TEST_BIN    := $(BUILD)/sana2test
 IMAGE      ?= ghcr.io/reinauer/container-amiga-gcc@sha256:75eee7a55bcffdde76e0a4f42ca025b89796053807e8f1b05bab9294b640f4e8
 DOCKER_RUN := docker run --rm -v "$(CURDIR)":/work -w /work $(IMAGE)
 
-.PHONY: all device tools amiga test-harness docker docker-test-harness copperline-smoke clean version
+.PHONY: all device tools amiga test-harness docker docker-test-harness copperline-smoke guide clean version
 
 all: amiga
 
@@ -81,6 +82,16 @@ copperline-smoke: docker docker-test-harness
 
 version:
 	@echo "$(VERSION).$(REVISION)"
+
+# --- guide: AmigaGuide user documentation, generated from userdocs/ --------
+# userdocs/ is the single source of truth for user docs (built as the
+# MkDocs site, see mkdocs.yml); this converts it for on-Amiga reading
+# (MultiView/AmigaGuide).
+guide: | $(BUILD)
+	python3 tools/docs2guide.py userdocs $(BUILD)/sana2loop.guide
+
+$(BUILD):
+	@mkdir -p $(BUILD)
 
 clean:
 	rm -rf $(BUILD)

@@ -4,10 +4,11 @@
 
 /* pcap.h -- hand-rolled classic pcap ("libpcap savefile") format pieces
  * this project actually touches. Shared between the freestanding device
- * (src/loopback_device.c, M8's consume-mode replay) and, later, host-side
- * companion tools (M11) -- no I/O in here at all, callers own Open/Read/
- * Write; this header only knows how to make sense of the bytes once
- * they're in memory.
+ * (src/loopback_device.c -- M8's on-demand replay, M9's real-time-scheduled
+ * replay and record=<path> capture, all through this same header) and,
+ * later, host-side companion tools (M11) -- no I/O in here at all, callers
+ * own Open/Read/Write; this header only knows how to make sense of the
+ * bytes once they're in memory.
  *
  * Both endians, deliberately: a capture written by a little-endian host
  * (scapy, tcpdump -- the overwhelmingly common case) needs to be readable

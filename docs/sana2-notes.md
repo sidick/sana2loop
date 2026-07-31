@@ -42,7 +42,7 @@ should be zeroed, not left as garbage, when a driver fills an address.
 | `S2_ONLINE` / `S2_OFFLINE` | `CMD_NONSTD+16/17` | caller | flips unit state, fires queued `S2_ONEVENT`s |
 | `S2_ONEVENT` | `CMD_NONSTD+14` | caller | see below |
 | `S2_GETGLOBALSTATS` | `CMD_NONSTD+13` | caller | copies `struct Sana2DeviceStats` whole (no `SizeAvailable`/`SizeSupplied` negotiation, unlike `S2_DEVICEQUERY`) |
-| `S2_GETSPECIALSTATS` | `CMD_NONSTD+12` | caller | zero-record: `RecordCountSupplied = 0`, nothing tracked yet |
+| `S2_GETSPECIALSTATS` | `CMD_NONSTD+12` | caller | zero records unless `record=<path>` (M9) is active AND has actually dropped a packet to `recordmax` -- then one record, `Type=SANA2LOOP_SPECIALSTAT_RECORD_OVERFLOW`, `Count`=packets dropped |
 
 ## Delivery precedence (`deliver_packet()`, M2)
 

@@ -32,7 +32,7 @@ they may require Kickstart 2.0+ where convenient (documented per-tool).
 ## Current state
 
 Working through `docs/PLAN.md`'s milestones (M0-M12: spec-correctness
-backfill, then Phases 2-4). **M0-M9 done**, each validated on-target under
+backfill, then Phases 2-4). **M0-M10 done**, each validated on-target under
 Copperline against both bundled AROS (CI) and a real Kickstart 1.3 ROM
 (`make copperline-smoke` / `KICK=... make copperline-smoke`,
 see `tests/copperline/`) before being considered complete. M9 initially
@@ -50,6 +50,23 @@ CheckIO()/WaitIO(), then unconditionally reaps via AbortIO()+WaitIO()) --
 no device-code change was needed for the actual fix. See docs/PLAN.md's M9
 risk note for the full investigation, including how it was root-caused via
 on-target instrumentation.
+
+**M10** (docs pass): stood up `userdocs/` (11 pages, MkDocs Material) plus
+`tools/docs2guide.py` (adapted from sibling project amiauth's own,
+algorithm unchanged) producing an on-Amiga AmigaGuide manual from the same
+source (`make guide`) -- one docs source feeding both. Not yet published:
+this repo is currently private, so there's no gh-pages publish workflow
+yet, only a CI build-only check (`docs-build` in `.github/workflows/ci.yml`)
+so the site can't silently rot before publishing is activated. Also fixed
+a real, previously-missing gap surfaced while writing the docs: neither
+the device nor `SanaInfo` had ever carried a standard AmigaDOS `$VER:`
+version cookie (so the Shell `Version` command found nothing for either) --
+added to both, and `DEVICE_DATE` reformatted to the numeric `dd.mm.yyyy`
+the cookie format actually requires (a textual month never parsed as one).
+The device's own top-of-file overview comment was still describing "Phase
+1" only (echo + a handful of commands) despite M0-M9 having long since
+added crossover, replay, record, and fault injection -- rewritten to match
+current reality.
 
 - `src/loopback_device.c` -- the device. Hand-rolled Resident/auto-init
   (see "Architecture" below for why, and for the on-target Guru
@@ -71,9 +88,10 @@ on-target instrumentation.
     `S2_ONEVENT` (completes **immediately** if the requested state already
     holds, else waits for the next transition -- corrected from an earlier,
     wrong "always edge-triggered" assumption after cross-checking a real
-    driver, plipbox), `S2_GETGLOBALSTATS`, `S2_GETSPECIALSTATS` (zero-record
-    stub), `CMD_FLUSH`, `AbortIO` (covers pending reads, orphan reads, and
-    event waits).
+    driver, plipbox), `S2_GETGLOBALSTATS`, `S2_GETSPECIALSTATS` (zero
+    records unless `record=<path>` (M9) is active and has actually dropped
+    a packet to `recordmax` -- see M9's own entry below), `CMD_FLUSH`,
+    `AbortIO` (covers pending reads, orphan reads, and event waits).
   - **M3**: `S2_CONFIGINTERFACE` (one-shot per unit lifetime -- adopts
     `ios2_SrcAddr` as the current station address; a second attempt fails
     `S2ERR_BAD_STATE`/`S2WERR_IS_CONFIGURED`; deliberately *not* cross-gated
@@ -260,8 +278,15 @@ on-target instrumentation.
   reason specific to itself (not the device): see the comment block at its
   top for a real on-target bug this tripped over and how it was found.
 
-Not yet done: docs pass (M10), `SanaDump`/`SanaSend` (M11), Aminet
-packaging (M12).
+- `userdocs/` (M10) -- the user-facing documentation site source (MkDocs
+  Material, `mkdocs.yml`), 11 pages covering installation, configuration,
+  every mode, fault injection, `SanaInfo`, troubleshooting, and a
+  changelog. `tools/docs2guide.py` converts the same source into an
+  on-Amiga AmigaGuide manual (`make guide`) -- one source, two outputs.
+  Not yet published (repo is private, no gh-pages workflow yet); CI only
+  build-checks it (`docs-build` job).
+
+Not yet done: `SanaDump`/`SanaSend` (M11), Aminet packaging (M12).
 
 ## Architecture
 

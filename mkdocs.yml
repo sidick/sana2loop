@@ -1,0 +1,55 @@
+# User documentation site (MkDocs Material). NOT YET PUBLISHED -- this repo
+# is currently private, so there is no .github/workflows/docs.yml deploying
+# it to GitHub Pages yet (see amiauth's own docs.yml for the pattern to
+# adopt once sana2loop goes public / gets a release tag). Until then this
+# builds locally (`mkdocs serve` / `mkdocs build --strict`) and is checked
+# in CI so it can't silently rot. Developer design notes stay in docs/ and
+# are not part of this site.
+
+site_name: sana2loop
+site_description: A hardware-free SANA-II network device for AmigaOS
+site_url: https://sidick.github.io/sana2loop/
+repo_url: https://github.com/sidick/sana2loop
+repo_name: sidick/sana2loop
+edit_uri: edit/main/userdocs/
+copyright: sana2loop — a hardware-free SANA-II device for AmigaOS. BSD 2-Clause.
+
+docs_dir: userdocs
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.footer
+    - content.action.edit
+
+markdown_extensions:
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+  - Getting going:
+      - Installation: Installation.md
+      - Getting Started: Getting-Started.md
+  - Using loopback.device:
+      - Configuration Reference: Configuration-Reference.md
+      - Echo and Crossover Modes: Echo-and-Crossover.md
+      - Replay and Record: Replay-and-Record.md
+      - Fault Injection: Fault-Injection.md
+      - SanaInfo Reference: SanaInfo-Reference.md
+  - Help:
+      - Troubleshooting and FAQ: Troubleshooting-and-FAQ.md
+      - Building and Testing: Building-and-Testing.md
+      - Changelog: Changelog.md

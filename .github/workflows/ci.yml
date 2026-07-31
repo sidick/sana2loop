@@ -38,6 +38,13 @@
 #                         a release -- this job can't confirm 1.3-specific
 #                         behavior.
 #
+#   docs-build          : strict-builds the MkDocs user-docs site
+#                         (userdocs/) and the AmigaGuide conversion
+#                         (`make guide`) so both stay buildable as pages
+#                         change. Build-only: this repo is private and has
+#                         no gh-pages publish workflow yet (see mkdocs.yml's
+#                         header comment) -- nothing here deploys anywhere.
+#
 #   semgrep             : security/quality scan with semgrep's auto rule pack.
 #
 # Why one build job feeding an artifact, not two independent ones each
@@ -169,6 +176,24 @@ jobs:
 
       - name: make copperline-smoke (bundled AROS, no KICK=, no rebuild)
         run: sh tests/copperline/run.sh
+
+  docs-build:
+    name: Docs site + AmigaGuide build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+      - name: Install docs toolchain
+        run: pip install -r tools/docs-requirements.txt
+      # Build-only check -- this repo is private and has no publish workflow
+      # yet (see mkdocs.yml's own header comment); this just keeps
+      # userdocs/ from silently rotting until that's activated.
+      - name: Strict MkDocs build
+        run: mkdocs build --strict
+      - name: AmigaGuide conversion
+        run: make guide
 
   semgrep:
     name: Semgrep (auto rules)
