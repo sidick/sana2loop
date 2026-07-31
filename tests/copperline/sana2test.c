@@ -133,6 +133,7 @@ static char NAME_PEERADDRESS[]     = "peeraddress";
 static char NAME_DNSADDRESS[]      = "dnsaddress";
 static char NAME_BUFFHOOKS[]       = "buffhooks";
 static char NAME_DMAHOOKS[]        = "dmahooks";
+static char NAME_REPLAYCAP[]       = "replaycap";
 static char DBG_CHECKIO_NULL[]    = "DBG_CHECKIO_NULL=";
 
 /* M13: this toolchain's <devices/sana2.h> lacks Rev 4's RawMTU field --
@@ -2094,6 +2095,38 @@ static int test_main(void)
         }
 
         report(NAME_DMAHOOKS, ok, &fails);
+    }
+
+    /* --- replaycap: M14's `replaycap=N` config knob. Unit 14's fixture
+     * (replaycap=0, out of the valid 1..SANA2LOOP_CONFIG_MAX_REPLAYCAP
+     * range) must fail OpenDevice() at pure config validation --
+     * S2ERR_BAD_ARGUMENT, before any replay-mode/allocation logic even
+     * runs. Deliberately the ONLY on-target coverage for this knob in
+     * this session: the positive case (a raised cap actually loading
+     * more records than the default) needs a real replay-buffer
+     * allocation, which reliably exceeds bundled AROS's tight memory
+     * budget at this point in the sequence (a third simultaneously-held
+     * replay buffer, alongside units 9/10's own) -- verified instead via
+     * real Kickstart 1.3/3.1 locally; see docs/PLAN.md's M14 risk note
+     * for the full investigation. --- */
+    {
+        BOOL ok = FALSE;
+        struct MsgPort *port14c = make_port();
+        struct IOSana2Req *io14c = port14c ? make_io(port14c) : NULL;
+
+        if (io14c) {
+            ok = (OpenDevice((STRPTR)DEVICE_NAME, 14, (struct IORequest *)io14c, 0) != 0);
+            if (!ok)
+                CloseDevice((struct IORequest *)io14c); /* shouldn't happen; clean up if it does */
+        }
+        if (io14c)
+            FreeMem(io14c, sizeof(struct IOSana2Req));
+        if (port14c) {
+            FreeSignal(port14c->mp_SigBit);
+            FreeMem(port14c, sizeof(struct MsgPort));
+        }
+
+        report(NAME_REPLAYCAP, ok, &fails);
     }
 
     /* --- record: unit 11 (`record=S:sana2loop/recorded.pcap`,

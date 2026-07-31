@@ -22,11 +22,25 @@ A missing or malformed capture file fails the whole `OpenDevice()` call
 (`S2ERR_BAD_ARGUMENT`) — unlike a missing plain config file, there's no
 sensible default capture to fall back to.
 
-**A replay unit can hold at most 4 records.** This is a real, deliberately
-small limit — not a nice round number — settled on after two rounds of
-empirical `AllocMem()` failures under a memory-constrained test profile
-(see the [Changelog](Changelog.md) for the story). A capture with more than
-4 records fails to load.
+**A replay unit can hold at most `replaycap` records — 4 by default.**
+This default is a real, deliberately small limit — not a nice round
+number — settled on after two rounds of empirical `AllocMem()` failures
+under a memory-constrained test profile (see the [Changelog](Changelog.md)
+for the story). A capture with more records than the active cap (default
+or configured) fails to load. If your capture has more than 4 records and
+your target has the memory to spare, raise the ceiling per-unit:
+
+```
+mode=replay
+replay=S:sana2loop/mycapture.pcap
+replaycap=16
+```
+
+See [Configuration Reference](Configuration-Reference.md) for
+`replaycap`'s valid range and the memory-budgeting responsibility that
+comes with raising it (the device only fails loudly with
+`S2ERR_NO_RESOURCES` if a raised value doesn't actually fit — it doesn't
+know your target's own free memory in advance).
 
 `CMD_WRITE`/`S2_BROADCAST`/`S2_MULTICAST` on a replay unit always fail
 `S2ERR_NOT_SUPPORTED` — there's no live traffic to write into a scripted

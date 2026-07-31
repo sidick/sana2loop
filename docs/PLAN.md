@@ -43,6 +43,7 @@ the technical detail behind each one.
 | M11 | ✅ Done | Tools: `src/tools/pcapio.c` (dos.library-based, not stdio -- see its own comment for why: clib2's `fopen()` reliably failed under Copperline's minimal Startup-Sequence boot where plain dos.library `Open()` didn't), `sana2open.c` (model-citizen real buffer-management hooks), `SanaDump`, `SanaSend`; `host/make_fixtures.py` + `host/lint_pcap.py` (scapy); canonical corpus (ARP, DHCP, TCP handshake) in top-level `fixtures/`. On-target round-trip test (`tests/copperline/run-tools.sh`, a *separate* Copperline boot session from the device's own `run.sh` -- see that file's own comment: the device's "never free replay buffers at close" design leaves too little memory for a second clib2 program in the same session) -- see risk note below for the two real, non-obvious findings this surfaced | new `src/tools/*`, `host/*`, `fixtures/`, `Makefile`, `tests/copperline/run-tools.sh` + fixtures |
 | M12 | ✅ Done | Aminet packaging + release flow, adopting sibling project amiauth's pattern (in preference to narrator.wyoming's simpler one, since amiauth's is the more tried-and-tested of the two): tag-driven `release.yml` that verifies the pushed tag matches `version.mk` and `sana2loop.readme`'s `Version:` field before doing anything else, cross-builds via `make docker`, greps all four built binaries for their `$VER` strings, packages via `make dist` (new `Makefile` `lha`/`dist` targets building a real, archive-capable `lha` from the same pinned `jca02266/lha` source commit amiauth uses -- Ubuntu's/Homebrew's `lha` is Lhasa, extract-only), validates the readme with `aminet-release-action` in `validate-only` mode, creates the GitHub release (curated notes sourced from `sana2loop.readme`'s own intro + Features section for the first release, `--generate-notes` once there's real tag-to-tag history to diff), and only then hands off to a *separate* job gated on the `aminet` GitHub Environment for the actual (irreversible-ish) Aminet FTP upload -- human-in-the-loop by construction, not an afterthought. See risk note below for two real gaps this surfaced (private-repo Environment protection limits, and the pre-existing V36-vs-V37 compatibility wording this milestone's own readme draft got wrong before a user catch fixed it) | `Makefile`, `sana2loop.readme` (new), `.github/workflows/release.yml` (new) |
 | M13 | ✅ Done | SANA-II Rev 2/3/4/7 conformance coverage: buffer-hook negotiation genuinely INVOKED not just accepted (`S2_CopyTo/FromBuff16/32`, new `buffhooks=8\|16\|32` config knob), Rev 4 `S2_GETPEERADDRESS`/`S2_GETDNSADDRESS` + `Sana2DeviceQuery.RawMTU` (all missing from this toolchain's own `<devices/sana2.h>` -- local `#define`s sourced from wiki.amigaos.net, cross-checked against the header's own existing `0xc000`/`0xc001` sequence), Rev 7 DMA hooks accepted+counted (`su_DMAHooksOffered`, new `S2_GETSPECIALSTATS` record type) but never invoked (spec-legal graceful decline -- this device has no real DMA to offer). New `SanaConform` probe tool (`src/tools/sanaconform.c`) exercising both directions (driver advertising vs. stack actually invoking) with graceful-fallback checks against a real running unit. `SANA2LOOP_NUM_UNITS` now 14 (was 13): unit 13 is a new `buffhooks=32` fixture. See risk note below for a real, non-device Copperline/AROS quirk this surfaced (and fixed via test reordering, not device code) | `src/loopback_device.c`, `src/tools/sanaconform.c` (new), `Makefile`, `tests/copperline/sana2test.c`, `tests/copperline/run.sh`, `tests/copperline/run-tools.sh`, `tests/copperline/tools-startup-sequence.txt`, `tests/copperline/fixtures/unit13.config` (new), `docs/sana2-notes.md`, `userdocs/Configuration-Reference.md`, `userdocs/SANA-II-Conformance.md` (new) |
+| M14 | ✅ Done | `replaycap=` config knob: makes `mode=replay`'s previously-fixed 4-record ceiling (`SANA2LOOP_MAX_REPLAY_PACKETS`) a per-unit override, 1-256 (`SANA2LOOP_CONFIG_MAX_REPLAYCAP`), validated at config-parse time like every other numeric key. Prompted by a user exploratory question (config-based override: yes; RAM-auto-sizing: no, conflicts with the project's determinism-by-construction goal). `su_ReplayCap` threads through `open()`/`reset_unit()` (free-before-reset ordering matches `su_RecordMax`'s established pattern) and `load_replay_file()` (13 call sites switched from the old compile-time constant to the per-unit runtime value -- verified via `nm`/`objdump` that the resulting `cap * sizeof(struct EchoPacket)` runtime multiply still needs no `__mulsi3`, this `-nostdlib` build's perennial libgcc hazard). `SANA2LOOP_NUM_UNITS` now 15 (was 14): unit 14 is a new `replaycap=0` (out-of-range) fixture, config-validation-only by design -- see risk note below for why the positive case (a raised cap actually loading more records) is deliberately NOT covered on-target, only via real Kickstart 1.3/3.1 locally | `src/loopback_device.c`, `tests/copperline/sana2test.c`, `tests/copperline/run.sh`, `tests/copperline/fixtures/unit14.config` (new), `userdocs/Configuration-Reference.md`, `userdocs/Replay-and-Record.md` |
 
 ## SANA-II conformance coverage: Rev 2/3/4/7 additions
 
@@ -313,6 +314,48 @@ proper.
   of any real release tag, then updated every "not yet published"
   reference (`README.md`, `sana2loop.readme`, `CLAUDE.md`) to the live
   URL.
+- **M14's on-target test coverage for the POSITIVE `replaycap=` case
+  (a raised cap actually loading more than the default 4 records)
+  reliably fails under bundled AROS -- root-caused to memory pressure,
+  not a device bug, and scoped out of the automated suite as a result.**
+  A first attempt (`replaycap=6` on a new unit alongside the existing
+  M8/M9 replay-mode units 9/10) failed with `SUB=replaycap=FAIL` on
+  bundled AROS only; real Kickstart 1.3 passed cleanly first try.
+  Debugged by stashing progress markers into unused `Sana2DeviceStats`
+  fields (the same technique M9's investigation established) at each
+  `return FALSE;` inside `load_replay_file()`: the failure was the
+  `AllocMem(cap * sizeof(struct EchoPacket), MEMF_CLEAR)` call itself,
+  and a follow-up `AvailMem(MEMF_LARGEST)` probe at that exact point
+  showed only ~4-5 KB free against the ~9.2 KB the cap=6 allocation
+  needed. Bisecting the cap value down (5, then even 4 -- the
+  pre-existing, already-shipped default) reproduced the identical
+  failure, proving this isn't about the raised value specifically: it's
+  a THIRD simultaneously-held replay buffer (alongside units 9/10's own,
+  never freed per the documented "held until next open" design -- see
+  `userdocs/Replay-and-Record.md`'s "Memory usage" section) exceeding
+  bundled AROS's tight 512K+512K profile at this point in the sequence,
+  the same class of AROS-specific memory-budget gap M8 first hit when
+  settling on 4 as the default. Real Kickstart 1.3 confirmed the feature
+  itself is correct (`DBG_RC=1,1`, all 6 records read back with matching
+  type/length/payload). A second attempt moved the positive case to
+  `run-tools.sh`'s more generous session (1M chip + 512K slow + 1M fast)
+  via `SanaConform`/`SanaDump`, but even just OPENING the extra unit
+  there broke the whole bundled-AROS session (every subsequent file,
+  including pre-existing ones from earlier in the same run, came back
+  empty/not-found) -- confirmed via bisection that the open call alone
+  reproduces it, and confirmed via real Kickstart 3.1 that the identical
+  commands work perfectly there. **Resolution**: scaled the automated
+  on-target test down to a single, allocation-free check (unit 14,
+  `replaycap=0`, out of the valid 1-256 range, must fail at pure config
+  validation before `load_replay_file()` runs at all) that passes
+  reliably everywhere. The positive case is verified functionally
+  correct via real Kickstart 1.3 (debug-instrumented run) and real
+  Kickstart 3.1 (`SanaConform`), just not covered by the automated
+  bundled-AROS-based suite -- consistent with this project's existing
+  stance that AROS is "a fine ROM-free stand-in for catching gross
+  regressions... not a substitute for confirming against real 1.3" (see
+  CLAUDE.md's "Testing under Copperline" section), extended here to a
+  genuine memory-budget gap rather than a behavioral difference.
 
 ## Verification
 

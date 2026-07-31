@@ -179,8 +179,17 @@ struct Sana2LoopDeviceQuery {
  * 6=M7 duppct, 7=M7 reorder, 8=M7 offlineafter/onlineafter,
  * 9=M8 consume-mode replay (M13 also reuses this, read-only, for its
  * RawMTU=0-on-replay check), 10=M9 scheduled replay, 11=M9 RAM record,
- * 12=M11 SanaDump/SanaSend on-target round-trip, 13=M13 buffhooks=32. */
-#define SANA2LOOP_NUM_UNITS   14
+ * 12=M11 SanaDump/SanaSend on-target round-trip, 13=M13 buffhooks=32,
+ * 14=M14 replaycap=0 (out-of-range config value, open must FAIL at pure
+ * validation -- see SANA2LOOP_CONFIG_MAX_REPLAYCAP's own comment for why
+ * `replaycap=`'s POSITIVE case -- a raised cap actually loading more
+ * than the default -- is deliberately NOT covered by this on-target
+ * suite at all: it needs a third simultaneously-held replay buffer,
+ * which empirically exceeds bundled AROS's tight 512K+512K profile at
+ * this point in the sequence even at the historical default cap size;
+ * verified instead via real Kickstart 1.3/3.1 locally, see
+ * docs/PLAN.md's M14 risk note). */
+#define SANA2LOOP_NUM_UNITS   15
 #define SANA2LOOP_DEFAULT_MTU 1500
 /* Ethernet dst[6]+src[6]+type[2] -- the allowance SANA2IOF_RAW adds on top
  * of su_MTU (docs/PLAN.md's M4 entry: "SANA2IOF_RAW (buffer -> MTU+14)").
@@ -214,19 +223,36 @@ struct Sana2LoopDeviceQuery {
  * Also the config ceiling for `reorder=N` (the window size). */
 #define SANA2LOOP_MAX_REORDER 8
 
-/* M8 replay: fixed cap on how many pcap records a `mode=replay` unit will
- * load, same fixed-capacity-over-dynamic-growth reasoning as
- * SANA2LOOP_MAX_TRACKED_TYPES/_MULTICAST above. A capture with more
- * records than this is REJECTED outright at open time (S2ERR_BAD_ARGUMENT)
- * rather than silently truncated -- silently playing back only part of a
- * named capture would be a worse surprise than a loud, obvious failure.
- * Still plenty for the hand-crafted/small-corpus captures this project
- * actually ships (M11's canonical ARP/DHCP/TCP-handshake corpus is a
- * handful of packets); a test wanting more just needs a higher cap, not a
- * design change -- see load_replay_file()'s own comment for why this
- * value specifically (8, not a rounder-looking 16 or 32) had to be
- * re-verified empirically twice, at M8 and again at M9. */
+/* M8 replay: cap on how many pcap records a `mode=replay` unit will load,
+ * same fixed-capacity-over-dynamic-growth reasoning as
+ * SANA2LOOP_MAX_TRACKED_TYPES/_MULTICAST above -- still a hard per-unit
+ * ceiling, just a per-unit CONFIGURABLE one since M14 (`replaycap=N`,
+ * su_ReplayCap), not a single compile-time constant for every unit. A
+ * capture with more records than the active cap is REJECTED outright at
+ * open time (S2ERR_BAD_ARGUMENT) rather than silently truncated --
+ * silently playing back only part of a named capture would be a worse
+ * surprise than a loud, obvious failure. SANA2LOOP_MAX_REPLAY_PACKETS is
+ * now only the DEFAULT (no `replaycap=` given) -- unchanged from its
+ * original M8/M9 value, so every existing config/fixture that never sets
+ * `replaycap=` is byte-for-byte unaffected. That default value (4) had to
+ * be re-verified empirically twice, at M8 and again at M9 -- see
+ * load_replay_file()'s own comment for the full memory-pressure story
+ * behind picking it, which is exactly *why* this became configurable
+ * rather than just raising the constant: the safe ceiling depends on the
+ * target's own real memory budget (bundled AROS under Copperline is
+ * measurably tighter than real hardware -- see that same comment), which
+ * only a config knob, not a single compile-time guess, can accommodate. */
 #define SANA2LOOP_MAX_REPLAY_PACKETS 4
+/* Sanity ceiling on `replaycap=N` -- not a spec requirement, same guard
+ * purpose as SANA2LOOP_CONFIG_MAX_RECORDMAX (itself ~256KB): each replay
+ * slot costs roughly sizeof(struct EchoPacket) (~1.5KB, dominated by
+ * SANA2LOOP_MAX_PACKET) plus a few bytes of due-tick/delivery-copy
+ * bookkeeping, so this ceiling's ~400KB worst case is the same order of
+ * magnitude as recordmax's own ceiling, not a promise it fits any given
+ * target -- it's the operator's own job to pick a `replaycap=` their
+ * target's actual free memory can satisfy (AllocMem() failure at open
+ * time fails loudly, per S2ERR_NO_RESOURCES, not silently). */
+#define SANA2LOOP_CONFIG_MAX_REPLAYCAP 256
 /* dos.library path/filename length for `replay=<path>` -- generous for
  * "S:sana2loop/whatever.pcap"-shaped values; same bounded-not-dynamic
  * reasoning as the config-path buffers in read_unit_config() below. */
@@ -398,6 +424,9 @@ struct UnitConfig {
                             actually INVOKES (see pick_copy_to_buff()/
                             pick_copy_from_buff()), not just accepts at
                             open() time */
+    ULONG replaycap;    /* M14: `replaycap=N` -- how many pcap records a
+                            mode=replay unit may load, default
+                            SANA2LOOP_MAX_REPLAY_PACKETS (4) */
 };
 
 static char CONFIG_ENV_PREFIX[] = "ENV:sana2loop/unit";
@@ -665,6 +694,19 @@ static BOOL parse_config_line(struct UnitConfig *cfg, const char *line, const ch
         }
         return FALSE;
     }
+    if (key_matches(line, eq, "replaycap")) {
+        /* M14: how many pcap records a mode=replay unit may load --
+         * replacing a single compile-time ceiling (SANA2LOOP_MAX_REPLAY_
+         * PACKETS, still the default) with a per-unit config knob, since
+         * the actually-safe ceiling depends on the target's own free
+         * memory (see that constant's own comment). */
+        if (!parse_ulong(eq + 1, line_end, &value))
+            return FALSE;
+        if (value < 1 || value > SANA2LOOP_CONFIG_MAX_REPLAYCAP)
+            return FALSE;
+        cfg->replaycap = value;
+        return TRUE;
+    }
     return FALSE; /* unrecognized key -- fail-fast, not silently ignored */
 }
 
@@ -893,9 +935,20 @@ struct Sana2LoopUnit {
      * EchoPacket shape CMD_WRITE builds, so CMD_READ/S2_READORPHAN's
      * existing fill_read_from_packet() serves them with no separate code
      * path. su_ReplayPackets is NULL unless su_Mode==SANA2LOOP_MODE_REPLAY
-     * and loading succeeded; AllocMem'd to hold exactly su_ReplayCount
-     * entries (not a fixed SANA2LOOP_MAX_REPLAY_PACKETS-sized array
-     * embedded in every unit -- only replay-mode units pay for this). */
+     * and loading succeeded; AllocMem'd to hold su_ReplayCap slots (not a
+     * fixed-size array embedded in every unit -- only replay-mode units
+     * pay for this), of which su_ReplayCount actually ended up used. */
+    ULONG       su_ReplayCap;         /* M14: `replaycap=N` config (default
+                                          SANA2LOOP_MAX_REPLAY_PACKETS) --
+                                          the ACTUAL allocation size for
+                                          su_ReplayPackets/su_ReplayDueTicks/
+                                          su_ReplayDeliveryCopies this
+                                          lifetime; reset_unit()'s matching
+                                          FreeMem() must read this BEFORE
+                                          resetting it to the default for
+                                          the NEXT lifetime, same pattern as
+                                          su_RecordMax's own free-then-reset
+                                          ordering. */
     struct EchoPacket *su_ReplayPackets; /* base of the allocation -- kept
                                           only so reset_unit() can FreeMem
                                           it; never indexed directly (see
@@ -1699,17 +1752,22 @@ static void reset_unit(struct Sana2LoopUnit *unit)
      * unit (i.e. it was mode=replay, ran, closed to 0, and is now being
      * reset for whoever opens it next -- who may not even ask for replay
      * mode again). open() calls load_replay_file() fresh, after this, only
-     * if the new config actually says mode=replay. */
+     * if the new config actually says mode=replay. Freed using
+     * unit->su_ReplayCap -- the PREVIOUS lifetime's actual allocation
+     * size (M14: config-driven, not always SANA2LOOP_MAX_REPLAY_PACKETS
+     * any more) -- which is why this MUST run before su_ReplayCap gets
+     * reset to the default below, same free-before-reset ordering
+     * su_RecordMax's own matching block already uses. */
     if (unit->su_ReplayPackets) {
         /* Matches load_replay_file()'s actual allocation size, not
          * su_ReplayCount (how many of those slots ended up used) -- see
          * that function's own comment for why it's always the full
-         * SANA2LOOP_MAX_REPLAY_PACKETS-sized block. */
-        FreeMem(unit->su_ReplayPackets, SANA2LOOP_MAX_REPLAY_PACKETS * sizeof(struct EchoPacket));
+         * su_ReplayCap-sized block. */
+        FreeMem(unit->su_ReplayPackets, unit->su_ReplayCap * sizeof(struct EchoPacket));
         unit->su_ReplayPackets = NULL;
     }
     if (unit->su_ReplayDueTicks) {
-        FreeMem(unit->su_ReplayDueTicks, SANA2LOOP_MAX_REPLAY_PACKETS * sizeof(ULONG));
+        FreeMem(unit->su_ReplayDueTicks, unit->su_ReplayCap * sizeof(ULONG));
         unit->su_ReplayDueTicks = NULL;
     }
     if (unit->su_ReplayDeliveryCopies) {
@@ -1717,15 +1775,16 @@ static void reset_unit(struct Sana2LoopUnit *unit)
          * before every scheduled record's due tick arrived) -- entries
          * already handed to deliver_packet() are already NULL by then. */
         ULONG i;
-        for (i = 0; i < SANA2LOOP_MAX_REPLAY_PACKETS; i++)
+        for (i = 0; i < unit->su_ReplayCap; i++)
             if (unit->su_ReplayDeliveryCopies[i])
                 FreeMem(unit->su_ReplayDeliveryCopies[i], sizeof(struct EchoPacket));
-        FreeMem(unit->su_ReplayDeliveryCopies, SANA2LOOP_MAX_REPLAY_PACKETS * sizeof(struct EchoPacket *));
+        FreeMem(unit->su_ReplayDeliveryCopies, unit->su_ReplayCap * sizeof(struct EchoPacket *));
         unit->su_ReplayDeliveryCopies = NULL;
     }
     unit->su_ReplayNext  = NULL;
     unit->su_ReplayCount = 0;
     unit->su_ReplayPos   = 0;
+    unit->su_ReplayCap   = SANA2LOOP_MAX_REPLAY_PACKETS;
     unit->su_ReplayMode  = SANA2LOOP_REPLAYMODE_CONSUME;
     unit->su_Tick        = 0;
 
@@ -1779,8 +1838,9 @@ static void list_init(struct List *list)
  * ever builds (SANA2LOOP_MAX_PACKET), a snaplen-truncated record
  * (incl_len != orig_len -- replaying a shortened frame would be replaying
  * something that never really existed on the wire), more records than
- * SANA2LOOP_MAX_REPLAY_PACKETS, or an empty capture (nothing to replay is
- * as much a config mistake as a malformed one here). All open-time
+ * this unit's own su_ReplayCap (M14: `replaycap=`, default
+ * SANA2LOOP_MAX_REPLAY_PACKETS), or an empty capture (nothing to replay
+ * is as much a config mistake as a malformed one here). All open-time
  * failures, per open()'s own comment: unlike a missing CONFIG file
  * (defaults apply), a missing/unreadable REPLAY file has no sensible
  * default to fall back to -- `mode=replay` named a specific source and
@@ -1824,10 +1884,30 @@ static BOOL __attribute__((noinline)) load_replay_file(struct Sana2LoopUnit *uni
     BOOL swapped;
     ULONG count = 0;
     BOOL ok = TRUE;
+    /* M14: cached from unit->su_ReplayCap (already applied by open()
+     * before this call) -- a plain local, not re-read via the pointer on
+     * every use, matching this function's existing style elsewhere.
+     * `cap * sizeof(struct EchoPacket)` below is now a genuine RUNTIME
+     * multiply by a non-power-of-2 constant (SANA2LOOP_MAX_REPLAY_PACKETS
+     * was a compile-time constant pre-M14, so this exact multiply used to
+     * be compile-time-folded, needing no runtime instruction at all) --
+     * the same hazard class this file has hit __mulsi3 link failures from
+     * before (see sld_Units[] indexing's own comment). Checked before
+     * trusting it, same discipline as every other place this file
+     * verifies a compiler-synthesized operation: `make docker` links
+     * clean (no libgcc in this build, so a required __mulsi3 would be a
+     * hard link error, not a silent gap), and neither `nm` nor `objdump`
+     * on the built binary show any mulsi/undefined symbol -- the backend
+     * genuinely synthesizes this one via shift/add, unlike
+     * sizeof(struct Sana2LoopUnit)'s own larger multiply, which didn't
+     * fit that budget. Re-verify the same way if EchoPacket's own size
+     * changes. */
+    ULONG cap = unit->su_ReplayCap;
 
     DOSBase = (struct DosLibrary *)OpenLibrary((STRPTR)"dos.library", 0);
-    if (!DOSBase)
+    if (!DOSBase) {
         return FALSE;
+    }
 
     /* Same pr_WindowPtr suppression as read_unit_config() -- see its
      * comment for why an unassigned/removable-volume-looking path must
@@ -1876,18 +1956,21 @@ static BOOL __attribute__((noinline)) load_replay_file(struct Sana2LoopUnit *uni
         return FALSE;
     }
 
-    /* Always the full SANA2LOOP_MAX_REPLAY_PACKETS-slot allocation, not
-     * sized to the capture's actual record count -- that count isn't known
-     * until the whole file has been read, and a two-pass read (count, then
-     * allocate exactly, then re-read) buys nothing a fixed-size allocation
-     * doesn't already give this device elsewhere (rxqueue, S2_TRACKTYPE,
+    /* Always the full `cap`-slot allocation, not sized to the capture's
+     * actual record count -- that count isn't known until the whole file
+     * has been read, and a two-pass read (count, then allocate exactly,
+     * then re-read) buys nothing a fixed-size allocation doesn't already
+     * give this device elsewhere (rxqueue, S2_TRACKTYPE,
      * S2_ADD/DELMULTICASTADDRESS). reset_unit()'s matching FreeMem() must
-     * use this same size, not su_ReplayCount's -- it's the actual
-     * allocation size, independent of how many slots ended up used.
-     * SANA2LOOP_MAX_REPLAY_PACKETS=4 was picked empirically, not just
-     * "generous" -- and had to be re-checked TWICE, both times via a
-     * temporary AvailMem(MEMF_LARGEST) probe: M8's original guess (32,
-     * ~49KB) reliably failed this exact AllocMem() under bundled AROS
+     * use this same size (via unit->su_ReplayCap, not su_ReplayCount) --
+     * it's the actual allocation size, independent of how many slots
+     * ended up used.
+     *
+     * `cap`'s DEFAULT (SANA2LOOP_MAX_REPLAY_PACKETS=4, when no
+     * `replaycap=` is given) was picked empirically, not just "generous"
+     * -- and had to be re-checked TWICE, both times via a temporary
+     * AvailMem(MEMF_LARGEST) probe: M8's original guess (32, ~49KB)
+     * reliably failed this exact AllocMem() under bundled AROS
      * specifically (a real ROM in true ROM space doesn't pay this cost,
      * but AROS has to load its own Kickstart replacement INTO this
      * profile's 512K+512K chip+fast budget, leaving measurably less free
@@ -1897,17 +1980,20 @@ static BOOL __attribute__((noinline)) load_replay_file(struct Sana2LoopUnit *uni
      * su_ReplayDueTicks/the recording bookkeeping fields, times
      * SANA2LOOP_NUM_UNITS units) ate enough of that headroom that even 8
      * started failing -- and not just from the fixed per-unit growth:
-     * this device's "free memory only at NEXT open, not at close"
-     * design (reset_unit()'s own contract) means a SECOND replay-mode
-     * unit opened later in the same run has to coexist with the FIRST
-     * one's still-held buffer, so the real constraint here is two
-     * simultaneous SANA2LOOP_MAX_REPLAY_PACKETS-sized allocations, not
-     * one. Settled on 4 (~6KB each, ~12KB combined), with real margin to
-     * spare against a budget that keeps shrinking as this device's
-     * per-unit state grows; a future milestone adding more per-unit
-     * fields, or more replay-mode test units, should re-verify this the
-     * same way. */
-    packets = AllocMem(SANA2LOOP_MAX_REPLAY_PACKETS * sizeof(struct EchoPacket), MEMF_CLEAR);
+     * this device's "free memory only at NEXT open, not at close" design
+     * (reset_unit()'s own contract) means a SECOND replay-mode unit
+     * opened later in the same run has to coexist with the FIRST one's
+     * still-held buffer, so the real constraint is two simultaneous
+     * cap-sized allocations, not one. Settled on a default of 4 (~6KB
+     * each, ~12KB combined), with real margin to spare against a budget
+     * that keeps shrinking as this device's per-unit state grows -- and,
+     * as of M14, a unit that needs more than the default no longer
+     * requires a source change at all: `replaycap=N` opts in per-unit,
+     * with the same AvailMem() re-verification discipline applying to
+     * whatever value an operator actually configures against their own
+     * target's real memory budget, not to this device's own compiled-in
+     * default. */
+    packets = AllocMem(cap * sizeof(struct EchoPacket), MEMF_CLEAR);
     if (!packets) {
         Close(file);
         CloseLibrary((struct Library *)DOSBase);
@@ -1916,9 +2002,9 @@ static BOOL __attribute__((noinline)) load_replay_file(struct Sana2LoopUnit *uni
     }
     /* Due ticks: ULONG is power-of-2 sized, so (unlike su_ReplayPackets)
      * indexing this array by a runtime count is safe -- no __mulsi3 risk. */
-    due_ticks = AllocMem(SANA2LOOP_MAX_REPLAY_PACKETS * sizeof(ULONG), MEMF_CLEAR);
+    due_ticks = AllocMem(cap * sizeof(ULONG), MEMF_CLEAR);
     if (!due_ticks) {
-        FreeMem(packets, SANA2LOOP_MAX_REPLAY_PACKETS * sizeof(struct EchoPacket));
+        FreeMem(packets, cap * sizeof(struct EchoPacket));
         Close(file);
         CloseLibrary((struct Library *)DOSBase);
         DOSBase = NULL;
@@ -1935,10 +2021,10 @@ static BOOL __attribute__((noinline)) load_replay_file(struct Sana2LoopUnit *uni
      * from su_ReplayPackets/su_ReplayNext with no ownership transfer and
      * no interrupt involvement, so it needs none of this. */
     if (unit->su_ReplayMode == SANA2LOOP_REPLAYMODE_SCHEDULED) {
-        copies = AllocMem(SANA2LOOP_MAX_REPLAY_PACKETS * sizeof(struct EchoPacket *), MEMF_CLEAR);
+        copies = AllocMem(cap * sizeof(struct EchoPacket *), MEMF_CLEAR);
         if (!copies) {
-            FreeMem(due_ticks, SANA2LOOP_MAX_REPLAY_PACKETS * sizeof(ULONG));
-            FreeMem(packets, SANA2LOOP_MAX_REPLAY_PACKETS * sizeof(struct EchoPacket));
+            FreeMem(due_ticks, cap * sizeof(ULONG));
+            FreeMem(packets, cap * sizeof(struct EchoPacket));
             Close(file);
             CloseLibrary((struct Library *)DOSBase);
             DOSBase = NULL;
@@ -1978,7 +2064,7 @@ static BOOL __attribute__((noinline)) load_replay_file(struct Sana2LoopUnit *uni
             flen = ph.incl_len;
 
             if (ph.incl_len != ph.orig_len || flen < SANA2LOOP_RAW_HDR_SIZE ||
-                flen > SANA2LOOP_MAX_PACKET || count >= SANA2LOOP_MAX_REPLAY_PACKETS) {
+                flen > SANA2LOOP_MAX_PACKET || count >= cap) {
                 ok = FALSE;
                 break;
             }
@@ -2067,10 +2153,10 @@ static BOOL __attribute__((noinline)) load_replay_file(struct Sana2LoopUnit *uni
             for (i = 0; i < count; i++)
                 if (copies[i])
                     FreeMem(copies[i], sizeof(struct EchoPacket));
-            FreeMem(copies, SANA2LOOP_MAX_REPLAY_PACKETS * sizeof(struct EchoPacket *));
+            FreeMem(copies, cap * sizeof(struct EchoPacket *));
         }
-        FreeMem(packets, SANA2LOOP_MAX_REPLAY_PACKETS * sizeof(struct EchoPacket));
-        FreeMem(due_ticks, SANA2LOOP_MAX_REPLAY_PACKETS * sizeof(ULONG));
+        FreeMem(packets, cap * sizeof(struct EchoPacket));
+        FreeMem(due_ticks, cap * sizeof(ULONG));
         return FALSE;
     }
 
@@ -2301,6 +2387,7 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
                                         if this comes back non-empty */
             cfg.recordmax    = unit->su_RecordMax;
             cfg.buffhooks    = unit->su_BuffHooks;
+            cfg.replaycap    = unit->su_ReplayCap;
             if (!read_unit_config(&cfg, unit->su_Index)) {
                 io->io_Error = S2ERR_BAD_ARGUMENT;
                 return;
@@ -2332,6 +2419,10 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
              * matters (avoiding AllocMem() from inside vblank_server()'s
              * real interrupt context). */
             unit->su_ReplayMode = cfg.replaymode;
+            /* M14: applied BEFORE load_replay_file() below for the same
+             * reason su_ReplayMode is -- that function AllocMem()s against
+             * unit->su_ReplayCap directly. */
+            unit->su_ReplayCap = cfg.replaycap;
 
             /* M8: mode=replay's source is loaded once, right here -- same
              * 0->1 determinism boundary as everything else this block

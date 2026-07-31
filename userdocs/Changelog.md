@@ -99,6 +99,14 @@ peer/DNS address queries and `RawMTU` (`S2_GETPEERADDRESS`,
 this device has no real DMA to offer). Plus a new `SanaConform` probe
 tool. See [SANA-II Conformance](SANA-II-Conformance.md).
 
+## M14 — Configurable replay capacity
+
+`replaycap=N` (1–256, default 4) lets you raise or lower the record
+ceiling on a `mode=replay` unit per-unit, instead of living with a
+fixed limit — see [Replay and Record](Replay-and-Record.md#replay). The
+default itself hasn't changed; this only adds an escape hatch for
+captures bigger than 4 records on targets with the memory to spare.
+
 ## What's next
 
 - A proper first tagged release (the M12 packaging pipeline is built and

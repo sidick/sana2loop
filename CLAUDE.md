@@ -517,6 +517,55 @@ documentation only (`userdocs/Installation.md`, `sana2loop.readme`, a new
 tool/test use (unchanged), additionally to `DEVS:Networks/` if/when
 wiring the device into a real stack's own config.
 
+**M14** (`replaycap=` config knob, prompted by a user exploratory
+question about making the replay-record limit configurable): the
+4-record ceiling `mode=replay` units had carried since M8
+(`SANA2LOOP_MAX_REPLAY_PACKETS`) is now a per-unit override,
+`replaycap=1`..`256` (`SANA2LOOP_CONFIG_MAX_REPLAYCAP`), validated at
+config-parse time like every other numeric key; the compiled-in
+constant now means only the DEFAULT when no `replaycap=` is given, not a
+hard ceiling. A RAM-auto-sizing alternative (size the cap to available
+memory instead) was deliberately not pursued -- it would conflict with
+the project's own determinism-by-construction goal, unlike a config
+value the operator controls explicitly. `su_ReplayCap` threads through
+`open()` and `reset_unit()` (same free-before-reset ordering
+`su_RecordMax` already established: free using the PREVIOUS lifetime's
+value before resetting to the default for the next one) and
+`load_replay_file()`, where every one of the 13 call sites that used to
+reference the compile-time constant now uses the per-unit runtime
+value instead -- verified via `nm`/`objdump` on the built binary that
+the resulting `cap * sizeof(struct EchoPacket)` runtime multiply still
+needs no `__mulsi3` (this `-nostdlib`, libgcc-less build's perennial
+hazard, first flagged at M8): no undefined symbol appears, and the link
+itself succeeds, confirming the backend still synthesizes it via
+shift/add. `SANA2LOOP_NUM_UNITS` is now 15 (was 14): a new unit 14
+fixture (`replaycap=0`, out of the valid range) covers only the
+config-validation failure path.
+
+Extensive on-target debugging (stashed-marker technique from the M9
+investigation, `AvailMem(MEMF_LARGEST)` probing, and bisection) showed
+the POSITIVE case -- an actually-raised cap loading more records than
+the default -- reliably fails under bundled AROS specifically, root-
+caused to a genuine memory-budget gap (a third simultaneously-held
+replay buffer, alongside the pre-existing M8/M9 units 9/10's own, never
+freed until next open per this device's documented design, exceeds
+bundled AROS's tight 512K+512K profile at this point in the sequence --
+reproduced even at the historical default cap of 4, proving it's about
+buffer COUNT, not the raised value). Real Kickstart 1.3 confirmed the
+feature itself works correctly (debug-instrumented run: all 6 records
+of a `replaycap=6` capture read back with matching type/length/
+payload). A second attempt relocating the positive case to
+`run-tools.sh`'s more generous session also failed under bundled AROS
+(merely opening the extra unit corrupted the whole session's later file
+reads) while working cleanly under real Kickstart 3.1 via `SanaConform`
+-- confirming this is an AROS environmental ceiling, not a device or
+test-design bug. **Resolution**: the automated on-target suite covers
+only the allocation-free config-validation case (unit 14); the positive
+case is verified functionally correct via real Kickstart 1.3 and 3.1
+locally, consistent with this project's existing AROS-is-a-weaker-
+stand-in stance (see "Testing under Copperline" below). See
+`docs/PLAN.md`'s M14 risk note for the full investigation.
+
 No further milestones remain unscheduled except Aminet packaging's own
 "cut and publish a first tagged release" step (the M12 pipeline itself
 is built and tested, but no tag has been pushed) -- see docs/PLAN.md.

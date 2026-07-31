@@ -770,6 +770,59 @@ last DOS I/O in the session" property every milestone before M13 already
 had by accident. Verified: 3/3 clean `RESULT=PASS` + `RECORD_VERIFY=PASS`
 runs on bundled AROS, 2/2 on real Kickstart 1.3, after the reorder.
 
+## `replaycap=` -- configurable replay-record ceiling (M14)
+
+M8 picked `SANA2LOOP_MAX_REPLAY_PACKETS` empirically (32 -> 16 -> 4,
+see that section above and M9's own two-simultaneous-buffers finding) as
+a single compile-time constant every `mode=replay` unit was stuck with.
+M14 makes that a per-unit override: `replaycap=N`, `1..
+SANA2LOOP_CONFIG_MAX_REPLAYCAP` (256), validated in `parse_config_line()`
+exactly like every other numeric key -- an out-of-range or non-numeric
+value fails the whole `OpenDevice()` at pure config validation, before
+`load_replay_file()` ever runs. `SANA2LOOP_MAX_REPLAY_PACKETS` (4) now
+means only the DEFAULT applied when no `replaycap=` is given; it is no
+longer read anywhere inside `load_replay_file()` itself.
+
+**Threading `su_ReplayCap` follows the exact pattern `su_RecordMax`
+already established**: `open()` seeds `cfg.replaycap` from the unit's
+current (pre-reset) value before `read_unit_config()` runs, then writes
+the parsed result back to `unit->su_ReplayCap` before `load_replay_file()`
+is called. `reset_unit()` frees the previous lifetime's buffers using
+`unit->su_ReplayCap` (the value that was actually active when they were
+allocated) BEFORE resetting the field to `SANA2LOOP_MAX_REPLAY_PACKETS`
+for the next lifetime -- freeing with the wrong (already-reset) size
+would either leak the tail of a larger previous allocation or corrupt
+the heap by claiming a smaller one is bigger than it is.
+
+**Runtime multiply verified safe, again.** `cap * sizeof(struct
+EchoPacket)` inside `load_replay_file()` is now a genuine runtime
+multiplication (`cap` is a per-unit variable, not a compile-time
+constant) -- exactly the class of expression M8 already found compiles
+to an unavailable `__mulsi3` on this `-nostdlib -m68000` build when the
+backend's shift/add synthesis budget is exceeded. Verified safe by
+building and checking the output with `nm`/`objdump`: no `__mulsi3` (or
+any other undefined multiply-helper symbol) appears anywhere in the
+linked binary, and the link itself succeeds -- a real requirement for
+`__mulsi3` in this libgcc-less build would be a hard link failure, not a
+silent miscompile, so a clean link is conclusive here.
+
+**The positive case (a raised cap actually loading more records) is not
+covered by the automated on-target suite** -- only the negative,
+allocation-free validation case is (unit 14, `replaycap=0`). Raising the
+cap needs a real replay-buffer allocation, and a THIRD simultaneously-
+held replay buffer (alongside the pre-existing M8/M9 units 9 and 10,
+never freed until next open per this device's own documented design --
+see "Memory lifetime" below) reliably exceeds bundled AROS's tight
+512K+512K test profile, reproducing even at the historical default cap
+of 4 -- proving the constraint is buffer COUNT under bundled AROS, not
+the cap value. Confirmed functionally correct instead via real Kickstart
+1.3 (debug-instrumented run: a `replaycap=6` capture loads and reads back
+all 6 records correctly) and real Kickstart 3.1 (`SanaConform`). See
+`docs/PLAN.md`'s M14 risk note for the full investigation, including the
+debug-marker methodology (same technique M9's own investigation
+established) and the second, independently-failing attempt to relocate
+the positive case into `run-tools.sh`'s more generous session.
+
 ## `S2_DEVICEQUERY` convention (easy to get backwards)
 
 The caller pre-sets `ios2_StatData->SizeAvailable` to the size of *its own*

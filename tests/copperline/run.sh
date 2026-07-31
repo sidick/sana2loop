@@ -75,9 +75,12 @@ for f in "$HERE"/fixtures/unit*.config; do
     "$XDFTOOL" "$ADF" write "$f" "s/sana2loop/$n.config" > /dev/null
 done
 
-# M8/M9: unit 9's and unit 10's mode=replay configs name these pcap
-# captures via S:sana2loop/*.pcap -- not unit*.config-shaped names, so
-# they don't match the glob above and need their own writes.
+# M8/M9: unit 9/10's mode=replay configs name these pcap captures via
+# S:sana2loop/*.pcap -- not unit*.config-shaped names, so they don't
+# match the glob above and need their own writes. (M14's own
+# replaycap.pcap -- units 14/15's config -- is NOT written here: those
+# units are never opened by run.sh's own harness at all, only by
+# run-tools.sh's; see verify_replaycap.py's own header comment for why.)
 "$XDFTOOL" "$ADF" write "$HERE/fixtures/replay.pcap" "s/sana2loop/replay.pcap" > /dev/null
 "$XDFTOOL" "$ADF" write "$HERE/fixtures/scheduled.pcap" "s/sana2loop/scheduled.pcap" > /dev/null
 
@@ -98,7 +101,7 @@ grep -q '^END' "$OUT" 2>/dev/null || { echo "FAIL: no END marker (raise BENCH?)"
 # just the aggregate RESULT= -- so a regression in one milestone's check
 # names itself instead of being buried in one pass/fail bit. Keep this list
 # in sync with the NAME_* constants in sana2test.c as milestones add more.
-SUBTESTS="online devicequery stationaddress echo offline onevent oneventnow abortio cmdflush bufferhooks delivery configinterface tracktype broadcast multicast multicastaddress raw config crossover faultdrop faultdup faultreorder faultoversilent faultflap replay scheduled record rawmtu peeraddress dnsaddress buffhooks dmahooks"
+SUBTESTS="online devicequery stationaddress echo offline onevent oneventnow abortio cmdflush bufferhooks delivery configinterface tracktype broadcast multicast multicastaddress raw config crossover faultdrop faultdup faultreorder faultoversilent faultflap replay scheduled record rawmtu peeraddress dnsaddress buffhooks dmahooks replaycap"
 fails=0
 for s in $SUBTESTS; do
     grep -q "^SUB=${s}=PASS$" "$OUT" 2>/dev/null || {

@@ -64,6 +64,7 @@ mtu=1400
 | `mode` | `echo`, `crossover`, `replay` | `echo` (`crossover` for units 2 and 3) | What the unit does with traffic. |
 | `peer` | a unit number | itself | Required for `mode=crossover` — the other unit this one is paired with. A `crossover` unit with no distinct peer fails to open. |
 | `replay` | a `dos.library`-openable path | — | Required for `mode=replay` — the `.pcap` capture to load. |
+| `replaycap` | 1–256 | 4 | Maximum records a `mode=replay` unit will load — a capture with more fails the whole open (`S2ERR_BAD_ARGUMENT`). The default (4) is deliberately small (see [Replay and Record](Replay-and-Record.md#replay) for why); raise it per-unit if your capture is bigger and your target has the memory to spare — a value that doesn't actually fit fails with `S2ERR_NO_RESOURCES` instead, since the device can't know your target's free memory in advance. |
 | `replaymode` | `consume`, `scheduled` | `consume` | How a replay unit delivers its loaded records — see [Replay and Record](Replay-and-Record.md). |
 | `record` | a `dos.library`-openable path | — | If set, every packet this unit actually receives (in any mode) is captured to this path as `.pcap`, flushed at last close. |
 | `recordmax` | 1–262144 | 65536 | RAM buffer size (bytes) for `record=`. Once full, further packets are silently not appended (counted, not fatal) — see `S2_GETSPECIALSTATS` in [Replay and Record](Replay-and-Record.md). |
