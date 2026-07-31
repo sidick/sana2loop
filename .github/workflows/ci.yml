@@ -13,7 +13,7 @@
 #                         a computed value.
 #
 #   build               : cross-compiles loopback.device + SanaInfo/SanaDump/
-#                         SanaSend + the Copperline test harness ONCE, running
+#                         SanaSend/SanaConform + the Copperline test harness ONCE, running
 #                         natively *inside* the pinned Bebbo m68k-amigaos-gcc
 #                         image via the job-level `container:` key (not a
 #                         manual `docker run`). Uploads the release-relevant
@@ -136,6 +136,7 @@ jobs:
             build/SanaInfo
             build/SanaDump
             build/SanaSend
+            build/SanaConform
           retention-days: 14
 
       # Separate, short-lived artifact: internal wiring for the smoke-test
@@ -193,7 +194,7 @@ jobs:
         run: sh tests/copperline/run.sh
 
   copperline-smoke-tools-aros:
-    name: Copperline smoke test (SanaDump/SanaSend, bundled AROS)
+    name: Copperline smoke test (SanaDump/SanaSend/SanaConform, bundled AROS)
     needs: build
     runs-on: ubuntu-latest
     env:
@@ -209,7 +210,7 @@ jobs:
           path: build
 
       - name: Restore executable bits
-        run: chmod +x build/loopback.device build/SanaInfo build/SanaDump build/SanaSend
+        run: chmod +x build/loopback.device build/SanaInfo build/SanaDump build/SanaSend build/SanaConform
 
       - uses: actions/setup-python@v7
         with:
@@ -230,9 +231,9 @@ jobs:
 
       # A DELIBERATELY SEPARATE Copperline boot session from run.sh's own
       # (see run-tools.sh's own header comment for why) -- SanaDump/
-      # SanaSend are V36+ tools, so unlike copperline-smoke-aros above,
-      # there is no equivalent real-Kickstart-1.3 lane for this job to be
-      # missing: a real 1.3 ROM cannot run these at all.
+      # SanaSend/SanaConform are V36+ tools, so unlike copperline-smoke-aros
+      # above, there is no equivalent real-Kickstart-1.3 lane for this job
+      # to be missing: a real 1.3 ROM cannot run these at all.
       - name: make copperline-smoke-tools (bundled AROS, no rebuild)
         run: sh tests/copperline/run-tools.sh
 
