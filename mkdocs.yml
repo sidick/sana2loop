@@ -1,10 +1,14 @@
-# User documentation site (MkDocs Material). NOT YET PUBLISHED -- this repo
-# is currently private, so there is no .github/workflows/docs.yml deploying
-# it to GitHub Pages yet (see amiauth's own docs.yml for the pattern to
-# adopt once sana2loop goes public / gets a release tag). Until then this
-# builds locally (`mkdocs serve` / `mkdocs build --strict`) and is checked
-# in CI so it can't silently rot. Developer design notes stay in docs/ and
-# are not part of this site.
+# User documentation site (MkDocs Material), published to GitHub Pages at
+# site_url below via .github/workflows/docs.yml (mike-based versioned
+# deploy, adapted from sibling project amiauth's own docs.yml -- each
+# release tag deploys under its own version plus a floating "latest"
+# alias). First published 2026-07-31, ahead of any release tag, under
+# "v1.0" (matching version.mk's eventual first release version) via that
+# workflow's workflow_dispatch trigger. PRs/pushes to main only get a
+# strict build check (ci.yml's docs-build job) so the site can't silently
+# rot between real publishes -- day-to-day doc edits don't redeploy until
+# the next release tag or a manual dispatch. Developer design notes stay
+# in docs/ and are not part of this site.
 
 site_name: sana2loop
 site_description: A hardware-free SANA-II network device for AmigaOS
@@ -50,6 +54,7 @@ nav:
       - Fault Injection: Fault-Injection.md
       - SanaInfo Reference: SanaInfo-Reference.md
       - SanaDump and SanaSend: SanaDump-and-SanaSend.md
+      - SANA-II Conformance: SANA-II-Conformance.md
   - Help:
       - Troubleshooting and FAQ: Troubleshooting-and-FAQ.md
       - Building and Testing: Building-and-Testing.md

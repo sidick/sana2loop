@@ -52,9 +52,11 @@
 #   docs-build          : strict-builds the MkDocs user-docs site
 #                         (userdocs/) and the AmigaGuide conversion
 #                         (`make guide`) so both stay buildable as pages
-#                         change. Build-only: this repo is private and has
-#                         no gh-pages publish workflow yet (see mkdocs.yml's
-#                         header comment) -- nothing here deploys anywhere.
+#                         change. Build-only, on every push -- the real
+#                         publish (docs.yml, mike-based) only runs on a
+#                         release tag or manual dispatch, so this job's
+#                         job is purely to keep the site from silently
+#                         rotting in between real publishes.
 #
 #   semgrep             : security/quality scan with semgrep's auto rule pack.
 #
@@ -244,9 +246,9 @@ jobs:
           python-version: '3.14'
       - name: Install docs toolchain
         run: pip install -r tools/docs-requirements.txt
-      # Build-only check -- this repo is private and has no publish workflow
-      # yet (see mkdocs.yml's own header comment); this just keeps
-      # userdocs/ from silently rotting until that's activated.
+      # Build-only check on every push -- the real publish (docs.yml) only
+      # runs on a release tag or manual dispatch; this just keeps
+      # userdocs/ from silently rotting in between.
       - name: Strict MkDocs build
         run: mkdocs build --strict
       - name: AmigaGuide conversion

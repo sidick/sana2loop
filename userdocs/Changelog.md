@@ -71,10 +71,35 @@ is a convenient, license-free stand-in for catching *gross* regressions in
 public CI, but it is not a substitute for validating against real
 Kickstart 1.3 before trusting a release claim.
 
+## M10 — Documentation
+
+This site (MkDocs Material), plus an on-Amiga AmigaGuide manual built
+from the same source (`make guide`) — one docs source feeding both. A
+standard AmigaDOS `$VER:` version cookie was also added to the device and
+`SanaInfo` along the way (previously missing entirely).
+
+## M11 — SanaDump and SanaSend
+
+Companion Shell tools for capturing and sending traffic through a unit
+without writing your own program against the device — see
+[SanaDump and SanaSend](SanaDump-and-SanaSend.md).
+
+## M12 — Aminet packaging and release flow
+
+The infrastructure (not yet a shipped release) for packaging and
+publishing tagged versions to Aminet, with a human-approval gate before
+any actual upload.
+
+## M13 — SANA-II Rev 2/3/4/7 conformance
+
+Support for the post-Commodore SANA-II extensions real-world stacks
+probe for: wider buffer-management hooks (`S2_CopyToBuff16/32`),
+peer/DNS address queries and `RawMTU` (`S2_GETPEERADDRESS`,
+`S2_GETDNSADDRESS`), and DMA-capable hooks (accepted, never invoked —
+this device has no real DMA to offer). Plus a new `SanaConform` probe
+tool. See [SANA-II Conformance](SANA-II-Conformance.md).
+
 ## What's next
 
-- **Docs pass** (this site, plus a teaching-reference comment pass through
-  the source) — in progress.
-- `SanaDump`/`SanaSend` — companion Shell tools for capturing and
-  sending traffic without writing your own program against the device.
-- **Aminet packaging** and a proper first tagged release.
+- A proper first tagged release (the M12 packaging pipeline is built and
+  tested, but no version has been tagged/published yet).

@@ -55,6 +55,15 @@ struct ExecBase *SysBase;
 static volatile ULONG g_HookToCount;
 static ULONG g_HookFromCount;
 
+/* M13: separate counters for the buffhooks sub-test's 32-bit hooks (not
+ * reused g_HookToCount/g_HookFromCount above, since that pair also gets
+ * reused within the SAME sub-test to prove the base 8-bit hook is NOT
+ * invoked while the 32-bit ones ARE) and for the dmahooks sub-test's DMA
+ * hook stub (which must never be called at all -- see never_call_dma()). */
+static ULONG g_Hook32ToCount;
+static ULONG g_Hook32FromCount;
+static ULONG g_DMAHookCalls;
+
 /* Every message as a NAMED array, never a raw string literal passed
  * directly to raw_str(). Root cause of an on-target "task held" Guru that
  * reproduced on every run regardless of Kickstart version or floppy image
@@ -119,7 +128,43 @@ static char NAME_FAULTFLAP[]       = "faultflap";
 static char NAME_REPLAY[]          = "replay";
 static char NAME_SCHEDULED[]       = "scheduled";
 static char NAME_RECORD[]          = "record";
+static char NAME_RAWMTU[]          = "rawmtu";
+static char NAME_PEERADDRESS[]     = "peeraddress";
+static char NAME_DNSADDRESS[]      = "dnsaddress";
+static char NAME_BUFFHOOKS[]       = "buffhooks";
+static char NAME_DMAHOOKS[]        = "dmahooks";
 static char DBG_CHECKIO_NULL[]    = "DBG_CHECKIO_NULL=";
+
+/* M13: this toolchain's <devices/sana2.h> lacks Rev 4's RawMTU field --
+ * same gap, same fix as loopback_device.c's own struct Sana2LoopDeviceQuery
+ * (see that file's comment for the full story and why the field order/
+ * types here match the header's existing struct exactly). */
+struct Sana2LoopDeviceQuery {
+    ULONG SizeAvailable;
+    ULONG SizeSupplied;
+    ULONG DevQueryFormat;
+    ULONG DeviceLevel;
+    UWORD AddrFieldSize;
+    ULONG MTU;
+    ULONG BPS;
+    ULONG HardwareType;
+    ULONG RawMTU;
+};
+
+/* M13: this toolchain's <devices/sana2.h> also lacks the Rev 4/7 tag/
+ * command values themselves -- same local #defines as loopback_device.c's
+ * own (see that file's comment for where these numbers come from). */
+#define S2_GETPEERADDRESS    0xC002
+#define S2_GETDNSADDRESS     0xC003
+#define S2_DMACopyToBuff64   (S2_Dummy + 10)
+#define S2_DMACopyFromBuff64 (S2_Dummy + 11)
+
+/* M13: this device's own S2_GETSPECIALSTATS record type for DMA-hook
+ * negotiation (loopback_device.c's SANA2LOOP_SPECIALSTAT_DMA_HOOKS_OFFERED
+ * -- not a spec value at all, SANA-II leaves "special" stat Type values
+ * entirely driver-defined, so the dmahooks sub-test just needs to agree
+ * with the device on this one number). */
+#define SANA2LOOP_SPECIALSTAT_DMA_HOOKS_OFFERED 2
 
 /* M8 replay fixture data -- must exactly match
  * tests/copperline/fixtures/replay.pcap's 3 hand-crafted records (see
@@ -188,6 +233,9 @@ static struct MsgPort *make_port(void);
 static struct IOSana2Req *make_io(struct MsgPort *port);
 static BOOL counting_copy_to(APTR to asm("a0"), APTR from asm("a1"), ULONG size asm("d0"));
 static BOOL counting_copy_from(APTR to asm("a0"), APTR from asm("a1"), ULONG size asm("d0"));
+static BOOL counting_copy_to32(APTR to asm("a0"), APTR from asm("a1"), ULONG size asm("d0"));
+static BOOL counting_copy_from32(APTR to asm("a0"), APTR from asm("a1"), ULONG size asm("d0"));
+static APTR never_call_dma(APTR data asm("a0"));
 static BOOL open_unit0(struct IOSana2Req *io);
 static void send_io(struct IOSana2Req *io);
 static void do_io(struct IOSana2Req *io);
@@ -1708,6 +1756,346 @@ static int test_main(void)
         report(NAME_SCHEDULED, ok, &fails);
     }
 
+    /* --- rawmtu: Rev 4's Sana2DeviceQuery.RawMTU, queried via the local
+     * struct Sana2LoopDeviceQuery (this toolchain's <devices/sana2.h> has
+     * no RawMTU field at all -- see that struct's own comment above).
+     * Echo mode (unit 0, io1): RawMTU == MTU + the same 14-byte
+     * SANA2IOF_RAW allowance M4 already gives raw writes (docs/PLAN.md's
+     * "buffer -> MTU+14"). Replay mode (unit 9, reopened fresh -- M8's
+     * own test already closed it): RawMTU == 0, since a replay unit never
+     * accepts ANY write, raw or otherwise (do_write() rejects it
+     * outright). --- */
+    {
+        struct Sana2LoopDeviceQuery dq;
+        BOOL echo_ok, replay_ok = FALSE;
+        struct MsgPort *port9r = make_port();
+        struct IOSana2Req *io9r = port9r ? make_io(port9r) : NULL;
+
+        dq.SizeAvailable = sizeof(dq);
+        io1->ios2_Req.io_Command = S2_DEVICEQUERY;
+        io1->ios2_StatData = &dq;
+        do_io(io1);
+        echo_ok = (io1->ios2_Req.io_Error == 0) &&
+                  dq.SizeSupplied == sizeof(dq) &&
+                  dq.RawMTU == dq.MTU + 14;
+
+        if (io9r && OpenDevice((STRPTR)DEVICE_NAME, 9, (struct IORequest *)io9r, 0) == 0) {
+            struct Sana2LoopDeviceQuery dq9;
+            dq9.SizeAvailable = sizeof(dq9);
+            io9r->ios2_Req.io_Command = S2_DEVICEQUERY;
+            io9r->ios2_StatData = &dq9;
+            do_io(io9r);
+            replay_ok = (io9r->ios2_Req.io_Error == 0) &&
+                        dq9.SizeSupplied == sizeof(dq9) &&
+                        dq9.RawMTU == 0;
+            CloseDevice((struct IORequest *)io9r);
+        }
+        if (io9r)
+            FreeMem(io9r, sizeof(struct IOSana2Req));
+        if (port9r) {
+            FreeSignal(port9r->mp_SigBit);
+            FreeMem(port9r, sizeof(struct MsgPort));
+        }
+
+        report(NAME_RAWMTU, echo_ok && replay_ok, &fails);
+    }
+
+    /* --- peeraddress: Rev 4's S2_GETPEERADDRESS. Echo mode (unit 0, io1)
+     * has no real peer -- S2ERR_NOT_SUPPORTED. Crossover mode (units 2/3,
+     * reopened fresh -- M6/M7's own tests already closed them): each side
+     * reports the OTHER's real station address as ios2_DstAddr and its
+     * own as ios2_SrcAddr, the same current/factory reuse convention
+     * S2_GETSTATIONADDRESS already established for ios2_SrcAddr/DstAddr,
+     * applied here to local/peer instead. --- */
+    {
+        BOOL echo_ok, cross_ok = FALSE;
+        struct MsgPort *port2p = make_port();
+        struct IOSana2Req *io2p = port2p ? make_io(port2p) : NULL;
+        struct MsgPort *port3p = make_port();
+        struct IOSana2Req *io3p = port3p ? make_io(port3p) : NULL;
+
+        io1->ios2_Req.io_Command = S2_GETPEERADDRESS;
+        do_io(io1);
+        echo_ok = (io1->ios2_Req.io_Error == S2ERR_NOT_SUPPORTED);
+
+        if (io2p && io3p &&
+            OpenDevice((STRPTR)DEVICE_NAME, 2, (struct IORequest *)io2p, 0) == 0 &&
+            OpenDevice((STRPTR)DEVICE_NAME, 3, (struct IORequest *)io3p, 0) == 0) {
+            int i;
+            UBYTE addr2[SANA2_MAX_ADDR_BYTES], addr3[SANA2_MAX_ADDR_BYTES];
+
+            io2p->ios2_Req.io_Command = S2_GETSTATIONADDRESS;
+            do_io(io2p);
+            for (i = 0; i < SANA2_MAX_ADDR_BYTES; i++)
+                addr2[i] = io2p->ios2_SrcAddr[i];
+            io3p->ios2_Req.io_Command = S2_GETSTATIONADDRESS;
+            do_io(io3p);
+            for (i = 0; i < SANA2_MAX_ADDR_BYTES; i++)
+                addr3[i] = io3p->ios2_SrcAddr[i];
+
+            io2p->ios2_Req.io_Command = S2_GETPEERADDRESS;
+            do_io(io2p);
+            io3p->ios2_Req.io_Command = S2_GETPEERADDRESS;
+            do_io(io3p);
+
+            cross_ok = (io2p->ios2_Req.io_Error == 0) && (io3p->ios2_Req.io_Error == 0);
+            for (i = 0; cross_ok && i < SANA2_MAX_ADDR_BYTES; i++) {
+                if (io2p->ios2_SrcAddr[i] != addr2[i] || io2p->ios2_DstAddr[i] != addr3[i])
+                    cross_ok = FALSE;
+                if (io3p->ios2_SrcAddr[i] != addr3[i] || io3p->ios2_DstAddr[i] != addr2[i])
+                    cross_ok = FALSE;
+            }
+
+            CloseDevice((struct IORequest *)io2p);
+            CloseDevice((struct IORequest *)io3p);
+        }
+        if (io2p)
+            FreeMem(io2p, sizeof(struct IOSana2Req));
+        if (io3p)
+            FreeMem(io3p, sizeof(struct IOSana2Req));
+        if (port2p) {
+            FreeSignal(port2p->mp_SigBit);
+            FreeMem(port2p, sizeof(struct MsgPort));
+        }
+        if (port3p) {
+            FreeSignal(port3p->mp_SigBit);
+            FreeMem(port3p, sizeof(struct MsgPort));
+        }
+
+        report(NAME_PEERADDRESS, echo_ok && cross_ok, &fails);
+    }
+
+    /* --- dnsaddress: Rev 4's S2_GETDNSADDRESS -- this device has no real
+     * DNS concept on any unit, so every unit succeeds with both addresses
+     * zero-filled (docs/PLAN.md's own M13 section: "zero-fill per spec
+     * when N/A") -- deliberately a DIFFERENT not-applicable shape from
+     * peeraddress's hard S2ERR_NOT_SUPPORTED above: a real stack has to
+     * tolerate both. --- */
+    {
+        BOOL ok;
+        int i;
+        io1->ios2_Req.io_Command = S2_GETDNSADDRESS;
+        do_io(io1);
+        ok = (io1->ios2_Req.io_Error == 0);
+        for (i = 0; ok && i < SANA2_MAX_ADDR_BYTES; i++)
+            if (io1->ios2_SrcAddr[i] != 0 || io1->ios2_DstAddr[i] != 0)
+                ok = FALSE;
+        report(NAME_DNSADDRESS, ok, &fails);
+    }
+
+    /* --- buffhooks: Rev 2/3 hook-width negotiation, actually INVOKED not
+     * just accepted -- unit 13's fixture config (buffhooks=32) makes this
+     * unit prefer S2_CopyToBuff32/S2_CopyFromBuff32 for whichever opener
+     * actually negotiated them (pick_copy_to_buff()/pick_copy_from_buff()
+     * in loopback_device.c), falling back to an opener's own base hook
+     * when it didn't. io13a negotiates ONLY the 32-bit hooks; io13b
+     * negotiates ONLY the base 8-bit ones -- two independent opens on the
+     * same echo unit, same two-independent-opens pattern the
+     * "bufferhooks" sub-test already established for the base hooks
+     * alone. Two exchanges cover all four combinations (negotiated-and-
+     * used / not-negotiated-falls-back, on both the read and write
+     * side). --- */
+    {
+        BOOL ok = TRUE;
+        struct MsgPort *port13a = make_port();
+        struct IOSana2Req *io13a = port13a ? make_io(port13a) : NULL;
+        struct MsgPort *port13b = make_port();
+        struct IOSana2Req *io13b = port13b ? make_io(port13b) : NULL;
+
+        if (io13a && io13b) {
+            struct TagItem tags32[3];
+            struct TagItem tagsbase[3];
+
+            tags32[0].ti_Tag  = S2_CopyToBuff32;
+            tags32[0].ti_Data = (ULONG)counting_copy_to32;
+            tags32[1].ti_Tag  = S2_CopyFromBuff32;
+            tags32[1].ti_Data = (ULONG)counting_copy_from32;
+            tags32[2].ti_Tag  = TAG_DONE;
+            tags32[2].ti_Data = 0;
+            io13a->ios2_BufferManagement = tags32;
+
+            tagsbase[0].ti_Tag  = S2_CopyToBuff;
+            tagsbase[0].ti_Data = (ULONG)counting_copy_to;
+            tagsbase[1].ti_Tag  = S2_CopyFromBuff;
+            tagsbase[1].ti_Data = (ULONG)counting_copy_from;
+            tagsbase[2].ti_Tag  = TAG_DONE;
+            tagsbase[2].ti_Data = 0;
+            io13b->ios2_BufferManagement = tagsbase;
+
+            if (OpenDevice((STRPTR)DEVICE_NAME, 13, (struct IORequest *)io13a, 0) == 0 &&
+                OpenDevice((STRPTR)DEVICE_NAME, 13, (struct IORequest *)io13b, 0) == 0) {
+                int i;
+                BOOL a_ok, b_ok;
+
+                io13a->ios2_Req.io_Command = S2_ONLINE;
+                do_io(io13a);
+
+                g_Hook32ToCount = g_Hook32FromCount = 0;
+                g_HookToCount = g_HookFromCount = 0;
+
+                /* Exchange A: io13a reads (negotiated 32-bit), io13b
+                 * writes (base only -- never negotiated 32-bit, must
+                 * still work via graceful fallback). */
+                io13a->ios2_Req.io_Command = CMD_READ;
+                io13a->ios2_Data = readbuf;
+                io13a->ios2_PacketType = 0x3200;
+                io13a->ios2_Req.io_Flags = 0;
+                send_io(io13a);
+
+                io13b->ios2_Req.io_Command = CMD_WRITE;
+                for (i = 0; i < SANA2_MAX_ADDR_BYTES; i++)
+                    io13b->ios2_DstAddr[i] = (i < 6) ? (UBYTE)(0x30 + i) : 0;
+                io13b->ios2_PacketType = 0x3200;
+                io13b->ios2_DataLength = sizeof(PAYLOAD) - 1;
+                io13b->ios2_Data = (APTR)PAYLOAD;
+                do_io(io13b);
+
+                WaitIO((struct IORequest *)io13a);
+                a_ok = (io13a->ios2_Req.io_Error == 0) && (io13b->ios2_Req.io_Error == 0) &&
+                       g_Hook32ToCount >= 1 && g_HookToCount == 0 &&
+                       g_HookFromCount >= 1 && g_Hook32FromCount == 0 &&
+                       io13a->ios2_DataLength == sizeof(PAYLOAD) - 1;
+                if (a_ok)
+                    for (i = 0; i < (int)io13a->ios2_DataLength; i++)
+                        if (readbuf[i] != (UBYTE)PAYLOAD[i])
+                            a_ok = FALSE;
+
+                g_Hook32ToCount = g_Hook32FromCount = 0;
+                g_HookToCount = g_HookFromCount = 0;
+
+                /* Exchange B: io13b reads (base only -- never negotiated
+                 * 32-bit, must still work via graceful fallback), io13a
+                 * writes (negotiated 32-bit). */
+                io13b->ios2_Req.io_Command = CMD_READ;
+                io13b->ios2_Data = readbuf;
+                io13b->ios2_PacketType = 0x3201;
+                io13b->ios2_Req.io_Flags = 0;
+                send_io(io13b);
+
+                io13a->ios2_Req.io_Command = CMD_WRITE;
+                for (i = 0; i < SANA2_MAX_ADDR_BYTES; i++)
+                    io13a->ios2_DstAddr[i] = (i < 6) ? (UBYTE)(0x31 + i) : 0;
+                io13a->ios2_PacketType = 0x3201;
+                io13a->ios2_DataLength = sizeof(PAYLOAD) - 1;
+                io13a->ios2_Data = (APTR)PAYLOAD;
+                do_io(io13a);
+
+                WaitIO((struct IORequest *)io13b);
+                b_ok = (io13b->ios2_Req.io_Error == 0) && (io13a->ios2_Req.io_Error == 0) &&
+                       g_HookToCount >= 1 && g_Hook32ToCount == 0 &&
+                       g_Hook32FromCount >= 1 && g_HookFromCount == 0 &&
+                       io13b->ios2_DataLength == sizeof(PAYLOAD) - 1;
+                if (b_ok)
+                    for (i = 0; i < (int)io13b->ios2_DataLength; i++)
+                        if (readbuf[i] != (UBYTE)PAYLOAD[i])
+                            b_ok = FALSE;
+
+                ok = a_ok && b_ok;
+                CloseDevice((struct IORequest *)io13a);
+                CloseDevice((struct IORequest *)io13b);
+            } else {
+                ok = FALSE;
+            }
+        } else {
+            ok = FALSE;
+        }
+        if (io13a)
+            FreeMem(io13a, sizeof(struct IOSana2Req));
+        if (io13b)
+            FreeMem(io13b, sizeof(struct IOSana2Req));
+        if (port13a) {
+            FreeSignal(port13a->mp_SigBit);
+            FreeMem(port13a, sizeof(struct MsgPort));
+        }
+        if (port13b) {
+            FreeSignal(port13b->mp_SigBit);
+            FreeMem(port13b, sizeof(struct MsgPort));
+        }
+
+        report(NAME_BUFFHOOKS, ok, &fails);
+    }
+
+    /* --- dmahooks: Rev 7 DMA hook negotiation -- accepted/recorded at
+     * open() time (su_DMAHooksOffered), surfaced via S2_GETSPECIALSTATS
+     * as SANA2LOOP_SPECIALSTAT_DMA_HOOKS_OFFERED, but NEVER actually
+     * invoked (this device always gracefully declines DMA -- see
+     * apply_buffer_mgmt_tags()'s own comment in loopback_device.c). A
+     * normal read/write exchange through an open that offered a DMA hook
+     * must still complete correctly via the base hook, with the DMA stub
+     * left uncalled. --- */
+    {
+        BOOL ok = TRUE;
+        struct MsgPort *port14 = make_port();
+        struct IOSana2Req *io14 = port14 ? make_io(port14) : NULL;
+
+        if (io14) {
+            struct TagItem tagsdma[2];
+            tagsdma[0].ti_Tag  = S2_DMACopyToBuff32;
+            tagsdma[0].ti_Data = (ULONG)never_call_dma;
+            tagsdma[1].ti_Tag  = TAG_DONE;
+            tagsdma[1].ti_Data = 0;
+            io14->ios2_BufferManagement = tagsdma;
+
+            if (OpenDevice((STRPTR)DEVICE_NAME, 0, (struct IORequest *)io14, 0) == 0) {
+                struct {
+                    struct Sana2SpecialStatHeader hdr;
+                    struct Sana2SpecialStatRecord recs[2];
+                } stats;
+                int i, found_dma = 0;
+
+                g_DMAHookCalls = 0;
+
+                io14->ios2_Req.io_Command = CMD_READ;
+                io14->ios2_Data = readbuf;
+                io14->ios2_PacketType = 0x0DA0;
+                io14->ios2_Req.io_Flags = 0;
+                send_io(io14);
+
+                io2->ios2_Req.io_Command = CMD_WRITE;
+                for (i = 0; i < SANA2_MAX_ADDR_BYTES; i++)
+                    io2->ios2_DstAddr[i] = (i < 6) ? (UBYTE)(0xDA + i) : 0;
+                io2->ios2_PacketType = 0x0DA0;
+                io2->ios2_DataLength = sizeof(PAYLOAD) - 1;
+                io2->ios2_Data = (APTR)PAYLOAD;
+                do_io(io2);
+
+                WaitIO((struct IORequest *)io14);
+                ok = (io14->ios2_Req.io_Error == 0) && (io2->ios2_Req.io_Error == 0) &&
+                     g_DMAHookCalls == 0 &&
+                     io14->ios2_DataLength == sizeof(PAYLOAD) - 1;
+                if (ok)
+                    for (i = 0; i < (int)io14->ios2_DataLength; i++)
+                        if (readbuf[i] != (UBYTE)PAYLOAD[i])
+                            ok = FALSE;
+
+                stats.hdr.RecordCountMax = 2;
+                io1->ios2_Req.io_Command = S2_GETSPECIALSTATS;
+                io1->ios2_StatData = &stats;
+                do_io(io1);
+                if (io1->ios2_Req.io_Error == 0)
+                    for (i = 0; i < (int)stats.hdr.RecordCountSupplied; i++)
+                        if (stats.recs[i].Type == SANA2LOOP_SPECIALSTAT_DMA_HOOKS_OFFERED &&
+                            stats.recs[i].Count >= 1)
+                            found_dma = 1;
+                ok = ok && (io1->ios2_Req.io_Error == 0) && found_dma;
+
+                CloseDevice((struct IORequest *)io14);
+            } else {
+                ok = FALSE;
+            }
+        } else {
+            ok = FALSE;
+        }
+        if (io14)
+            FreeMem(io14, sizeof(struct IOSana2Req));
+        if (port14) {
+            FreeSignal(port14->mp_SigBit);
+            FreeMem(port14, sizeof(struct MsgPort));
+        }
+
+        report(NAME_DMAHOOKS, ok, &fails);
+    }
+
     /* --- record: unit 11 (`record=S:sana2loop/recorded.pcap`,
      * recordmax=4096) taps 3 known echo writes into a RAM buffer, flushed
      * to that file at CloseDevice() (last close). No queued reader is
@@ -1842,6 +2230,39 @@ static BOOL counting_copy_from(APTR to asm("a0"), APTR from asm("a1"), ULONG siz
     CopyMem(from, to, size);
     g_HookFromCount++;
     return TRUE;
+}
+
+/* M13: registered as S2_CopyToBuff32/S2_CopyFromBuff32 for the buffhooks
+ * sub-test -- same ABI as the base 8-bit hooks above (confirmed by
+ * wiki.amigaos.net's own "Revision 2+3" page: "the same calling interface
+ * as for S2_CopyToBuff or S2_CopyFromBuff, respectively"). */
+static BOOL counting_copy_to32(APTR to asm("a0"), APTR from asm("a1"), ULONG size asm("d0"))
+{
+    CopyMem(from, to, size);
+    g_Hook32ToCount++;
+    return TRUE;
+}
+
+static BOOL counting_copy_from32(APTR to asm("a0"), APTR from asm("a1"), ULONG size asm("d0"))
+{
+    CopyMem(from, to, size);
+    g_Hook32FromCount++;
+    return TRUE;
+}
+
+/* M13: registered as S2_DMACopyToBuff32 for the dmahooks sub-test. Must
+ * NEVER actually be called -- this device always gracefully declines Rev 7
+ * DMA hooks (see apply_buffer_mgmt_tags()'s own comment in
+ * loopback_device.c), so a real write/read exchange through an open that
+ * offered this must complete normally through the base hook while this
+ * stays uncalled. The real DMA hook calling convention doesn't matter
+ * here since it's never invoked either way -- this signature is a
+ * plausible guess, not a confirmed one. */
+static APTR never_call_dma(APTR data asm("a0"))
+{
+    (void)data;
+    g_DMAHookCalls++;
+    return NULL;
 }
 
 /* Every request in this harness is reused across many commands (two

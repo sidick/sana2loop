@@ -42,7 +42,9 @@ should be zeroed, not left as garbage, when a driver fills an address.
 | `S2_ONLINE` / `S2_OFFLINE` | `CMD_NONSTD+16/17` | caller | flips unit state, fires queued `S2_ONEVENT`s |
 | `S2_ONEVENT` | `CMD_NONSTD+14` | caller | see below |
 | `S2_GETGLOBALSTATS` | `CMD_NONSTD+13` | caller | copies `struct Sana2DeviceStats` whole (no `SizeAvailable`/`SizeSupplied` negotiation, unlike `S2_DEVICEQUERY`) |
-| `S2_GETSPECIALSTATS` | `CMD_NONSTD+12` | caller | zero records unless `record=<path>` (M9) is active AND has actually dropped a packet to `recordmax` -- then one record, `Type=SANA2LOOP_SPECIALSTAT_RECORD_OVERFLOW`, `Count`=packets dropped |
+| `S2_GETSPECIALSTATS` | `CMD_NONSTD+12` | caller | up to 2 records (M13 added the 2nd): `Type=SANA2LOOP_SPECIALSTAT_RECORD_OVERFLOW` if `record=<path>` (M9) has dropped a packet to `recordmax`, `Type=SANA2LOOP_SPECIALSTAT_DMA_HOOKS_OFFERED` (M13) if any open negotiated a Rev 7 DMA hook; zero records if neither |
+| `S2_GETPEERADDRESS` (M13) | `0xC002` (local `#define` -- not in this toolchain's header) | caller | `ios2_SrcAddr`/`DstAddr` = local/peer station address; crossover mode only, else `S2ERR_NOT_SUPPORTED` |
+| `S2_GETDNSADDRESS` (M13) | `0xC003` (ditto) | caller | always succeeds, both addresses zero-filled (no DNS concept on any mode) |
 
 ## Delivery precedence (`deliver_packet()`, M2)
 
@@ -627,6 +629,147 @@ loaded replay array is NOT individually-owned per record.
   either wait on independent evidence of the real side effect, or always
   reap via `AbortIO()`+`WaitIO()` regardless of what `CheckIO()` claims.
 
+## SANA-II Rev 2/3/4/7 additions (M13)
+
+These revisions were never part of any vendor NDK release -- SANA-II's own
+original spec is Commodore's, and its post-Commodore extensions live only
+as informal documentation on wiki.amigaos.net (authored largely by Olaf
+Barthel). Confirmed empirically: the bundled AROS-derived
+`devices/sana2.h` this project's toolchain ships already has Rev 2/3's
+`S2_CopyToBuff16/32`/`S2_CopyFromBuff16/32`/`S2_DMACopyToBuff32/FromBuff32`
+tag values (`S2_Dummy+4` through `+9`) and the `0xc000`/`0xc001` NSD-style
+command numbers for `S2_ADD/DELMULTICASTADDRESSES` (plural, the batch-list
+variants) -- but nothing from Rev 4 or the rest of Rev 7. Where the header
+was silent, `loopback_device.c` and every tool that needs the same values
+(`sana2test.c`, `sanaconform.c`) each carry their own local `#define`s,
+cross-checked against wiki.amigaos.net directly rather than trusted from
+memory.
+
+**Rev 2/3 -- buffer-hook width negotiation, genuinely invoked, not just
+accepted.** `S2_CopyToBuff16/32`/`S2_CopyFromBuff16/32` use the *exact
+same* calling convention as the base `S2_CopyToBuff`/`S2_CopyFromBuff`
+hooks (confirmed by wiki.amigaos.net's "Revision 2+3" page: "the same
+calling interface as ... respectively") -- the only difference is an
+alignment hint a driver is free to ignore ("advisory only and may be
+ignored by the driver for any data buffer at any time"). `apply_buffer_
+mgmt_tags()` records whichever of the four an opener supplies (`NULL` if
+not offered) alongside the existing base-hook slots. A new per-unit
+config knob, `buffhooks=8|16|32` (default `8` -- meaning "always the base
+hook", so every milestone before M13 is byte-for-byte unaffected), then
+picks which width `pick_copy_to_buff()`/`pick_copy_from_buff()` actually
+invoke for that unit's traffic -- but only if the specific opener
+involved actually negotiated that width; one that didn't falls back to
+its own base hook transparently, the same graceful-decline path a real
+driver takes. This is the "stack actually invoking it" half of Rev 2/3
+conformance the proposal calls for -- accepting the tag at `OpenDevice()`
+time is necessary but not sufficient to prove a driver really uses it.
+
+**Rev 4 -- `S2_GETPEERADDRESS`/`S2_GETDNSADDRESS`, `RawMTU`.** Command
+values `0xC002`/`0xC003` (quoted from wiki.amigaos.net's "Revision 4"
+page, and independently corroborated: they continue the exact `0xc000`/
+`0xc001` sequence already in the bundled header). `ios2_SrcAddr`/
+`ios2_DstAddr` reuse convention: local/peer for `S2_GETPEERADDRESS`
+(same "one address pair, two different meanings depending on command"
+pattern `S2_GETSTATIONADDRESS` already established for current/factory),
+primary/secondary DNS server for `S2_GETDNSADDRESS`. Only crossover mode
+has a real peer (echo's "peer" is itself; replay has no live link at
+all) -- both other modes fail `S2ERR_NOT_SUPPORTED`, matching `do_write()`'s
+own established precedent for "not a supported operation on this unit's
+current mode". `S2_GETDNSADDRESS` has no real concept on any mode this
+device supports at all, so it deliberately takes the *other* shape of
+"not applicable" instead: zero-filled addresses with `io_Error` staying
+0 (success) -- a real stack has to gracefully tolerate both an outright
+`S2ERR_NOT_SUPPORTED` and a soft "supported, nothing to report", so this
+device now demonstrates both on purpose. `RawMTU` extends
+`struct Sana2DeviceQuery` past `HardwareType` -- since the bundled header
+doesn't have the field at all, `loopback_device.c` (and every tool that
+queries it) each carry a local `struct Sana2LoopDeviceQuery` with the
+identical byte layout plus `RawMTU` appended, written only when the
+caller's own `SizeAvailable` covers the extended struct's full size --
+the exact growth-safe negotiation `SizeAvailable`/`SizeSupplied` exists
+for in the first place (see `S2_DEVICEQUERY` convention below). Value:
+`MTU + 14` for echo/crossover (the identical number M4's own
+`SANA2IOF_RAW` allowance already uses -- `RawMTU` is that same number,
+just given a name), `0` for replay-mode units (no raw-write support
+there at all, "0" being the spec's own documented value for "not
+supported").
+
+**Rev 7 -- DMA hooks, accepted and counted, never invoked.** No published
+numeric constant exists anywhere for `S2_DMACopyToBuff64`/
+`S2_DMACopyFromBuff64` (Rev 7's own doc names the tags but never gives
+hex values) -- `S2_Dummy+10`/`+11` here is this project's own inferred
+continuation of the bundled header's existing `+4`..`+9` sequence, not a
+confirmed spec value. Harmless if wrong: this device only ever *records*
+a DMA hook pointer (as an opaque `APTR`, never a typed function pointer
+-- the real DMA calling convention doesn't need to be nailed down when
+nothing ever calls through it), never invokes one. A hardware-less RAM
+loopback has nothing to hand a DMA-capable buffer address to in the
+first place, and declining is fully spec-legal ("up to the driver to
+decide if it can use DMA for this buffer and it shall fall back to the
+standard CPU callbacks if necessary"). To make that a genuinely testable
+claim rather than a silent no-op, every open that supplies at least one
+DMA tag bumps a new per-unit counter (`su_DMAHooksOffered`), surfaced via
+`S2_GETSPECIALSTATS` as a new record type
+(`SANA2LOOP_SPECIALSTAT_DMA_HOOKS_OFFERED = 2`, alongside M9's existing
+`SANA2LOOP_SPECIALSTAT_RECORD_OVERFLOW = 1`) -- a caller can confirm the
+driver correctly *recognized* the negotiation even though it always
+gracefully falls back for the actual copy.
+
+**New probe tool: `SanaConform`.** A model-citizen conformance/quirk tool
+(`src/tools/sanaconform.c`, V36+/2.0+ like the other companion tools)
+exercising both directions PLAN.md's M13 section asks for against a real
+running unit: opens with every Rev 2/3/7 hook tag offered (does
+`OpenDevice()` accept them all without erroring?), queries `S2_DEVICEQUERY`
+for `RawMTU` and `S2_GETPEERADDRESS`/`S2_GETDNSADDRESS` (graceful
+fallback either way is a PASS, not just success), and runs a real
+self-echo round trip through instrumented counting hooks to report
+*which* negotiated width the driver actually chose. Deliberately does its
+own manual `OpenDevice()` with a 9-tag list rather than reusing
+`sana2open.c`'s shared 3-tag helper (`S2_CopyToBuff`/`CopyFromBuff`/
+`PacketFilter` only) -- extending that fixed-size array for one tool's
+specialized probing wasn't worth complicating SanaDump/SanaSend's own
+simpler, stable contract. The self-echo check uses a bounded
+`Delay()`+`CheckIO()` poll (~1 second), not a blocking `WaitIO()` --
+a crossover-mode (or otherwise non-self-delivering) unit will never
+satisfy it, and that's itself a meaningful, gracefully-reported result,
+not a probe hang. Verified on-target via `tests/copperline/run-tools.sh`
+(bundled AROS; no real-Kickstart-1.3 equivalent, same as SanaDump/
+SanaSend -- this is a V36+ tool, a real 1.3 ROM cannot run it at all):
+its own stdout is redirected to a file (Copperline's serial capture never
+sees a normal AmigaDOS CLI program's stdout, only direct hardware serial
+writes) and grep-checked post-run for expected marker lines.
+
+**Real, non-obvious finding from building the on-target test coverage for
+this milestone**: adding a 5th on-target sub-test cluster that performs a
+*successful* `dos.library` file `Read()` (the new `buffhooks` sub-test's
+`unit13.config` fixture) **after** M9's `record` sub-test's own flushed-
+and-closed `recorded.pcap` file, in the same Copperline boot session,
+reliably corrupted `recorded.pcap`'s data blocks on the host-side ADF --
+`xdftool ... type` on it post-run failed with `FSError: Invalid FileData
+Block`, even though the guest's own serial output showed every `SUB=`
+line and `RESULT=PASS` cleanly, and the disk was nowhere near full (~7%
+used). Root-caused by elimination, not by inspecting Copperline's own
+source: not a device bug (the exact same buffhooks logic, exercised in
+isolation via a temporary debug build, produced entirely correct
+in-guest results); not a raw file-count effect (adding a 14th fixture
+file that the guest never actually opens -- confirmed via a throwaway
+`unit99.config` nothing ever references -- left `recorded.pcap` intact);
+not a timeout-truncation effect (raising `BENCH` well past what the
+guest actually needs made no difference). The one variable that DID
+matter: whether `read_unit_config()` performed a real, successful
+`Open()`+`Read()` of a NEW file late in the session, after
+`recorded.pcap` was already flushed and closed. This points at a
+Copperline/AROS floppy write-back ordering quirk -- likely a cached
+track/block buffer for the earlier file getting disturbed by a later,
+unrelated file read before the emulator's `--benchmark-until` cutoff
+ends the session -- not something this project's own device or test
+code controls. **Fixed by reordering, not by touching device code**:
+`sana2test.c`'s whole M13 sub-test block now runs *before* M9's `record`
+sub-test, restoring the same "the file-write-then-verify test is the
+last DOS I/O in the session" property every milestone before M13 already
+had by accident. Verified: 3/3 clean `RESULT=PASS` + `RECORD_VERIFY=PASS`
+runs on bundled AROS, 2/2 on real Kickstart 1.3, after the reorder.
+
 ## `S2_DEVICEQUERY` convention (easy to get backwards)
 
 The caller pre-sets `ios2_StatData->SizeAvailable` to the size of *its own*
@@ -705,11 +848,18 @@ The protocol (from `devices/sana2.h`, `utility/tagitem.h`):
    `S2ERR_NO_RESOURCES` / `ios2_WireError = S2WERR_BUFF_ERROR`, not a
    crash or a silently-wrong copy.
 
-Genuinely later-phase, and not implemented yet: **invoking these hooks from
-interrupt context** as an opt-in fault knob (SANA-II requires hooks to be
-interrupt-safe; testing that a consumer's hooks actually are is real
-value), and the `S2_CopyTo/FromBuff16/32`/`S2_DMACopyTo/FromBuff32` Rev 7
-variants (recorded nowhere -- no consumer of them exists in this device).
+**M13 update**: the `S2_CopyTo/FromBuff16/32` (Rev 2/3) and
+`S2_DMACopyTo/FromBuff32/64` (Rev 7) variants are no longer unimplemented
+-- see the dedicated "SANA-II Rev 2/3/4/7 additions (M13)" section below
+for the full story (negotiation, actual invocation, and why the DMA hooks
+are recorded but deliberately never called).
+
+Genuinely later-phase, still not implemented: **invoking the base hooks
+from interrupt context** as an opt-in fault knob (SANA-II requires hooks
+to be interrupt-safe; testing that a consumer's hooks actually are is
+real value, distinct from M9's `vblank_server()` already doing exactly
+this for scheduled-replay/record delivery -- this would be a *configurable*
+knob making EVERY delivery interrupt-driven, not just those two modes).
 
 ## Memory lifetime: no low-memory participation, fail-fast allocation, and the expunge()-leak fix
 

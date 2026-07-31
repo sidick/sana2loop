@@ -39,12 +39,26 @@ the technical detail behind each one.
 | M7 | ✅ Done | Fault injection: xorshift32 + full pipeline + forced offline/online events + PMTUD black hole | `src/loopback_device.c`, harness (droppct=100 never completes; duppct=100 → 2 reads; fixed-seed reorder → assert exact permutation) |
 | M8 | ✅ Done | pcap core (`src/pcap.h`, both endians) + consume-mode replay; commit fixture bytes | `src/pcap.h`, `src/loopback_device.c`, `fixtures/`, harness |
 | M9 | ✅ Done | VBlank tick server, tick-scheduled replay, RAM record + close-flush, interrupt-context-hook knob, 68000 per-packet overhead measurement (VBlank-count bracketing, tracked not gated). Record test: `run.sh` extracts written pcap off the ADF post-run via xdftool and byte-compares — **verify early that Copperline persists floppy writes to the image**. AROS CI lane's earlier hang was root-caused to a bundled-AROS `CheckIO()`/`WaitIO()` false-completion bug (harness-side fix, `reap_interrupt_io()`) — see risk note below | `src/loopback_device.c`, `run.sh` |
-| M10 | ✅ Done | Docs pass: teaching-reference comments through the source (the top-of-file overview was still describing "Phase 1" only -- rewritten to cover every mode/feature through M9; a real, previously-missing `$VER:` cookie added to both the device and `SanaInfo` along the way, since accurately documenting "check your version" needs one to actually exist), README, sana2-notes refresh (one stale `S2_GETSPECIALSTATS` table row fixed). Stood up `userdocs/` (11 pages, MkDocs Material, adopting sibling project amiauth's pattern in preference to narrator.wyoming's) alongside `tools/docs2guide.py` (adapted from amiauth's own, algorithm unchanged) producing an on-Amiga AmigaGuide manual (`make guide`) from the same source -- one docs source feeding both. **Not yet published**: this repo is currently private, so no `.github/workflows/docs.yml` gh-pages publish step exists yet (see mkdocs.yml's own header comment) -- `mkdocs build --strict` + `make guide` run as a CI build-only check (`docs-build` job) so the site can't silently rot before publishing is activated | `src/loopback_device.c`, `src/sanainfo.c`, `src/pcap.h`, `README.md`, `docs/sana2-notes.md`, new `userdocs/`, `mkdocs.yml`, `tools/docs2guide.py`, `tools/docs-requirements.txt`, `Makefile`, `.github/workflows/ci.yml` |
+| M10 | ✅ Done | Docs pass: teaching-reference comments through the source (the top-of-file overview was still describing "Phase 1" only -- rewritten to cover every mode/feature through M9; a real, previously-missing `$VER:` cookie added to both the device and `SanaInfo` along the way, since accurately documenting "check your version" needs one to actually exist), README, sana2-notes refresh (one stale `S2_GETSPECIALSTATS` table row fixed). Stood up `userdocs/` (11 pages, MkDocs Material, adopting sibling project amiauth's pattern in preference to narrator.wyoming's) alongside `tools/docs2guide.py` (adapted from amiauth's own, algorithm unchanged) producing an on-Amiga AmigaGuide manual (`make guide`) from the same source -- one docs source feeding both. Published later (2026-07-31, see the pre-release-verification note below) at https://sidick.github.io/sana2loop/ via `.github/workflows/docs.yml`; `mkdocs build --strict` + `make guide` still run as a CI build-only check (`docs-build` job) on every push so the site can't silently rot between real publishes | `src/loopback_device.c`, `src/sanainfo.c`, `src/pcap.h`, `README.md`, `docs/sana2-notes.md`, new `userdocs/`, `mkdocs.yml`, `tools/docs2guide.py`, `tools/docs-requirements.txt`, `Makefile`, `.github/workflows/ci.yml` |
 | M11 | ✅ Done | Tools: `src/tools/pcapio.c` (dos.library-based, not stdio -- see its own comment for why: clib2's `fopen()` reliably failed under Copperline's minimal Startup-Sequence boot where plain dos.library `Open()` didn't), `sana2open.c` (model-citizen real buffer-management hooks), `SanaDump`, `SanaSend`; `host/make_fixtures.py` + `host/lint_pcap.py` (scapy); canonical corpus (ARP, DHCP, TCP handshake) in top-level `fixtures/`. On-target round-trip test (`tests/copperline/run-tools.sh`, a *separate* Copperline boot session from the device's own `run.sh` -- see that file's own comment: the device's "never free replay buffers at close" design leaves too little memory for a second clib2 program in the same session) -- see risk note below for the two real, non-obvious findings this surfaced | new `src/tools/*`, `host/*`, `fixtures/`, `Makefile`, `tests/copperline/run-tools.sh` + fixtures |
-| M12 | | Aminet packaging + release flow, adopting sibling project amiauth's pattern (in preference to narrator.wyoming's simpler one, since amiauth's is the more tried-and-tested of the two): tag-driven `release.yml` that verifies the pushed tag matches `version.mk` and the `.readme`'s `Version:` field before doing anything else, cross-builds via the pinned Docker image, greps the built binary for its `$VER` string, packages via `make dist` (building a real, archive-capable `lha` from source -- Ubuntu's/Homebrew's is extract-only), validates the readme with `aminet-release-action` in `validate-only` mode, creates the GitHub release (curated notes from the `.readme` for the first release, `--generate-notes` once there's real tag-to-tag history to diff), and only then hands off to a *separate* job gated on a GitHub Environment requiring manual approval for the actual (irreversible-ish) Aminet FTP upload -- human-in-the-loop by construction, not an afterthought | `Makefile`, `version.mk`, `.github/workflows/release.yml`, release docs |
-| M13 | | SANA-II Rev 2/3/4/7 conformance coverage (see its own section below) + a conformance/quirk probe tool exercising both directions (driver advertising vs stack actually invoking) with graceful-fallback checks | `src/loopback_device.c`, new probe tool, harness |
+| M12 | ✅ Done | Aminet packaging + release flow, adopting sibling project amiauth's pattern (in preference to narrator.wyoming's simpler one, since amiauth's is the more tried-and-tested of the two): tag-driven `release.yml` that verifies the pushed tag matches `version.mk` and `sana2loop.readme`'s `Version:` field before doing anything else, cross-builds via `make docker`, greps all four built binaries for their `$VER` strings, packages via `make dist` (new `Makefile` `lha`/`dist` targets building a real, archive-capable `lha` from the same pinned `jca02266/lha` source commit amiauth uses -- Ubuntu's/Homebrew's `lha` is Lhasa, extract-only), validates the readme with `aminet-release-action` in `validate-only` mode, creates the GitHub release (curated notes sourced from `sana2loop.readme`'s own intro + Features section for the first release, `--generate-notes` once there's real tag-to-tag history to diff), and only then hands off to a *separate* job gated on the `aminet` GitHub Environment for the actual (irreversible-ish) Aminet FTP upload -- human-in-the-loop by construction, not an afterthought. See risk note below for two real gaps this surfaced (private-repo Environment protection limits, and the pre-existing V36-vs-V37 compatibility wording this milestone's own readme draft got wrong before a user catch fixed it) | `Makefile`, `sana2loop.readme` (new), `.github/workflows/release.yml` (new) |
+| M13 | ✅ Done | SANA-II Rev 2/3/4/7 conformance coverage: buffer-hook negotiation genuinely INVOKED not just accepted (`S2_CopyTo/FromBuff16/32`, new `buffhooks=8\|16\|32` config knob), Rev 4 `S2_GETPEERADDRESS`/`S2_GETDNSADDRESS` + `Sana2DeviceQuery.RawMTU` (all missing from this toolchain's own `<devices/sana2.h>` -- local `#define`s sourced from wiki.amigaos.net, cross-checked against the header's own existing `0xc000`/`0xc001` sequence), Rev 7 DMA hooks accepted+counted (`su_DMAHooksOffered`, new `S2_GETSPECIALSTATS` record type) but never invoked (spec-legal graceful decline -- this device has no real DMA to offer). New `SanaConform` probe tool (`src/tools/sanaconform.c`) exercising both directions (driver advertising vs. stack actually invoking) with graceful-fallback checks against a real running unit. `SANA2LOOP_NUM_UNITS` now 14 (was 13): unit 13 is a new `buffhooks=32` fixture. See risk note below for a real, non-device Copperline/AROS quirk this surfaced (and fixed via test reordering, not device code) | `src/loopback_device.c`, `src/tools/sanaconform.c` (new), `Makefile`, `tests/copperline/sana2test.c`, `tests/copperline/run.sh`, `tests/copperline/run-tools.sh`, `tests/copperline/tools-startup-sequence.txt`, `tests/copperline/fixtures/unit13.config` (new), `docs/sana2-notes.md`, `userdocs/Configuration-Reference.md`, `userdocs/SANA-II-Conformance.md` (new) |
 
 ## SANA-II conformance coverage: Rev 2/3/4/7 additions
+
+**Status: done as of M13** (see the milestone table above and
+`docs/sana2-notes.md`'s own "SANA-II Rev 2/3/4/7 additions (M13)" section
+for what actually shipped). One deliberate scope note against the
+original plan below: Rev 7's DMA hooks are recorded and counted but
+never INVOKED at all (a hardware-less RAM loopback has nothing to hand a
+DMA-capable buffer address to), so there is no "rejection" call whose
+`ios2_WireError` needs setting -- declining to call a hook in the first
+place isn't a failure path, it's the spec-legal default every driver is
+allowed to take ("shall fall back to standard CPU callbacks if
+necessary"). Kept as originally planned: this section's own
+S2ERR_MTU_EXCEEDED-for-raw-writes idea was already covered by M4's
+existing MTU+14 raw-write allowance (RawMTU just gives that number a
+name), so no separate new fault-injection knob was needed for it.
 
 loopback.device and the conformance/quirk probe should exercise the
 post-Commodore SANA-II revisions (as documented by Olaf Barthel on the
@@ -211,6 +225,94 @@ proper.
   by code review, not on-target testing; verified the fix doesn't
   regress anything via `make copperline-smoke` (bundled AROS) and
   `run-tools.sh`, both still green.
+- **M12's `sana2loop.readme` first draft stated the companion tools'
+  floor as "Kickstart 2.0 (V36)"** -- technically the API-level fact
+  (`CreateMsgPort()`/`CreateIORequest()` are indeed V36+ Exec calls, per
+  `src/sanainfo.c`'s own header comment) but a real regression from what
+  `userdocs/Installation.md` already documented correctly: V36 (bare
+  Kickstart 2.0) only ever existed in unreleased pre-2.04 hardware, so
+  "2.04 (V37) or later" is the only realistic, testable floor to publish
+  as a compatibility claim. Caught by the user reviewing the draft, not
+  self-caught -- fixed to match `userdocs/Installation.md`'s existing
+  wording; no other files needed changing since that page already had it
+  right.
+- ~~The `aminet` GitHub Environment's required-reviewer protection rule
+  could not be provisioned~~ -- **resolved 2026-07-31**: `gh api` first
+  returned 422 ("Please ensure the billing plan supports the required
+  reviewers protection rule") because the repo was still private at the
+  time -- GitHub only allows required-reviewer environment protection on
+  private repos on a paid plan (Team/Enterprise); sibling project
+  amiauth's own `aminet` environment only ever worked because that repo
+  is public. The repo went public the same day (independent of this
+  milestone's own scope), and re-running the identical `gh api` call
+  immediately succeeded with no other change needed -- the `aminet`
+  environment now has `sidick` as a required reviewer, matching amiauth's
+  own setup exactly. The `aminet` job will now genuinely pause for manual
+  approval on any real tag push, as originally designed.
+- **M13's on-target test coverage surfaced a real, non-device Copperline/
+  AROS floppy write-back ordering quirk.** Adding a 5th sub-test cluster
+  that performs a genuinely successful `dos.library` `Read()` of a NEW
+  fixture file (`unit13.config`, for the new `buffhooks` sub-test) AFTER
+  M9's `record` sub-test's own already-flushed-and-closed `recorded.pcap`,
+  in the same Copperline boot session, reliably corrupted
+  `recorded.pcap`'s data blocks on the host-side ADF -- `xdftool ... type`
+  on it post-run failed with `FSError: Invalid FileData Block`, even
+  though the guest's own serial capture showed every `SUB=` line and
+  `RESULT=PASS` cleanly and the disk was nowhere near full (~7% used).
+  Root-caused by elimination: NOT a device bug (the identical buffhooks
+  logic, isolated via a temporary debug build, produced entirely correct
+  in-guest results); NOT a raw file-count effect (a throwaway 14th
+  fixture file the guest never actually opens left `recorded.pcap`
+  intact); NOT a timeout-truncation effect (raising `BENCH` well past
+  what the guest needs made no difference). The one variable that
+  mattered: whether `read_unit_config()` performed a real, successful
+  `Open()`+`Read()` of a new file LATE in the session, after
+  `recorded.pcap` was already flushed and closed -- pointing at a
+  Copperline/AROS floppy write-back ordering quirk (likely a cached
+  track/block buffer for the earlier file getting disturbed by a later,
+  unrelated file read before `--benchmark-until`'s cutoff ends the
+  session), not something this project's own code controls either side
+  of. **Fixed by reordering `sana2test.c`'s sub-tests, not by touching
+  device code**: the whole M13 block now runs BEFORE M9's `record`
+  sub-test, restoring the "the file-write-then-verify test is the last
+  DOS I/O in the session" property every milestone before M13 already had
+  by accident. Verified: 3/3 clean `RESULT=PASS` + `RECORD_VERIFY=PASS`
+  runs on bundled AROS, 2/2 on real Kickstart 1.3, after the reorder. See
+  `docs/sana2-notes.md`'s M13 section for the full investigation.
+- **Pre-release verification (2026-07-31)**: prompted by the user asking
+  to test against a real Kickstart 3.1 ROM at least once before launch,
+  and to confirm the real SANA-II install-directory convention. `run.sh`
+  against real 3.1 passed 100% clean first try. `run-tools.sh` against
+  the same ROM did not -- a real, pre-existing (not M13-introduced) bug:
+  `tools-startup-sequence.txt`'s `Wait 2` needs `C:Wait`, which the
+  minimal test disk never actually contains; bundled AROS silently
+  tolerates this, real Kickstart 3.1 hangs indefinitely at that line
+  (root-caused via bisection to the same "silently waits forever for a
+  human" class of hazard as the M5-documented `ENV:`-unassigned hang, not
+  a device bug). Fixed by removing `Wait 2` (unneeded -- SanaSend's write
+  is synchronous and echo delivery completes inside that same call, so
+  SanaDump's own signal is already pending by the time the script
+  continues); verified 3/3 clean on both bundled AROS and real 3.1
+  afterward. Separately, confirmed against three independent real-world
+  sources (a driver's own install docs, classic AmiTCP 3.0's installer
+  text, and AmiTCP_NG's own troubleshooting notes verbatim -- "OpenDevice()
+  does not search DEVS:Networks/, so you must name the driver by full
+  path") that `DEVS:Networks/` is the real convention a network stack's
+  own config expects a SANA-II driver in, separate from and not
+  superseding plain `DEVS:` (what this project's own bare-name
+  `OpenDevice()` calls need). Fixed via documentation only -- no
+  `OpenDevice()` call site changed, given the real (if unconfirmed either
+  way) risk that a full-path open might not reliably find/reuse an
+  already-resident device the way echo/crossover's shared-instance design
+  requires. See CLAUDE.md's matching entry for the full account of both.
+  Same day: published the M10 docs site (built but never deployed until
+  now) at https://sidick.github.io/sana2loop/ via a new
+  `.github/workflows/docs.yml` (mike-based versioned deploy, adapted from
+  amiauth's own -- see mkdocs.yml's header comment), deployed under
+  version `v1.0` (matching `version.mk`'s eventual first release) ahead
+  of any real release tag, then updated every "not yet published"
+  reference (`README.md`, `sana2loop.readme`, `CLAUDE.md`) to the live
+  URL.
 
 ## Verification
 

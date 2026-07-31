@@ -45,6 +45,8 @@ identically on a stock A500 or an accelerated/emulated machine.
 | [Replay and Record](Replay-and-Record.md) | Playing back a pcap capture, and recording real traffic to one |
 | [Fault Injection](Fault-Injection.md) | Drop/duplicate/truncate/reorder/oversilent/online-flap knobs |
 | [SanaInfo Reference](SanaInfo-Reference.md) | The bundled CLI query/online-toggle tool |
+| [SanaDump and SanaSend](SanaDump-and-SanaSend.md) | Capturing and sending traffic through a unit from the Shell |
+| [SANA-II Conformance](SANA-II-Conformance.md) | Rev 2/3/4/7 support, and the `SanaConform` probe tool |
 | [Troubleshooting and FAQ](Troubleshooting-and-FAQ.md) | Common problems and questions |
 | [Building and Testing](Building-and-Testing.md) | Cross-building the device and running the on-target test suite |
 | [Changelog](Changelog.md) | What landed in each milestone |

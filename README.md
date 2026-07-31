@@ -2,36 +2,43 @@
 
 `loopback.device` -- a hardware-free SANA-II network device for AmigaOS
 providing echo, crossover, and pcap replay/capture modes, plus companion
-Shell tools (`SanaInfo`, `SanaDump`, `SanaSend`). No null/dummy SANA-II
-device has existed before this, despite being the obvious first tool for
-testing any network stack, shim, or driver-consuming software --
-deterministically, with zero hardware and zero emulator network support
-required.
+Shell tools (`SanaInfo`, `SanaDump`, `SanaSend`, `SanaConform`). No
+null/dummy SANA-II device has existed before this, despite being the
+obvious first tool for testing any network stack, shim, or
+driver-consuming software -- deterministically, with zero hardware and
+zero emulator network support required.
 
 Targets plain 68000 and Kickstart 1.3 -- a test tool's value is
 universality, and nothing here needs more.
 
-**Full user documentation is in [`userdocs/`](userdocs/)** (built as a
-MkDocs site, not yet published -- see [Building and Testing](userdocs/Building-and-Testing.md)
-to build it locally, or `make guide` for an on-Amiga AmigaGuide version).
-See [`docs/PLAN.md`](docs/PLAN.md) for the full milestone plan and
-[`docs/sana2-notes.md`](docs/sana2-notes.md) for the SANA-II protocol
+**Full user documentation: [sidick.github.io/sana2loop](https://sidick.github.io/sana2loop/)**
+(source in [`userdocs/`](userdocs/), built as a MkDocs site -- see
+[Building and Testing](userdocs/Building-and-Testing.md) to build it
+locally, or `make guide` for an on-Amiga AmigaGuide version of the same
+content). See [`docs/PLAN.md`](docs/PLAN.md) for the full milestone plan
+and [`docs/sana2-notes.md`](docs/sana2-notes.md) for the SANA-II protocol
 reference and implementation notes this project has accumulated, and
 `CLAUDE.md` for the fuller day-to-day project state.
 
 ## Status
 
-**M0 through M11 done and validated on-target** under the Copperline
+**M0 through M13 done.** M0-M11 validated on-target under the Copperline
 emulator against both a real Kickstart 1.3 ROM and a bundled,
 redistributable AROS Kickstart replacement: echo and crossover modes, real
 SANA-II buffer-management hooks, per-unit configuration files, a fault
 injection pipeline (drop/duplicate/truncate/reorder/oversilent/online-flap),
 pcap replay (on-demand and real-time-scheduled), pcap recording, and the
-`SanaDump`/`SanaSend` companion tools.
+`SanaDump`/`SanaSend` companion tools. M12 built the Aminet packaging +
+release pipeline (`make dist`, `.github/workflows/release.yml`) and
+verified it locally end-to-end; the repo is now public and the `aminet`
+GitHub Environment has its required-reviewer gate in place. M13 added
+SANA-II Rev 2/3/4/7 conformance (wider buffer-management hooks, peer/DNS
+address queries, `RawMTU`, Rev 7 DMA hook negotiation) plus a new
+`SanaConform` probe tool. **No release tag has been pushed yet** -- see
+[`docs/PLAN.md`](docs/PLAN.md)'s
+milestone table for what's left.
 
-Not yet done: Aminet packaging and a first tagged release. See
-[`docs/PLAN.md`](docs/PLAN.md)'s milestone table for the exact remaining
-scope.
+Not yet done: cutting and publishing a first tagged release.
 
 ## AI-assisted development
 
@@ -43,7 +50,7 @@ BSD-licensed and open for review.
 ## Build
 
 ```
-make docker   # cross-compile build/loopback.device + SanaInfo/SanaDump/SanaSend
+make docker   # cross-compile build/loopback.device + SanaInfo/SanaDump/SanaSend/SanaConform
               # (needs Docker; no local toolchain required)
 ```
 

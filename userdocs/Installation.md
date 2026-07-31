@@ -22,9 +22,10 @@ sana2loop has **no installer**: copy two files into place and it works.
 ## Installing
 
 1. Copy `loopback.device` to `DEVS:`.
-2. Copy `SanaInfo` to `C:` (optional — only needed if you want to query the
+2. Copy `SanaInfo` (and `SanaDump`/`SanaSend`/`SanaConform`, if you want
+   them) to `C:` — optional, only needed if you want to query/drive the
    device from the Shell rather than through your own program's
-   `OpenDevice()` calls).
+   `OpenDevice()` calls.
 
 That's it — no reboot, no `LoadModule`/`RemDevice` dance needed for a
 freshly-copied device file. A program opens it the normal SANA-II way:
@@ -32,6 +33,22 @@ freshly-copied device file. A program opens it the normal SANA-II way:
 ```
 OpenDevice("loopback.device", unit, (struct IORequest *)io, 0)
 ```
+
+**If you want a real network stack (AmiTCP, AmiTCP_NG, Roadshow) to find
+and use it too**, also copy `loopback.device` to `DEVS:Networks/` — the
+conventional location a stack's own network configuration expects a
+SANA-II driver in (e.g. AmiTCP's installer: *"select the SANA2-device for
+your network card you previously copied to Devs:Networks/"*). This is a
+**separate** step from the one above, not a replacement for it: Exec's
+`OpenDevice()` only ever searches plain `DEVS:` for a bare device name
+(confirmed directly against AmiTCP_NG's own troubleshooting notes: *"
+`OpenDevice()` does not search `DEVS:Networks/`, so you must name the
+driver by full path"*) — a real stack's own config instead constructs and
+opens the **full path** (`DEVS:Networks/loopback.device`) itself once you
+point it there. So: `SanaInfo`/`SanaDump`/`SanaSend`/`SanaConform` and any
+hand-written test program (which all open it by the plain name) need the
+copy in `DEVS:`; a real stack's config wizard needs the copy in
+`DEVS:Networks/`. Keep both if you're doing both kinds of testing.
 
 Unit numbers **0 through 11** are available (12 units are pre-allocated).
 Unit 0 defaults to standalone **echo** mode; units 2 and 3 default to a

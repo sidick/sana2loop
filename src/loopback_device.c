@@ -90,6 +90,54 @@
  * matching this file's existing minimal-include-set philosophy. */
 #define MODE_OLDFILE 1005
 
+/* M13: SANA-II Rev 4/7 additions this toolchain's <devices/sana2.h> doesn't
+ * have at all -- unlike MODE_OLDFILE above (a real header just not
+ * included), Hyperion never shipped an updated devices/sana2.h past the
+ * original Commodore Rev 2/3 spec (confirmed: the bundled header already
+ * has S2_CopyToBuff16/32 and S2_DMACopyToBuff32/FromBuff32 at S2_Dummy+4..
+ * +9, and S2_ADDMULTICASTADDRESSES/S2_DELMULTICASTADDRESSES at 0xc000/
+ * 0xc001 -- but nothing past that). SANA-II Rev 4-7 live only as informal
+ * documentation on wiki.amigaos.net (see docs/PLAN.md's M13 section) --
+ * these commands were never in any vendor NDK release.
+ *
+ * S2_GETPEERADDRESS/S2_GETDNSADDRESS values (0xC002/0xC003) are quoted
+ * directly from wiki.amigaos.net's "Revision 4" page and independently
+ * corroborated by continuing the exact 0xc000/0xc001 NSD-style sequence
+ * the bundled header already has for S2_ADD/DELMULTICASTADDRESSES -- high
+ * confidence. S2_DMACopyToBuff64/S2_DMACopyFromBuff64 have NO published
+ * numeric constant anywhere found (Rev 7's own doc names the tags but
+ * never gives hex values) -- S2_Dummy+10/+11 here is this project's own
+ * inferred continuation of the existing +4..+9 sequence, not a confirmed
+ * spec value. Harmless if wrong: this device only ever RECORDS a DMA hook
+ * pointer, never invokes one (see apply_buffer_mgmt_tags()) -- a real
+ * caller using the true value we guessed wrong just means we silently
+ * don't recognize that particular tag, functionally identical to
+ * correctly declining it, since every DMA hook is declined regardless. */
+#define S2_GETPEERADDRESS    0xC002
+#define S2_GETDNSADDRESS     0xC003
+#define S2_DMACopyToBuff64   (S2_Dummy + 10)
+#define S2_DMACopyFromBuff64 (S2_Dummy + 11)
+
+/* Rev 4's RawMTU field extends struct Sana2DeviceQuery past what this
+ * toolchain's header defines (see above) -- same layout as the real
+ * struct (confirmed identical field order/types against both the bundled
+ * AROS-derived header and a real 1994 Commodore devices/sana2.h) with
+ * RawMTU appended, per wiki.amigaos.net's "Revision 4" page. Binary
+ * layout is what matters for real interop, not field spelling, so this
+ * reuses the bundled header's own field names/types rather than the
+ * wiki's slightly different ones (LONG vs ULONG is immaterial on m68k). */
+struct Sana2LoopDeviceQuery {
+    ULONG SizeAvailable;
+    ULONG SizeSupplied;
+    ULONG DevQueryFormat;
+    ULONG DeviceLevel;
+    UWORD AddrFieldSize;
+    ULONG MTU;
+    ULONG BPS;
+    ULONG HardwareType;
+    ULONG RawMTU;   /* Rev 4 -- new field */
+};
+
 #define STR(s)  #s
 #define XSTR(s) STR(s)
 
@@ -126,11 +174,13 @@
  * config fixture layout for the current allocation: 1=M5 mtu override,
  * 2/3=M6 crossover pair (also M7's oversilent/PMTUD pair, since neither
  * milestone's own assertions care about the other's config additions
- * there), 4=M5 malformed-config-fails, 5=M7 droppct, 6=M7 duppct,
- * 7=M7 reorder, 8=M7 offlineafter/onlineafter, 9=M8 consume-mode replay,
- * 10=M9 scheduled replay, 11=M9 RAM record, 12=M11 SanaDump/SanaSend
- * on-target round-trip). */
-#define SANA2LOOP_NUM_UNITS   13
+ * there; M13 also reuses this pair, read-only, for its S2_GETPEERADDRESS
+ * success-path check), 4=M5 malformed-config-fails, 5=M7 droppct,
+ * 6=M7 duppct, 7=M7 reorder, 8=M7 offlineafter/onlineafter,
+ * 9=M8 consume-mode replay (M13 also reuses this, read-only, for its
+ * RawMTU=0-on-replay check), 10=M9 scheduled replay, 11=M9 RAM record,
+ * 12=M11 SanaDump/SanaSend on-target round-trip, 13=M13 buffhooks=32. */
+#define SANA2LOOP_NUM_UNITS   14
 #define SANA2LOOP_DEFAULT_MTU 1500
 /* Ethernet dst[6]+src[6]+type[2] -- the allowance SANA2IOF_RAW adds on top
  * of su_MTU (docs/PLAN.md's M4 entry: "SANA2IOF_RAW (buffer -> MTU+14)").
@@ -309,6 +359,13 @@ struct DosLibrary *DOSBase;
  * leaves "special" (per-driver) stat Type values entirely undefined; only
  * one exists so far. */
 #define SANA2LOOP_SPECIALSTAT_RECORD_OVERFLOW 1
+/* M13: how many opens on this unit supplied at least one Rev 7 DMA
+ * buffer-management hook (S2_DMACopyTo/FromBuff32/64) -- surfaces that
+ * this driver correctly recognized and recorded the negotiation even
+ * though it always gracefully declines to actually use DMA (spec-legal:
+ * "up to the driver... shall fall back to standard CPU callbacks if
+ * necessary" -- see docs/PLAN.md's M13 section). */
+#define SANA2LOOP_SPECIALSTAT_DMA_HOOKS_OFFERED 2
 
 struct UnitConfig {
     ULONG mtu;
@@ -336,6 +393,11 @@ struct UnitConfig {
                             contract as replay_path. */
     ULONG recordmax;    /* M9: RAM record buffer cap in bytes, default
                             SANA2LOOP_DEFAULT_RECORDMAX */
+    ULONG buffhooks;    /* M13: 8 (default)/16/32 -- which negotiated Rev
+                            2/3 buffer-management hook width this unit
+                            actually INVOKES (see pick_copy_to_buff()/
+                            pick_copy_from_buff()), not just accepts at
+                            open() time */
 };
 
 static char CONFIG_ENV_PREFIX[] = "ENV:sana2loop/unit";
@@ -582,6 +644,26 @@ static BOOL parse_config_line(struct UnitConfig *cfg, const char *line, const ch
             return FALSE;
         cfg->recordmax = value;
         return TRUE;
+    }
+    if (key_matches(line, eq, "buffhooks")) {
+        /* M13: which negotiated Rev 2/3 hook width this unit actually
+         * invokes -- see pick_copy_to_buff()/pick_copy_from_buff(). Only
+         * takes effect for an opener that actually supplied the matching
+         * S2_CopyTo/FromBuff16/32 tag; one that didn't falls back to the
+         * base hook transparently (graceful decline, not an error). */
+        if (key_matches(eq + 1, line_end, "8")) {
+            cfg->buffhooks = 8;
+            return TRUE;
+        }
+        if (key_matches(eq + 1, line_end, "16")) {
+            cfg->buffhooks = 16;
+            return TRUE;
+        }
+        if (key_matches(eq + 1, line_end, "32")) {
+            cfg->buffhooks = 32;
+            return TRUE;
+        }
+        return FALSE;
     }
     return FALSE; /* unrecognized key -- fail-fast, not silently ignored */
 }
@@ -889,6 +971,17 @@ struct Sana2LoopUnit {
                                           already captured stays intact;
                                           surfaced via S2_GETSPECIALSTATS
                                           per docs/PLAN.md decision #7 */
+    /* M13: Rev 2/3/7 buffer-hook negotiation. su_BuffHooks (config
+       `buffhooks=8|16|32`, default 8) picks which negotiated hook width
+       this unit actually INVOKES -- see pick_copy_to_buff()/
+       pick_copy_from_buff(); an opener that didn't supply the configured
+       width's tag falls back to the base 8-bit hook transparently.
+       su_DMAHooksOffered counts opens that supplied at least one Rev 7
+       DMA hook (S2_DMACopyTo/FromBuff32/64) -- recorded/recognized, never
+       invoked (see apply_buffer_mgmt_tags()); surfaced via
+       S2_GETSPECIALSTATS as SANA2LOOP_SPECIALSTAT_DMA_HOOKS_OFFERED. */
+    ULONG       su_BuffHooks;
+    ULONG       su_DMAHooksOffered;
     struct List su_PendingReads;      /* queued, TYPED CMD_READ IORequests */
     struct List su_OrphanReads;       /* queued S2_READORPHAN IORequests (untyped) */
     struct List su_PendingData;       /* packets awaiting a CMD_READ/S2_READORPHAN,
@@ -944,6 +1037,30 @@ struct Sana2LoopOpen {
                                                   a specific queued read
                                                   accept a packet regardless
                                                   of destination address */
+    /* M13: Rev 2/3 optional buffer-hook widths -- NULL unless this opener's
+       own tag list actually supplied the matching tag (advisory only, per
+       spec: "may be ignored by the driver for any data buffer at any
+       time"). Same calling convention as slo_CopyToBuff/slo_CopyFromBuff
+       above (confirmed by wiki.amigaos.net's "Revision 2+3" page: "the
+       same calling interface as for S2_CopyToBuff or S2_CopyFromBuff,
+       respectively"), so Sana2CopyFunc is the right type here too --
+       nothing new to verify via objdump beyond M1's own existing proof. */
+    Sana2CopyFunc          slo_CopyToBuff16;
+    Sana2CopyFunc          slo_CopyFromBuff16;
+    Sana2CopyFunc          slo_CopyToBuff32;
+    Sana2CopyFunc          slo_CopyFromBuff32;
+    /* M13: Rev 7 DMA hooks -- recorded as opaque APTR, never invoked (see
+       apply_buffer_mgmt_tags()'s own comment for why the real calling
+       convention doesn't need to be nailed down: a hardware-less RAM
+       loopback has nothing to hand a DMA-capable buffer address to in the
+       first place, and spec-legally declining is always correct: "up to
+       the driver... shall fall back to standard CPU callbacks if
+       necessary"). NULL unless this opener's own tag list supplied the
+       matching tag. */
+    APTR                   slo_DMACopyToBuff32;
+    APTR                   slo_DMACopyFromBuff32;
+    APTR                   slo_DMACopyToBuff64;
+    APTR                   slo_DMACopyFromBuff64;
 };
 
 /*-----------------------------------------------------------
@@ -1032,6 +1149,20 @@ static void apply_buffer_mgmt_tags(struct Sana2LoopOpen *slo, struct TagItem *ta
     slo->slo_CopyToBuff   = default_copy;
     slo->slo_CopyFromBuff = default_copy;
     slo->slo_PacketFilter = NULL;
+    /* M13: Rev 2/3/7 optional hooks all default to NULL (already true from
+     * open()'s MEMF_CLEAR allocation, but set explicitly here too -- same
+     * defensive, don't-rely-on-caller-zeroing discipline slo_PacketFilter
+     * above already follows). NULL means "not negotiated by this opener":
+     * pick_copy_to_buff()/pick_copy_from_buff() fall back to the base hook
+     * above, and the Rev 7 DMA hooks are simply never invoked at all. */
+    slo->slo_CopyToBuff16      = NULL;
+    slo->slo_CopyFromBuff16    = NULL;
+    slo->slo_CopyToBuff32      = NULL;
+    slo->slo_CopyFromBuff32    = NULL;
+    slo->slo_DMACopyToBuff32   = NULL;
+    slo->slo_DMACopyFromBuff32 = NULL;
+    slo->slo_DMACopyToBuff64   = NULL;
+    slo->slo_DMACopyFromBuff64 = NULL;
 
     if (!tags)
         return;
@@ -1057,14 +1188,73 @@ static void apply_buffer_mgmt_tags(struct Sana2LoopOpen *slo, struct TagItem *ta
         case S2_PacketFilter:
             slo->slo_PacketFilter = (struct Hook *)tags->ti_Data;
             break;
-        /* S2_CopyTo/FromBuff16/32, S2_DMACopyTo/FromBuff32 (Rev 7 extras):
-         * no consumer of them exists in this device, so recorded nowhere;
-         * falling to default (ignored) here is correct, not a gap. */
+        /* M13: Rev 2/3 16/32-bit hooks -- same calling convention as the
+         * base hooks above (see slo_CopyToBuff16's own field comment),
+         * genuinely invoked by pick_copy_to_buff()/pick_copy_from_buff()
+         * when `buffhooks=` asks for this width and this opener actually
+         * supplied it. */
+        case S2_CopyToBuff16:
+            slo->slo_CopyToBuff16 = (Sana2CopyFunc)tags->ti_Data;
+            break;
+        case S2_CopyFromBuff16:
+            slo->slo_CopyFromBuff16 = (Sana2CopyFunc)tags->ti_Data;
+            break;
+        case S2_CopyToBuff32:
+            slo->slo_CopyToBuff32 = (Sana2CopyFunc)tags->ti_Data;
+            break;
+        case S2_CopyFromBuff32:
+            slo->slo_CopyFromBuff32 = (Sana2CopyFunc)tags->ti_Data;
+            break;
+        /* M13: Rev 7 DMA hooks -- recorded only (never invoked, see
+         * slo_DMACopyToBuff32's own field comment); su_DMAHooksOffered is
+         * bumped by open() right after this call returns, once, if any of
+         * the four came back non-NULL. */
+        case S2_DMACopyToBuff32:
+            slo->slo_DMACopyToBuff32 = (APTR)tags->ti_Data;
+            break;
+        case S2_DMACopyFromBuff32:
+            slo->slo_DMACopyFromBuff32 = (APTR)tags->ti_Data;
+            break;
+        case S2_DMACopyToBuff64:
+            slo->slo_DMACopyToBuff64 = (APTR)tags->ti_Data;
+            break;
+        case S2_DMACopyFromBuff64:
+            slo->slo_DMACopyFromBuff64 = (APTR)tags->ti_Data;
+            break;
         default:
             break;
         }
         tags++;
     }
+}
+
+/* M13: which hook this unit actually INVOKES for a read's CopyToBuff step
+ * -- `buffhooks=16|32` (default 8, meaning "always the base hook") only
+ * takes effect if THIS opener's own tag list actually negotiated that
+ * width; otherwise this transparently falls back to the base hook, same
+ * as a real driver declining an offered hook it doesn't want to use (the
+ * spec's own words: "advisory only and may be ignored by the driver for
+ * any data buffer at any time"). This is the "stack actually invoking it"
+ * half of Rev 2/3 conformance -- accepting the tag at open() time
+ * (apply_buffer_mgmt_tags() above) is the other half. */
+static Sana2CopyFunc pick_copy_to_buff(struct Sana2LoopUnit *unit, struct Sana2LoopOpen *slo)
+{
+    if (unit->su_BuffHooks == 32 && slo->slo_CopyToBuff32)
+        return slo->slo_CopyToBuff32;
+    if (unit->su_BuffHooks == 16 && slo->slo_CopyToBuff16)
+        return slo->slo_CopyToBuff16;
+    return slo->slo_CopyToBuff;
+}
+
+/* Write-side counterpart to pick_copy_to_buff() above -- same fallback
+ * reasoning. */
+static Sana2CopyFunc pick_copy_from_buff(struct Sana2LoopUnit *unit, struct Sana2LoopOpen *slo)
+{
+    if (unit->su_BuffHooks == 32 && slo->slo_CopyFromBuff32)
+        return slo->slo_CopyFromBuff32;
+    if (unit->su_BuffHooks == 16 && slo->slo_CopyFromBuff16)
+        return slo->slo_CopyFromBuff16;
+    return slo->slo_CopyFromBuff;
 }
 
 /* Looks up a tracked S2_TRACKTYPE entry by packet type; returns NULL if
@@ -1182,7 +1372,7 @@ static BOOL fill_read_from_packet(struct IOSana2Req *io, struct EchoPacket *pkt)
             io->ios2_Req.io_Flags |= SANA2IOF_MCAST;
     }
 
-    return slo->slo_CopyToBuff(io->ios2_Data, pkt->ep_Data, pkt->ep_Length);
+    return pick_copy_to_buff(slo->slo_Unit, slo)(io->ios2_Data, pkt->ep_Data, pkt->ep_Length);
 }
 
 /* Completes every QUEUED S2_ONEVENT request whose mask matches `event`,
@@ -1433,6 +1623,12 @@ static void reset_unit(struct Sana2LoopUnit *unit)
     unit->su_RxQueueMax  = 0; /* strict drop by default -- see docs/PLAN.md M2 */
     unit->su_PendingDataCount = 0;
     unit->su_Configured  = FALSE;
+    unit->su_BuffHooks   = 8; /* M13: always the base hook by default --
+                                  identical behavior to every milestone
+                                  before this one until `buffhooks=` opts
+                                  a unit into actually invoking a wider
+                                  negotiated hook */
+    unit->su_DMAHooksOffered = 0;
 
     /* Compiled-in default wiring (docs/PLAN.md M6): units 2 and 3 are a
      * crossover pair, every other unit is standalone echo. A config file
@@ -2104,6 +2300,7 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
                                         persisted copy) is set below only
                                         if this comes back non-empty */
             cfg.recordmax    = unit->su_RecordMax;
+            cfg.buffhooks    = unit->su_BuffHooks;
             if (!read_unit_config(&cfg, unit->su_Index)) {
                 io->io_Error = S2ERR_BAD_ARGUMENT;
                 return;
@@ -2125,6 +2322,7 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
             unit->su_ReorderWindow = cfg.reorder;
             unit->su_OfflineAfter = cfg.offlineafter;
             unit->su_OnlineAfter  = cfg.onlineafter;
+            unit->su_BuffHooks    = cfg.buffhooks;
 
             /* M9: applied BEFORE load_replay_file() below (not after, as
              * an earlier version had it) specifically so that function
@@ -2183,6 +2381,15 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
      * NULL); apply_buffer_mgmt_tags() reads it before we overwrite the
      * field below with our own cookie. */
     apply_buffer_mgmt_tags(slo, (struct TagItem *)io2->ios2_BufferManagement);
+    /* M13: count this open as a DMA-hook negotiation if it offered ANY of
+     * the four Rev 7 DMA hooks -- surfaced via S2_GETSPECIALSTATS. Not
+     * gated on the 0->1 open-count check above: unlike unit-level config,
+     * this is per-open negotiation, tallied across the unit's whole
+     * current session (same "accumulate until reset_unit()" pattern as
+     * su_Stats). */
+    if (slo->slo_DMACopyToBuff32 || slo->slo_DMACopyFromBuff32 ||
+        slo->slo_DMACopyToBuff64 || slo->slo_DMACopyFromBuff64)
+        unit->su_DMAHooksOffered++;
     /* SANA2OPF_PROM: irrelevant in echo mode (every opener already sees
      * everything on its unit, unchanged since Phase 1), but in crossover
      * mode (M6) lets THIS open's queued reads accept a packet regardless
@@ -2534,7 +2741,7 @@ static void do_write(struct Sana2LoopDevice *sld, struct Sana2LoopUnit *unit,
             pkt->ep_SrcAddr[k] = (k < 6) ? unit->su_Station[k] : 0;
         CopyMem(io->ios2_DstAddr, pkt->ep_DstAddr, SANA2_MAX_ADDR_BYTES);
     }
-    if (!writer_slo->slo_CopyFromBuff(pkt->ep_Data, io->ios2_Data, pkt->ep_Length)) {
+    if (!pick_copy_from_buff(unit, writer_slo)(pkt->ep_Data, io->ios2_Data, pkt->ep_Length)) {
         FreeMem(pkt, sizeof(struct EchoPacket));
         io0->io_Error = S2ERR_NO_RESOURCES;
         io->ios2_WireError = S2WERR_BUFF_ERROR;
@@ -2792,7 +2999,16 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
         break; /* nothing unit-specific to do yet -- succeed */
 
     case S2_DEVICEQUERY: {
-        struct Sana2DeviceQuery *dq = (struct Sana2DeviceQuery *)io->ios2_StatData;
+        /* M13: struct Sana2LoopDeviceQuery (this file's own extended copy
+         * of the header's struct, see its own comment near the top of
+         * this file) adds Rev 4's RawMTU past HardwareType. dq->MTU etc.
+         * below are written unconditionally regardless of `given`, same
+         * as this handler did before M13 -- not changed here. RawMTU
+         * itself IS gated on `given` covering the extended struct's full
+         * size, so a pre-Rev-4 caller with a Sana2DeviceQuery-sized
+         * buffer never has this field touched, matching what
+         * dq->SizeSupplied honestly reports was actually written. */
+        struct Sana2LoopDeviceQuery *dq = (struct Sana2LoopDeviceQuery *)io->ios2_StatData;
         ULONG mine, given;
 
         if (!dq) {
@@ -2800,7 +3016,7 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
             io->ios2_WireError = S2WERR_NULL_POINTER;
             break;
         }
-        mine = sizeof(struct Sana2DeviceQuery);
+        mine = sizeof(struct Sana2LoopDeviceQuery);
         given = dq->SizeAvailable;
 
         dq->DevQueryFormat = 0;
@@ -2811,6 +3027,17 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
         dq->HardwareType   = S2WireType_Ethernet;
         dq->SizeSupplied   = (given < mine) ? given : mine;
         dq->SizeAvailable  = mine;
+        if (given >= mine) {
+            /* Replay-mode units never support SANA2IOF_RAW writes at all
+             * (do_write() fails them S2ERR_NOT_SUPPORTED before any MTU
+             * check runs) -- RawMTU=0 per spec ("those without set it to
+             * zero") is the honest signal for that, distinct from echo/
+             * crossover's real MTU+SANA2LOOP_RAW_HDR_SIZE allowance
+             * (exactly M4's own existing "buffer -> MTU+14" raw-write
+             * relaxation -- RawMTU is that same number given a name). */
+            dq->RawMTU = (unit->su_Mode == SANA2LOOP_MODE_REPLAY)
+                       ? 0 : unit->su_MTU + SANA2LOOP_RAW_HDR_SIZE;
+        }
         break;
     }
 
@@ -3091,41 +3318,97 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
     }
 
     case S2_GETSPECIALSTATS: {
-        /* One record, only if this unit is both recording AND has
-         * actually dropped something to su_RecordMax (docs/PLAN.md
-         * decision #7: "overflow = stop + count via S2_GETSPECIALSTATS")
-         * -- zero records otherwise (this device tracks no OTHER special,
-         * per-driver stats). Per the standard SANA-II convention (not
-         * spelled out in the bare Sana2SpecialStatHeader struct itself,
-         * since it has no explicit array-pointer field): the caller
-         * allocates RecordCountMax Sana2SpecialStatRecord slots
-         * CONTIGUOUS with the header in the SAME ios2_StatData buffer;
-         * the driver writes up to that many immediately after the header,
-         * never more than RecordCountMax regardless of how many it
-         * actually has. */
+        /* Up to two records now (M13 added the second): one if this unit
+         * is both recording AND has actually dropped something to
+         * su_RecordMax (docs/PLAN.md decision #7: "overflow = stop +
+         * count via S2_GETSPECIALSTATS"), one if any open on this unit
+         * negotiated a Rev 7 DMA hook (su_DMAHooksOffered -- M13). Zero
+         * records if neither condition holds. Per the standard SANA-II
+         * convention (not spelled out in the bare Sana2SpecialStatHeader
+         * struct itself, since it has no explicit array-pointer field):
+         * the caller allocates RecordCountMax Sana2SpecialStatRecord
+         * slots CONTIGUOUS with the header in the SAME ios2_StatData
+         * buffer; the driver writes up to that many immediately after the
+         * header, never more than RecordCountMax regardless of how many
+         * it actually has. A caller with RecordCountMax=1 that qualifies
+         * for both stats gets only the record-overflow one -- a
+         * deterministic priority (declaration order below), not a
+         * regression from M13: RecordCountMax=1 callers saw exactly this
+         * stat, and only this stat, before M13 existed at all. */
         struct Sana2SpecialStatHeader *hdr =
             (struct Sana2SpecialStatHeader *)io->ios2_StatData;
+        struct Sana2SpecialStatRecord *rec;
+        ULONG supplied = 0;
+
         if (!hdr) {
             io0->io_Error = S2ERR_BAD_ARGUMENT;
             io->ios2_WireError = S2WERR_NULL_POINTER;
             break;
         }
-        if (unit->su_RecordDropped > 0 && hdr->RecordCountMax >= 1) {
-            struct Sana2SpecialStatRecord *rec =
-                (struct Sana2SpecialStatRecord *)(hdr + 1);
-            rec->Type   = SANA2LOOP_SPECIALSTAT_RECORD_OVERFLOW;
-            rec->Count  = unit->su_RecordDropped;
-            rec->String = NULL;
-            hdr->RecordCountSupplied = 1;
-        } else {
-            hdr->RecordCountSupplied = 0;
+        rec = (struct Sana2SpecialStatRecord *)(hdr + 1);
+        if (unit->su_RecordDropped > 0 && supplied < hdr->RecordCountMax) {
+            rec[supplied].Type   = SANA2LOOP_SPECIALSTAT_RECORD_OVERFLOW;
+            rec[supplied].Count  = unit->su_RecordDropped;
+            rec[supplied].String = NULL;
+            supplied++;
+        }
+        if (unit->su_DMAHooksOffered > 0 && supplied < hdr->RecordCountMax) {
+            rec[supplied].Type   = SANA2LOOP_SPECIALSTAT_DMA_HOOKS_OFFERED;
+            rec[supplied].Count  = unit->su_DMAHooksOffered;
+            rec[supplied].String = NULL;
+            supplied++;
+        }
+        hdr->RecordCountSupplied = supplied;
+        break;
+    }
+
+    /* M13: Rev 4 peer/DNS address queries. Same ios2_SrcAddr/ios2_DstAddr
+     * reuse convention S2_GETSTATIONADDRESS already established above for
+     * a different current/factory pairing -- here it's local/peer, per
+     * wiki.amigaos.net's "Revision 4" page. */
+    case S2_GETPEERADDRESS: {
+        /* Only meaningful when there's a real, distinct peer -- exactly
+         * crossover mode. Echo's "peer" is itself (not a real link
+         * partner); a replay-mode unit has no live link at all (do_write()
+         * already rejects writes to one the same way). Both fail
+         * S2ERR_NOT_SUPPORTED, matching do_write()'s own replay-mode
+         * precedent for "not a supported operation on this mode", not a
+         * temporary condition. */
+        struct Sana2LoopUnit *peer;
+        int k;
+
+        if (unit->su_Mode != SANA2LOOP_MODE_CROSSOVER) {
+            io0->io_Error = S2ERR_NOT_SUPPORTED;
+            break;
+        }
+        peer = delivery_target(sld, unit);
+        for (k = 0; k < SANA2_MAX_ADDR_BYTES; k++) {
+            io->ios2_SrcAddr[k] = (k < 6) ? unit->su_Station[k] : 0;
+            io->ios2_DstAddr[k] = (k < 6) ? peer->su_Station[k] : 0;
         }
         break;
     }
 
-    /* S2_ADD/DELMULTICASTADDRESSES (plural -- the Rev 7 batch-list
-     * variants, 0xc000/0xc001) have no consumer needing them yet, same
-     * treatment as the Rev 7 buffer-management hook variants (M1) --
+    case S2_GETDNSADDRESS: {
+        /* Meaningful for PPP-style/dynamically-addressed links, which this
+         * device has none of. Deliberately a DIFFERENT "not applicable"
+         * shape from S2_GETPEERADDRESS above -- zero-filled addresses with
+         * io_Error left at 0 (success), per docs/PLAN.md's own M13 section
+         * ("loopback can synthesize plausible values or zero-fill per spec
+         * when N/A") -- a real stack has to tolerate both an outright
+         * S2ERR_NOT_SUPPORTED and a soft "supported, nothing to report"
+         * response, and this device now demonstrates both. */
+        int k;
+        for (k = 0; k < SANA2_MAX_ADDR_BYTES; k++) {
+            io->ios2_SrcAddr[k] = 0;
+            io->ios2_DstAddr[k] = 0;
+        }
+        break;
+    }
+
+    /* S2_ADD/DELMULTICASTADDRESSES (plural -- the batch-list variants,
+     * 0xc000/0xc001) have no consumer needing them yet, same treatment as
+     * the Rev 2/3/7 buffer-management hook variants got before M13 --
      * falling to default (IOERR_NOCMD) here is correct, not a gap. */
     default:
         io0->io_Error = IOERR_NOCMD;

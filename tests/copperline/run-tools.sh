@@ -50,12 +50,14 @@ XDFTOOL=${XDFTOOL:-xdftool}
 DEVICE=${SANA2LOOP_DEVICE:-$ROOT/build/loopback.device}
 SANADUMP=${SANADUMP_M68K:-$ROOT/build/SanaDump}
 SANASEND=${SANASEND_M68K:-$ROOT/build/SanaSend}
+SANACONFORM=${SANACONFORM_M68K:-$ROOT/build/SanaConform}
 BENCH=${BENCH:-40}
 ADF="$HERE/tools-boot.adf"
 
 [ -e "$DEVICE" ] || { echo "FAIL: missing $DEVICE (run make device)" >&2; exit 2; }
 [ -e "$SANADUMP" ] || { echo "FAIL: missing $SANADUMP (run make tools)" >&2; exit 2; }
 [ -e "$SANASEND" ] || { echo "FAIL: missing $SANASEND (run make tools)" >&2; exit 2; }
+[ -e "$SANACONFORM" ] || { echo "FAIL: missing $SANACONFORM (run make tools)" >&2; exit 2; }
 [ -z "$KICK" ] || [ -e "$KICK" ] || { echo "FAIL: KICK set but missing: $KICK" >&2; exit 2; }
 command -v "$COPPERLINE" >/dev/null || { echo "FAIL: $COPPERLINE not found" >&2; exit 2; }
 command -v "$XDFTOOL" >/dev/null || { echo "FAIL: $XDFTOOL not found (pip install amitools)" >&2; exit 2; }
@@ -68,6 +70,7 @@ rm -f "$ADF"
     write "$DEVICE" devs/loopback.device + \
     write "$SANADUMP" c/SanaDump + \
     write "$SANASEND" c/SanaSend + \
+    write "$SANACONFORM" c/SanaConform + \
     write "$HERE/fixtures/unit12.config" s/sana2loop/unit12.config + \
     write "$HERE/tools-startup-sequence.txt" s/startup-sequence \
     > /dev/null
@@ -92,6 +95,33 @@ else
 fi
 rm -f "$CAPTURED"
 
+# M13: SanaConform's own stdout doesn't reach Copperline's serial capture
+# either (same as SanaDump/SanaSend -- see tools-startup-sequence.txt's own
+# comment), so its redirected output file is the only way to check it
+# actually ran and probed unit 0 correctly. Every marker below must be a
+# literal substring SanaConform's own printf calls produce for a fresh,
+# unconfigured echo unit (see sanaconform.c) -- not a full byte-for-byte
+# transcript compare, since exact hook-invocation counts/instance
+# addresses aren't worth pinning down here.
+CONFORM=$(mktemp)
+if "$XDFTOOL" "$ADF" type s/sana2loop/sanaconform.out > "$CONFORM" 2>/dev/null; then
+    for marker in \
+        'OpenDevice: OK' \
+        'S2_ONLINE: OK' \
+        'Self-echo round trip: OK' \
+        'sana2loop quirk stat:'
+    do
+        grep -qF "$marker" "$CONFORM" || {
+            echo "FAIL: SanaConform output missing expected marker: $marker" >&2
+            fails=$((fails + 1))
+        }
+    done
+else
+    echo "FAIL: s/sana2loop/sanaconform.out not found on the ADF post-run (raise BENCH?)" >&2
+    fails=$((fails + 1))
+fi
+rm -f "$CONFORM"
+
 [ "$fails" -eq 0 ] || exit 1
 
-echo "PASS: SanaDump/SanaSend on-target round-trip test"
+echo "PASS: SanaDump/SanaSend/SanaConform on-target round-trip test"

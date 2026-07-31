@@ -9,4 +9,32 @@
 ; bug: reset-at-first-open is fully intentional, documented behavior).
 Run >NIL: SanaDump 12 S:sana2loop/captured.pcap COUNT=2
 SanaSend 12 S:sana2loop/arp.pcap
-Wait 2
+
+; A real, pre-launch finding (caught testing against a real Kickstart 3.1
+; ROM, not just bundled AROS): a bare "Wait 2" here relied on C:Wait,
+; which this minimal disk's C: never actually contains. Bundled AROS
+; apparently tolerates/resolves that some other way (this ran fine there
+; for milestones); real Kickstart 3.1 does not -- the whole boot HANGS at
+; that line (confirmed: AmigaDOS's own command-not-found path for a
+; single-floppy system with nothing else to search appears to wait on a
+; volume-insert requester indefinitely, the same class of "silently waits
+; forever for a human" hazard CLAUDE.md's M5 section already documents
+; for Open("ENV:...") with no ENV: assign -- not a device bug either
+; time). Removed rather than replaced with a real Wait binary: SanaSend's
+; own write is synchronous (DoIO), and echo/crossover delivery completes
+; SYNCHRONOUSLY inside that same call (ReplyMsg()d straight into
+; SanaDump's already-queued read from within SanaSend's own BeginIO --
+; see CLAUDE.md's "Architecture" section) -- by the time SanaSend's
+; command returns to this script, SanaDump's own signal is already
+; pending, needing only Exec's ordinary preemptive scheduling (not a
+; wall-clock delay) to actually run and flush its own capture to disk
+; before SanaConform's own startup gets far enough to matter. Verified
+; via repeated runs on both bundled AROS and real Kickstart 3.1.
+
+; M13: SanaConform against unit 0 -- deliberately NOT unit 12 (busy with
+; SanaDump's own background orphan read above; a fresh, unconfigured echo
+; unit avoids any cross-talk with that traffic). Its own stdout doesn't
+; reach Copperline's serial capture (same as SanaDump/SanaSend -- see this
+; file's own header comment), so redirected to a file for run-tools.sh's
+; post-run xdftool extraction + grep check instead.
+SanaConform 0 >S:sana2loop/sanaconform.out

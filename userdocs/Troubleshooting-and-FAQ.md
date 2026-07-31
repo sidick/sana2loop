@@ -22,6 +22,22 @@ silently ignoring the typo or falling back to a default. Check:
 A **missing** config file is fine and not an error — only a file that
 exists but has a problem fails the open.
 
+## My network stack's config says it can't find/open `loopback.device`
+
+Check **where you copied it** vs. **how your stack looks for it**.
+`OpenDevice("loopback.device", ...)` (what `SanaInfo`/`SanaDump`/
+`SanaSend`/`SanaConform`, and most hand-written test programs, use) only
+ever searches plain `DEVS:` for a bare device name. A real network stack
+(AmiTCP, AmiTCP_NG, Roadshow) instead expects the driver file to live in
+`DEVS:Networks/`, and constructs the **full path**
+(`DEVS:Networks/loopback.device`) itself once its own config points at it
+— confirmed directly against AmiTCP_NG's own troubleshooting notes:
+*"`OpenDevice()` does not search `DEVS:Networks/`, so you must name the
+driver by full path."* These are two separate lookup rules for two
+different kinds of caller, not a bug in either — see
+[Installation](Installation.md) for copying it to both locations if
+you're doing both kinds of testing.
+
 ## I edited a unit's config file but nothing changed
 
 Configuration is only re-read the moment a unit's open count goes from 0 to

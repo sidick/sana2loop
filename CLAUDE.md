@@ -31,8 +31,8 @@ they may require Kickstart 2.0+ where convenient (documented per-tool).
 
 ## Current state
 
-Working through `docs/PLAN.md`'s milestones (M0-M12: spec-correctness
-backfill, then Phases 2-4). **M0-M11 done**, each validated on-target under
+Working through `docs/PLAN.md`'s milestones (M0-M13: spec-correctness
+backfill, then Phases 2-4). **M0-M13 done**, each validated on-target under
 Copperline against both bundled AROS (CI) and a real Kickstart 1.3 ROM
 (`make copperline-smoke` / `KICK=... make copperline-smoke`,
 see `tests/copperline/`) before being considered complete. M9 initially
@@ -54,10 +54,13 @@ on-target instrumentation.
 **M10** (docs pass): stood up `userdocs/` (11 pages, MkDocs Material) plus
 `tools/docs2guide.py` (adapted from sibling project amiauth's own,
 algorithm unchanged) producing an on-Amiga AmigaGuide manual from the same
-source (`make guide`) -- one docs source feeding both. Not yet published:
-this repo is currently private, so there's no gh-pages publish workflow
-yet, only a CI build-only check (`docs-build` in `.github/workflows/ci.yml`)
-so the site can't silently rot before publishing is activated. Also fixed
+source (`make guide`) -- one docs source feeding both. Published later
+(2026-07-31, once the repo went public -- see the pre-release-verification
+entry below) at https://sidick.github.io/sana2loop/ via a new
+`.github/workflows/docs.yml` (mike-based versioned deploy, adapted from
+amiauth's own docs.yml); PRs/pushes to main still only get a CI
+build-only check (`docs-build` in `.github/workflows/ci.yml`) so the site
+can't silently rot between real publishes. Also fixed
 a real, previously-missing gap surfaced while writing the docs: neither
 the device nor `SanaInfo` had ever carried a standard AmigaDOS `$VER:`
 version cookie (so the Shell `Version` command found nothing for either) --
@@ -325,12 +328,15 @@ copperline-smoke` (bundled AROS) and `run-tools.sh`, both still green.
   top for a real on-target bug this tripped over and how it was found.
 
 - `userdocs/` (M10) -- the user-facing documentation site source (MkDocs
-  Material, `mkdocs.yml`), 12 pages covering installation, configuration,
+  Material, `mkdocs.yml`), 13 pages covering installation, configuration,
   every mode, fault injection, `SanaInfo`, `SanaDump`/`SanaSend`,
-  troubleshooting, and a changelog. `tools/docs2guide.py` converts the
-  same source into an on-Amiga AmigaGuide manual (`make guide`) -- one
-  source, two outputs. Not yet published (repo is private, no gh-pages
-  workflow yet); CI only build-checks it (`docs-build` job).
+  SANA-II Rev 2/3/4/7 conformance/`SanaConform` (M13), troubleshooting,
+  and a changelog. `tools/docs2guide.py` converts the same source into an
+  on-Amiga AmigaGuide manual (`make guide`) -- one source, two outputs.
+  Published at https://sidick.github.io/sana2loop/ (`.github/workflows/docs.yml`,
+  mike-based versioned deploy); every push to main still only gets a CI
+  build-check (`docs-build` job) so the site can't rot between real
+  publishes.
 
 - `src/tools/` (M11) -- `sanadump.c`/`sanasend.c` (the CLI tools), plus
   two shared building blocks: `pcapio.c`/`.h` (host-side pcap file I/O,
@@ -340,6 +346,10 @@ copperline-smoke` (bundled AROS) and `run-tools.sh`, both still green.
   not just a bare `OpenDevice()`). Each tool compiles+links directly
   against both shared files in one `gcc` invocation (see the Makefile) --
   no intermediate `.o` management needed at this project's size.
+  `sanaconform.c` (M13) is the odd one out: it does its OWN manual
+  `OpenDevice()` with a richer 9-tag list (base + Rev 2/3 16/32-bit +
+  Rev 7 DMA hooks) rather than reusing `sana2open.c`'s fixed 3-tag
+  helper, so it doesn't link against the shared building blocks at all.
 
 - `host/make_fixtures.py`/`host/lint_pcap.py` (M11) -- a `scapy`-based
   canonical `.pcap` corpus generator (ARP, DHCP discover, TCP handshake,
@@ -361,7 +371,155 @@ copperline-smoke` (bundled AROS) and `run-tools.sh`, both still green.
   `verify_sanadump.py` extracting the produced capture post-run, the same
   pattern as `run.sh`'s own M9 record= check.
 
-Not yet done: Aminet packaging + release flow (M12).
+**M12** (Aminet packaging + release flow): adopted sibling project
+amiauth's pattern (tag-driven `release.yml`, verify-then-build-then-gate)
+in preference to narrator.wyoming's simpler one. New `sana2loop.readme`
+(Aminet-format package readme, `Type: comm/net`) and `Makefile` `lha`/
+`dist` targets (a pinned, source-built `jca02266/lha` -- Ubuntu's/
+Homebrew's `lha` is Lhasa, extract-only -- same commit amiauth already
+uses) assembling `build/dist/sana2loop.{lha,readme}` from the four m68k
+binaries + `sana2loop.guide` + `LICENSE`. `.github/workflows/release.yml`
+verifies a pushed `v<version>` tag against both `version.mk` and
+`sana2loop.readme`'s `Version:` field before building anything, greps
+all four binaries for their `$VER` strings, validates the readme via
+`aminet-release-action` (`validate-only`), creates the GitHub release
+(curated notes sourced from the readme's own intro/Features for the
+first release, `--generate-notes` thereafter), then hands off to a
+separate `aminet`-environment-gated job for the actual FTP upload.
+Verified locally end-to-end (`make docker && make dist`, then `lha l` on
+the resulting archive) before considering this done -- same "prove the
+pipeline actually produces a working artifact" discipline as every other
+milestone, not just a read of the workflow YAML.
+
+Two real, non-obvious findings along the way (neither a code bug in the
+device/tools themselves): (1) the first draft of `sana2loop.readme`
+stated the companion tools' floor as "Kickstart 2.0 (V36)" -- an API-level
+fact (`CreateMsgPort()`/`CreateIORequest()` really are V36+ Exec calls)
+but a regression from what `userdocs/Installation.md` already got right:
+V36 (bare Kickstart 2.0) never shipped outside pre-2.04 hardware, so
+"2.04 (V37) or later" is the only realistic floor to publish -- caught by
+the user reviewing the draft, fixed to match the existing docs page, no
+other file needed touching since only this new readme had it wrong.
+(2) The `aminet` GitHub Environment's required-reviewer protection rule
+initially could not be provisioned via `gh api` (422: billing plan
+doesn't support required reviewers on a private repo -- sibling project
+amiauth's own `aminet` environment works only because that repo is
+public). **Resolved 2026-07-31**, the same day: the repo went public
+(independent of M12/M13's own scope), and re-running the identical
+`gh api` call immediately succeeded -- `sidick` is now a required
+reviewer on the `aminet` environment, matching amiauth's setup exactly.
+The Aminet-upload job now genuinely pauses for manual approval on any
+real tag push, as designed. See `docs/PLAN.md`'s M12 risk note for the
+full detail on both findings.
+
+**M13** (SANA-II Rev 2/3/4/7 conformance coverage): this toolchain's own
+bundled `<devices/sana2.h>` (AROS-derived) turned out to already carry
+Rev 2/3's `S2_CopyTo/FromBuff16/32`/`S2_DMACopyTo/FromBuff32` tag values
+and the `0xc000`/`0xc001` `S2_ADD/DELMULTICASTADDRESSES` command
+numbers, but nothing from Rev 4 or the rest of Rev 7 -- confirmed no
+vendor NDK ever shipped those at all (they live only as informal
+wiki.amigaos.net documentation), so `loopback_device.c` (and every tool/
+test that needs the same values) each carry their own local `#define`s
+for `S2_GETPEERADDRESS`/`S2_GETDNSADDRESS` (`0xC002`/`0xC003`, quoted
+from the wiki and corroborated against the header's own existing
+`0xc000`/`0xc001` sequence) and `S2_DMACopyTo/FromBuff64` (`S2_Dummy+10`/
+`+11`, this project's own inferred continuation since Rev 7's doc never
+published a numeric value -- harmless since these hooks are only ever
+recorded, never invoked). New per-unit `buffhooks=8|16|32` config knob
+(default `8`, byte-for-byte unaffected behavior for every milestone
+before this one) makes a unit actually INVOKE its negotiated Rev 2/3
+hook width for whichever opener supplied it, falling back to the base
+hook transparently otherwise -- `pick_copy_to_buff()`/
+`pick_copy_from_buff()`. Rev 4's `RawMTU` extends `Sana2DeviceQuery` via
+a local `struct Sana2LoopDeviceQuery` (same layout, field appended),
+written only when the caller's `SizeAvailable` covers it -- the
+`SizeAvailable`/`SizeSupplied` growth-safe negotiation already existed
+for exactly this. Rev 7 DMA hooks are accepted and counted
+(`su_DMAHooksOffered`, new `S2_GETSPECIALSTATS` record type) but never
+invoked -- a hardware-less RAM loopback has nothing to hand a DMA-capable
+buffer address to, and declining is fully spec-legal. New companion tool
+`SanaConform` (`src/tools/sanaconform.c`, V36+/2.0+ like SanaDump/
+SanaSend) probes a real running unit against all of the above and
+reports which hook width actually got invoked via instrumented counting
+hooks -- the "stack actually invoking it" half of conformance, not just
+"driver accepted the tag". `SANA2LOOP_NUM_UNITS` is now 14 (was 13): a
+new unit 13 fixture (`buffhooks=32`) for the on-target test.
+
+Building the on-target test coverage surfaced a real, non-device finding:
+adding a 5th sub-test cluster that performs a genuinely successful
+`dos.library` file `Read()` (unit 13's config) AFTER M9's `record`
+sub-test's own already-flushed-and-closed `recorded.pcap`, in the same
+Copperline session, reliably corrupted that earlier file's data blocks
+on the host-side ADF (`FSError: Invalid FileData Block` from `xdftool`
+post-run) despite the guest's own serial output showing everything
+passing cleanly and the disk nowhere near full. Root-caused by
+elimination (isolated debug build proved the device logic itself was
+correct; a throwaway inert 14th fixture file left `recorded.pcap`
+intact; raising `BENCH` made no difference) to a Copperline/AROS floppy
+write-back ordering quirk: a later, unrelated successful file read can
+disturb an earlier file's already-flushed cached blocks before
+`--benchmark-until`'s cutoff ends the session. Fixed by reordering
+`sana2test.c`'s sub-tests (M13's new block now runs before `record`, not
+after) rather than touching device code -- restores the "the file-write-
+then-verify test is the last DOS I/O in the session" property every
+milestone before M13 had by accident. See `docs/PLAN.md`'s M13 risk note
+and `docs/sana2-notes.md`'s own M13 section for the full investigation.
+Verified via `make copperline-smoke` (3/3 bundled AROS, 2/2 real
+Kickstart 1.3) and `run-tools.sh` (SanaConform's own output redirected
+to a file and grep-checked, since its stdout -- like SanaDump/SanaSend's
+-- never reaches Copperline's serial capture).
+
+**Pre-release verification (2026-07-31, prompted by the user asking to
+test against Kickstart 3.1 at least once before launch, and to confirm
+the real SANA-II install-directory convention)**: `make copperline-smoke`
+against a real Kickstart 3.1 ROM (`run.sh`) passed 100% clean first try --
+no device-code surprises. `run-tools.sh` against the SAME 3.1 ROM did
+NOT, and this was a real, pre-existing bug (not something M13 introduced):
+`tools-startup-sequence.txt`'s closing `Wait 2` relies on `C:Wait`, which
+this minimal test disk's `C:` never actually contains. Bundled AROS
+apparently tolerates this some other way (every prior milestone's own
+`run-tools.sh` run passed there without issue); real Kickstart 3.1 does
+not -- the whole boot HANGS at that line, root-caused via a bisection
+(strip commands from the startup-sequence one at a time, rebuild the ADF,
+re-run) to AmigaDOS's own command-not-found path apparently waiting on a
+volume-insert requester indefinitely on a single-floppy system with
+nothing else to search -- the same class of "silently waits forever for a
+human" hazard already documented for `Open("ENV:...")` with no `ENV:`
+assign (see M5 above), not a device bug either time. Fixed by removing
+`Wait 2` entirely rather than sourcing a real `Wait` binary: SanaSend's
+own write is synchronous (`DoIO`), and echo/crossover delivery completes
+synchronously inside that same call (`ReplyMsg()`d straight into
+SanaDump's already-queued read from within SanaSend's own `BeginIO` --
+see "Echo mode without a unit task" below), so by the time SanaSend's
+command returns to the script, SanaDump's own signal is already pending
+and needs only Exec's ordinary preemptive scheduling (not a wall-clock
+delay) to flush its own capture to disk before SanaConform's own startup
+gets far enough to matter -- verified via 3/3 clean runs on both bundled
+AROS and real Kickstart 3.1 after the fix (see `tools-startup-sequence.txt`'s
+own comment for the full account). Separately, confirmed the user's own
+hypothesis about the SANA-II install-directory convention against three
+independent real-world sources (a driver's own install docs, classic
+AmiTCP 3.0's installer instructions, and AmiTCP_NG's own troubleshooting
+notes verbatim: *"OpenDevice() does not search DEVS:Networks/, so you
+must name the driver by full path"*): `DEVS:Networks/` is where a real
+network stack's own config expects to find a SANA-II driver (the stack
+constructs the full path itself), while `DEVS:` is what Exec's own
+`OpenDevice()` searches for a bare device name -- the two are separate,
+not one superseding the other. Given the real (if small) risk that a full
+-path `OpenDevice()` call might not reliably find/reuse an ALREADY-
+resident device the way echo/crossover's shared-instance design requires
+(genuinely unclear from available documentation, and not worth risking
+on a guess), this project's own consumers (test harness, all four
+companion tools) deliberately keep their existing bare-name
+`OpenDevice("loopback.device", ...)` calls unchanged -- fixed via
+documentation only (`userdocs/Installation.md`, `sana2loop.readme`, a new
+`userdocs/Troubleshooting-and-FAQ.md` entry): copy to `DEVS:` for direct
+tool/test use (unchanged), additionally to `DEVS:Networks/` if/when
+wiring the device into a real stack's own config.
+
+No further milestones remain unscheduled except Aminet packaging's own
+"cut and publish a first tagged release" step (the M12 pipeline itself
+is built and tested, but no tag has been pushed) -- see docs/PLAN.md.
 
 ## Architecture
 

@@ -1,7 +1,7 @@
 # Configuration Reference
 
-Every unit (0 through 11) can have its own config file, read **once**, the
-first time it's opened (open count transitions 0→1 — see
+Every unit can have its own config file, read **once**, the first time
+it's opened (open count transitions 0→1 — see
 [below](#when-configuration-is-read)). An unconfigured unit works with
 sensible compiled-in defaults; you only need a config file to change
 something.
@@ -53,8 +53,9 @@ mtu=1400
 
 | Key | Values | Default | Meaning |
 |-----|--------|---------|---------|
-| `mtu` | 1–1500 | 1500 | Maximum Transmit Unit reported by `S2_DEVICEQUERY` and enforced on `CMD_WRITE`/`S2_BROADCAST`/`S2_MULTICAST`. `SANA2IOF_RAW` writes get 14 extra bytes of headroom (Ethernet header size) — see the SANA-II spec's raw-frame convention. |
+| `mtu` | 1–1500 | 1500 | Maximum Transmit Unit reported by `S2_DEVICEQUERY` and enforced on `CMD_WRITE`/`S2_BROADCAST`/`S2_MULTICAST`. `SANA2IOF_RAW` writes get 14 extra bytes of headroom (Ethernet header size) — see the SANA-II spec's raw-frame convention. This same number (MTU+14) is also reported as `RawMTU` (SANA-II Rev 4) via `S2_DEVICEQUERY`. |
 | `rxqueue` | 0–64 | 0 | Bounded convenience receive queue. **0 means strict drop**: a packet with no queued `CMD_READ`/`S2_READORPHAN` waiting for it is dropped immediately (and counted in `Sana2DeviceStats.UnknownTypesReceived`) — real SANA-II drivers hold no internal buffers, and this default matches that. A nonzero value lets up to that many undelivered packets sit in a per-unit queue instead. |
+| `buffhooks` | `8`, `16`, `32` | `8` | Which SANA-II Rev 2/3 buffer-management hook width this unit actually **invokes**, for whichever opener negotiated it (offered the matching `S2_CopyToBuff16/32`/`S2_CopyFromBuff16/32` tag at `OpenDevice()`). An opener that didn't negotiate the configured width falls back to its own base hook transparently — this is never a hard requirement, only a preference. `8` (the default) always uses the base hook, matching every version of this device before this knob existed. |
 
 ### Mode and pairing (see [Echo and Crossover Modes](Echo-and-Crossover.md), [Replay and Record](Replay-and-Record.md))
 
