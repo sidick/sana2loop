@@ -711,6 +711,48 @@ interrupt-safe; testing that a consumer's hooks actually are is real
 value), and the `S2_CopyTo/FromBuff16/32`/`S2_DMACopyTo/FromBuff32` Rev 7
 variants (recorded nowhere -- no consumer of them exists in this device).
 
+## Memory lifetime: no low-memory participation, fail-fast allocation, and the expunge()-leak fix
+
+Every `AllocMem()` in this device (`su_ReplayPackets`/`su_ReplayDueTicks`/
+`su_ReplayDeliveryCopies`, `su_RecordBuf`, the per-open `Sana2LoopOpen`
+cookie, echo/duplicate `EchoPacket` nodes) passes only `MEMF_CLEAR` -- no
+`MEMF_CHIP`/`MEMF_FAST`. Per the RKRM (Exec Memory Allocation): an
+allocation with neither flag set is satisfied from the first memory
+available on the system's lists, which is **fast RAM if any is fitted,
+chip only as the fallback**. This device has no chip-memory-specific
+requirement of its own; test runs that reported chip-RAM exhaustion
+(M11's on-target findings, `docs/PLAN.md`) were a property of the
+deliberately minimal `machine.toml` profile (no `[memory] fast` at all,
+matching the device's stated bare-1MB target floor), not a device
+preference for chip memory.
+
+The device also never calls `AddMemHandler()` -- it does not register
+itself with Exec's low-memory recovery protocol (the mechanism that lets
+a task be asked to free something when some *other* allocation is about
+to fail). It is invisible to system memory pressure right up until one of
+its own `AllocMem()` calls fails, at which point failure is handled
+locally and immediately (`S2ERR_NO_RESOURCES`, or failing the whole
+`OpenDevice()`) -- no retry, no attempt to reclaim anything of its own to
+help the request along.
+
+Replay/record buffers are freed only at a unit's own next 0->1 open
+transition (`reset_unit()`), never when the last opener closes it --
+established at M8/M9, real cost confirmed at M11 (see `docs/PLAN.md`).
+**A real gap this left, found by code review while documenting the above
+(not by on-target testing): `expunge()` -- called by Exec to unload the
+whole device once its device-wide `lib_OpenCnt` reaches 0, e.g. via the
+Shell's `Avail FLUSH` -- froze only the device base struct itself and
+never looped over `sld_Units[]` first.** Any unit that had used
+`mode=replay`/`record=` and was closed but never reopened before the
+whole device got expunged leaked those buffers permanently (once the
+base is freed, nothing points at them again) -- strictly worse than the
+documented "held until next open" cost. Fixed by looping over every unit
+and calling `reset_unit()` on each before the base's own `FreeMem()`,
+reusing the existing free logic instead of duplicating it (harmless that
+it also resets other unit fields on a struct about to be freed anyway).
+See [Replay and Record](../userdocs/Replay-and-Record.md#memory-usage-and-freeing-it-manually)
+for the user-facing manual-free recipe this all motivates.
+
 ## Error codes actually used
 
 `S2ERR_OUTOFSERVICE` (10) -- unit not online. `S2ERR_MTU_EXCEEDED` (6) --

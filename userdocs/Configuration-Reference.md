@@ -67,6 +67,11 @@ mtu=1400
 | `record` | a `dos.library`-openable path | — | If set, every packet this unit actually receives (in any mode) is captured to this path as `.pcap`, flushed at last close. |
 | `recordmax` | 1–262144 | 65536 | RAM buffer size (bytes) for `record=`. Once full, further packets are silently not appended (counted, not fatal) — see `S2_GETSPECIALSTATS` in [Replay and Record](Replay-and-Record.md). |
 
+`replay=`/`record=` buffers are held in RAM for as long as the device stays
+loaded, even after every opener of the unit has closed it — see
+[Replay and Record: Memory usage, and freeing it manually](Replay-and-Record.md#memory-usage-and-freeing-it-manually)
+if that matters for your setup.
+
 ### Fault injection (see [Fault Injection](Fault-Injection.md) for the full pipeline and examples)
 
 | Key | Values | Default | Meaning |

@@ -128,8 +128,9 @@
  * milestone's own assertions care about the other's config additions
  * there), 4=M5 malformed-config-fails, 5=M7 droppct, 6=M7 duppct,
  * 7=M7 reorder, 8=M7 offlineafter/onlineafter, 9=M8 consume-mode replay,
- * 10=M9 scheduled replay, 11=M9 RAM record). */
-#define SANA2LOOP_NUM_UNITS   12
+ * 10=M9 scheduled replay, 11=M9 RAM record, 12=M11 SanaDump/SanaSend
+ * on-target round-trip). */
+#define SANA2LOOP_NUM_UNITS   13
 #define SANA2LOOP_DEFAULT_MTU 1500
 /* Ethernet dst[6]+src[6]+type[2] -- the allowance SANA2IOF_RAW adds on top
  * of su_MTU (docs/PLAN.md's M4 entry: "SANA2IOF_RAW (buffer -> MTU+14)").
@@ -2023,11 +2024,24 @@ static BPTR __attribute__((used)) expunge(struct Library *dev asm("a6"))
 {
     struct Sana2LoopDevice *sld = (struct Sana2LoopDevice *)dev;
     BPTR seg_list;
+    int i;
 
     if (dev->lib_OpenCnt != 0) {
         dev->lib_Flags |= LIBF_DELEXP;
         return 0;
     }
+    /* Any unit that ever used mode=replay/record= and was then closed
+     * still holds its su_ReplayPackets/su_RecordBuf etc. -- the device's
+     * whole "free only at next open" design (see reset_unit()'s own
+     * comment) means those pointers are otherwise still live right up to
+     * this point. Free them here too, or they become unreachable the
+     * instant the device base below is freed -- a real leak, not just
+     * "held a bit longer", since nothing will ever point at them again.
+     * reset_unit() already has this exact free logic; reusing it here
+     * (rather than duplicating it) is safe even though it also resets
+     * unit fields that are about to be freed anyway. */
+    for (i = 0; i < SANA2LOOP_NUM_UNITS; i++)
+        reset_unit(&sld->sld_Units[i]);
     /* Must happen before FreeMem below -- the interrupt struct itself
      * lives inside the device base being freed. */
     RemIntServer(INTB_VERTB, &sld->sld_VBlankInt);

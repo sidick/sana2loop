@@ -36,6 +36,7 @@ PAGES = [
     ('Replay-and-Record', 'Replay and Record'),
     ('Fault-Injection', 'Fault Injection'),
     ('SanaInfo-Reference', 'SanaInfo Reference'),
+    ('SanaDump-and-SanaSend', 'SanaDump and SanaSend'),
     ('Troubleshooting-and-FAQ', 'Troubleshooting and FAQ'),
     ('Building-and-Testing', 'Building and Testing'),
     ('Changelog', 'Changelog'),

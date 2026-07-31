@@ -75,6 +75,13 @@ memory-constrained test profile (see the
 longer capture, split it into multiple smaller files and load each on a
 different unit, or drive live traffic instead of replay.
 
+## A unit that used `mode=replay`/`record=` seems to hold onto memory after I close it
+
+That's expected — see
+[Replay and Record: Memory usage, and freeing it manually](Replay-and-Record.md#memory-usage-and-freeing-it-manually)
+for why, and for how to reclaim it (per-unit, or everything at once via
+`Avail FLUSH`) without rebooting.
+
 ## Does this run on my hardware/emulator?
 
 The device targets plain 68000 and Kickstart 1.3 — if your setup runs

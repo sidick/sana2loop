@@ -87,6 +87,63 @@ make room. Query how many packets were dropped this way via
 present only if recording is active and at least one packet has actually
 overflowed; zero records otherwise.
 
+## Memory usage, and freeing it manually
+
+Replay and record buffers (`su_ReplayPackets`/`su_ReplayDueTicks`/
+`su_ReplayDeliveryCopies` for `mode=replay`, `su_RecordBuf` for `record=`)
+are allocated once, at the unit's first open (the 0→1 open-count
+transition), and are **only ever freed at that same transition the *next*
+time the unit is opened from idle — never when the last opener closes it.**
+This is a deliberate, documented design choice, not an oversight: freeing
+at close would need extra bookkeeping to guarantee nothing in-flight (a
+scheduled replay's VBlank-driven delivery, a not-yet-flushed record) still
+references the buffer, and this device's whole approach is to keep that
+kind of lifetime reasoning as simple as possible. The cost is real, though
+— a unit that has ever used `mode=replay` or `record=` holds that memory
+for as long as the device stays loaded, even while fully closed and idle.
+
+**`loopback.device` also does not participate in AmigaOS's low-memory
+recovery protocol** — it never calls `AddMemHandler()` to register a
+callback Exec could invoke when some *other* task's `AllocMem()` is about
+to fail. From the system's point of view this device is invisible to
+memory pressure right up until it makes its own `AllocMem()` call, at
+which point a failure is handled locally and immediately (`S2ERR_NO_RESOURCES`,
+or failing the whole `OpenDevice()`) — there's no retry, no attempt to
+free anything of its own to help the request along. (Every allocation in
+the device also asks for plain `MEMF_CLEAR` only — no `MEMF_CHIP`/`MEMF_FAST`
+— so Exec satisfies it from fast RAM first if any is fitted, falling back
+to chip only when fast is absent or exhausted; the device has no
+chip-memory-specific requirement of its own.)
+
+**To free a unit's replay/record memory manually**, without unloading the
+whole device:
+
+1. Close every opener of that unit (its open count must reach 0).
+2. Edit `ENV:sana2loop/unit<N>.config` (or `S:sana2loop/unit<N>.config`) to
+   remove the `replay=`/`record=` lines you no longer need — or delete the
+   file entirely to fall back to compiled-in defaults.
+3. Open and close the unit once more (`SanaInfo <N>` is a convenient way to
+   do this without writing/sending any traffic). The 0→1 transition this
+   triggers runs the same `reset_unit()` that frees the old buffers — and
+   since the freshly-read config no longer asks for replay/record, nothing
+   gets reallocated in their place.
+
+This works per-unit and doesn't require closing or reloading any *other*
+unit's state. If you only want to shrink a record buffer rather than drop
+recording entirely, lowering `recordmax=` and repeating the same
+close/edit/reopen cycle replaces the old allocation with a smaller one
+instead.
+
+To release **every** unit's held memory at once instead of going unit by
+unit, close every opener of every unit (the device-wide open count, not
+just one unit's, must reach zero) and run `Avail FLUSH` from the Shell —
+its documented job is expunging currently-unused libraries/devices/fonts,
+and with no unit open anywhere this device qualifies. That runs
+`expunge()`, which frees the whole device base (and, implicitly, every
+`AllocMem()`'d buffer any unit was still holding) in one call — though note
+the device itself is then gone until something opens it again, at which
+point AmigaOS reloads it from `DEVS:` as if for the first time.
+
 ## Building a capture file
 
 Any standard tool that writes classic-format `.pcap` (Ethernet link type)

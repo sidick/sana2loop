@@ -19,5 +19,7 @@
 *.dSYM/
 *.su
 
-# Copperline test harness: ADF built fresh by tests/copperline/run.sh
+# Copperline test harness: ADFs built fresh by tests/copperline/run.sh /
+# run-tools.sh
 /tests/copperline/minimal-boot.adf
+/tests/copperline/tools-boot.adf

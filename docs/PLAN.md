@@ -40,7 +40,7 @@ the technical detail behind each one.
 | M8 | ✅ Done | pcap core (`src/pcap.h`, both endians) + consume-mode replay; commit fixture bytes | `src/pcap.h`, `src/loopback_device.c`, `fixtures/`, harness |
 | M9 | ✅ Done | VBlank tick server, tick-scheduled replay, RAM record + close-flush, interrupt-context-hook knob, 68000 per-packet overhead measurement (VBlank-count bracketing, tracked not gated). Record test: `run.sh` extracts written pcap off the ADF post-run via xdftool and byte-compares — **verify early that Copperline persists floppy writes to the image**. AROS CI lane's earlier hang was root-caused to a bundled-AROS `CheckIO()`/`WaitIO()` false-completion bug (harness-side fix, `reap_interrupt_io()`) — see risk note below | `src/loopback_device.c`, `run.sh` |
 | M10 | ✅ Done | Docs pass: teaching-reference comments through the source (the top-of-file overview was still describing "Phase 1" only -- rewritten to cover every mode/feature through M9; a real, previously-missing `$VER:` cookie added to both the device and `SanaInfo` along the way, since accurately documenting "check your version" needs one to actually exist), README, sana2-notes refresh (one stale `S2_GETSPECIALSTATS` table row fixed). Stood up `userdocs/` (11 pages, MkDocs Material, adopting sibling project amiauth's pattern in preference to narrator.wyoming's) alongside `tools/docs2guide.py` (adapted from amiauth's own, algorithm unchanged) producing an on-Amiga AmigaGuide manual (`make guide`) from the same source -- one docs source feeding both. **Not yet published**: this repo is currently private, so no `.github/workflows/docs.yml` gh-pages publish step exists yet (see mkdocs.yml's own header comment) -- `mkdocs build --strict` + `make guide` run as a CI build-only check (`docs-build` job) so the site can't silently rot before publishing is activated | `src/loopback_device.c`, `src/sanainfo.c`, `src/pcap.h`, `README.md`, `docs/sana2-notes.md`, new `userdocs/`, `mkdocs.yml`, `tools/docs2guide.py`, `tools/docs-requirements.txt`, `Makefile`, `.github/workflows/ci.yml` |
-| M11 | | Tools: `src/tools/pcapio.c`, `sana2open.c`, `SanaDump`, `SanaSend`; `host/make_fixtures.py` + `host/lint_pcap.py` (scapy); canonical corpus (ARP, DHCP, TCP handshake) | new `src/tools/*`, `host/*`, `fixtures/`, `Makefile` |
+| M11 | ✅ Done | Tools: `src/tools/pcapio.c` (dos.library-based, not stdio -- see its own comment for why: clib2's `fopen()` reliably failed under Copperline's minimal Startup-Sequence boot where plain dos.library `Open()` didn't), `sana2open.c` (model-citizen real buffer-management hooks), `SanaDump`, `SanaSend`; `host/make_fixtures.py` + `host/lint_pcap.py` (scapy); canonical corpus (ARP, DHCP, TCP handshake) in top-level `fixtures/`. On-target round-trip test (`tests/copperline/run-tools.sh`, a *separate* Copperline boot session from the device's own `run.sh` -- see that file's own comment: the device's "never free replay buffers at close" design leaves too little memory for a second clib2 program in the same session) -- see risk note below for the two real, non-obvious findings this surfaced | new `src/tools/*`, `host/*`, `fixtures/`, `Makefile`, `tests/copperline/run-tools.sh` + fixtures |
 | M12 | | Aminet packaging + release flow, adopting sibling project amiauth's pattern (in preference to narrator.wyoming's simpler one, since amiauth's is the more tried-and-tested of the two): tag-driven `release.yml` that verifies the pushed tag matches `version.mk` and the `.readme`'s `Version:` field before doing anything else, cross-builds via the pinned Docker image, greps the built binary for its `$VER` string, packages via `make dist` (building a real, archive-capable `lha` from source -- Ubuntu's/Homebrew's is extract-only), validates the readme with `aminet-release-action` in `validate-only` mode, creates the GitHub release (curated notes from the `.readme` for the first release, `--generate-notes` once there's real tag-to-tag history to diff), and only then hands off to a *separate* job gated on a GitHub Environment requiring manual approval for the actual (irreversible-ish) Aminet FTP upload -- human-in-the-loop by construction, not an afterthought | `Makefile`, `version.mk`, `.github/workflows/release.yml`, release docs |
 | M13 | | SANA-II Rev 2/3/4/7 conformance coverage (see its own section below) + a conformance/quirk probe tool exercising both directions (driver advertising vs stack actually invoking) with graceful-fallback checks | `src/loopback_device.c`, new probe tool, harness |
 
@@ -154,6 +154,63 @@ proper.
   reaped either way before any reuse. No device-code change was needed
   for the actual fix. Verified: 5/5 clean `RESULT=PASS` runs on bundled
   AROS, 3/3 on real Kickstart 1.3, after the harness change.
+- **M11's on-target round-trip test surfaced two real, non-obvious
+  findings, neither a device bug.** (1) clib2's `fopen()` reliably FAILED
+  to open a file (`ENOENT`-shaped failure) that plain dos.library
+  `Open()` opened without issue, for the identical path, under
+  Copperline's minimal Startup-Sequence-launched boot environment -- root
+  cause not pinned down further once the fix was this simple: switched
+  `src/tools/pcapio.c` to dos.library `Open()`/`Read()`/`Write()`/
+  `Close()` entirely, matching `loopback_device.c`'s own
+  `load_replay_file()`/`read_unit_config()` pattern (different original
+  reason -- freestanding, no libc at all -- but the identical mechanism,
+  proven reliable everywhere this project has tested it). (2) Running
+  SanaDump/SanaSend in the SAME Copperline boot session immediately after
+  `sana2test.c`'s own full run reliably failed `OpenDevice()` with
+  `IOERR_OPENFAIL` -- confirmed via `AvailMem(MEMF_CHIP)` checked right at
+  the failing call: only ~9 KB chip free, because `loopback.device`'s own
+  documented "never free replay-mode buffers at close, only at the next
+  open" design (see M8/M9 above) leaves M8/M9's replay-mode units'
+  buffers permanently allocated for as long as the device stays loaded --
+  fine for `sana2test.c` itself (nothing needed to run afterward) but
+  starves a second, separate clib2 program trying to load in the same
+  session. Fixed by giving the tools their own **separate** Copperline
+  boot session (`run-tools.sh`/`machine-tools.toml`, fresh boot, no
+  `sana2test.c` run first) with a more generous memory profile than the
+  device's own bare-512K target floor (documented in
+  `machine-tools.toml`'s own comment: SanaDump/SanaSend are V36+/2.0+
+  convenience tools, never claimed to run on the device's own
+  hardware-floor budget in the first place). A **third**, genuinely
+  test-*design* gap (not an environment quirk) surfaced once memory
+  wasn't the blocker: SanaSend closing the device (dropping unit 12's
+  open count to 0) before SanaDump opened fresh triggered
+  `reset_unit()`'s own documented "reset at first-open" behavior,
+  silently discarding whatever SanaSend had just buffered via `rxqueue` --
+  fixed by having SanaDump run FIRST, backgrounded via `Run`, so the open
+  count never drops back to 0 between the two (see
+  `tests/copperline/run-tools.sh`'s own comment). Verified: 5/5 clean
+  `SANADUMP_VERIFY=PASS` runs on bundled AROS.
+- **Post-M11, found while documenting the device's "never free replay/
+  record buffers at close" design: `expunge()` never freed those buffers
+  either.** `reset_unit()` frees `su_ReplayPackets`/`su_ReplayDueTicks`/
+  `su_ReplayDeliveryCopies`/`su_RecordBuf` only at a unit's own next
+  0->1 open transition -- by design, so far so documented. But
+  `expunge()` (which Exec calls to unload the whole device once its
+  device-wide `lib_OpenCnt` reaches 0 -- e.g. via the Shell's
+  `Avail FLUSH`, whose documented job is expunging currently-unused
+  libraries/devices/fonts) only ever freed the device base struct itself,
+  never looping over `sld_Units[]` first. Any unit that had used
+  `mode=replay`/`record=` and was closed but never reopened before the
+  whole device got expunged would leak those buffers permanently -- once
+  the device base is freed, nothing points at them again, so this was
+  strictly worse than the documented "held until next open" cost, not
+  just an instance of it. Fixed by looping over every unit and calling
+  `reset_unit()` on each before the base's own `FreeMem()` -- reuses the
+  existing free logic rather than duplicating it (harmless that it also
+  resets other unit fields on a struct about to be freed anyway). Found
+  by code review, not on-target testing; verified the fix doesn't
+  regress anything via `make copperline-smoke` (bundled AROS) and
+  `run-tools.sh`, both still green.
 
 ## Verification
 

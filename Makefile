@@ -2,7 +2,7 @@
 #
 # Targets:
 #   make device  - build build/loopback.device  (freestanding, -nostdlib)
-#   make tools   - build build/SanaInfo          (normal clib2 CLI program)
+#   make tools   - build SanaInfo/SanaDump/SanaSend (normal clib2 programs)
 #   make amiga   - both of the above
 #   make docker  - run 'make amiga' inside the cross-compiler container
 #   make clean
@@ -12,8 +12,8 @@
 # have the cross-compiler installed locally.
 #
 # Target floor: 68000 / Kickstart 1.3 for the device itself (see
-# docs/sana2-notes.md for why). SanaInfo, a companion Shell tool, may
-# require more (V36+ Exec calls) -- see src/sanainfo.c.
+# docs/sana2-notes.md for why). The companion Shell tools may require more
+# (V36+ Exec calls) -- see src/sanainfo.c, src/tools/*.c.
 
 SRCDIR := src
 BUILD  := build
@@ -32,10 +32,17 @@ DEV_CFLAGS := -nostdlib -nostartfiles -O2 -Wall -Wextra -Werror \
 DEV_SRC    := $(SRCDIR)/loopback_device.c
 DEV_BIN    := $(BUILD)/loopback.device
 
-# --- SanaInfo: a normal CLI program (clib2 runtime, standard startfiles) ---
-TOOL_CFLAGS := -O2 -Wall -Wextra -Werror -m68000 -msoft-float -mcrt=clib2 \
-               -DSANAINFO_VERSION=$(VERSION) -DSANAINFO_REVISION=$(REVISION)
-TOOL_BIN    := $(BUILD)/SanaInfo
+# --- SanaInfo/SanaDump/SanaSend: normal CLI programs (clib2 runtime) ---
+TOOL_CFLAGS := -O2 -Wall -Wextra -Werror -m68000 -msoft-float -mcrt=clib2
+TOOL_BIN     := $(BUILD)/SanaInfo
+SANADUMP_BIN := $(BUILD)/SanaDump
+SANASEND_BIN := $(BUILD)/SanaSend
+# pcapio.c/sana2open.c are shared building blocks (src/tools/*.h), not
+# separate binaries -- SanaDump/SanaSend each compile+link them directly
+# alongside their own .c file in one gcc invocation (no intermediate .o
+# management needed for a project this size).
+TOOLS_SRCDIR := $(SRCDIR)/tools
+TOOLS_COMMON := $(TOOLS_SRCDIR)/pcapio.c $(TOOLS_SRCDIR)/sana2open.c
 
 # --- Copperline on-target smoke test harness (tests/copperline/) ---
 # Freestanding like the device itself (see sana2test.c's header for why: a
@@ -53,8 +60,8 @@ DOCKER_RUN := docker run --rm -v "$(CURDIR)":/work -w /work $(IMAGE)
 all: amiga
 
 device: $(DEV_BIN)
-tools:  $(TOOL_BIN)
-amiga:  $(DEV_BIN) $(TOOL_BIN)
+tools:  $(TOOL_BIN) $(SANADUMP_BIN) $(SANASEND_BIN)
+amiga:  $(DEV_BIN) $(TOOL_BIN) $(SANADUMP_BIN) $(SANASEND_BIN)
 test-harness: $(TEST_BIN)
 
 $(DEV_BIN): $(DEV_SRC)
@@ -63,7 +70,18 @@ $(DEV_BIN): $(DEV_SRC)
 
 $(TOOL_BIN): $(SRCDIR)/sanainfo.c
 	@mkdir -p $(BUILD)
-	$(CC) $(TOOL_CFLAGS) -o $@ $(SRCDIR)/sanainfo.c
+	$(CC) $(TOOL_CFLAGS) -DSANAINFO_VERSION=$(VERSION) -DSANAINFO_REVISION=$(REVISION) \
+	      -o $@ $(SRCDIR)/sanainfo.c
+
+$(SANADUMP_BIN): $(TOOLS_SRCDIR)/sanadump.c $(TOOLS_COMMON) $(TOOLS_SRCDIR)/pcapio.h $(TOOLS_SRCDIR)/sana2open.h
+	@mkdir -p $(BUILD)
+	$(CC) $(TOOL_CFLAGS) -DSANADUMP_VERSION=$(VERSION) -DSANADUMP_REVISION=$(REVISION) \
+	      -o $@ $(TOOLS_SRCDIR)/sanadump.c $(TOOLS_COMMON)
+
+$(SANASEND_BIN): $(TOOLS_SRCDIR)/sanasend.c $(TOOLS_COMMON) $(TOOLS_SRCDIR)/pcapio.h $(TOOLS_SRCDIR)/sana2open.h
+	@mkdir -p $(BUILD)
+	$(CC) $(TOOL_CFLAGS) -DSANASEND_VERSION=$(VERSION) -DSANASEND_REVISION=$(REVISION) \
+	      -o $@ $(TOOLS_SRCDIR)/sanasend.c $(TOOLS_COMMON)
 
 $(TEST_BIN): tests/copperline/sana2test.c
 	@mkdir -p $(BUILD)

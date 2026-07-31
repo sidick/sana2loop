@@ -12,11 +12,11 @@
 #                         output -- a tiny upstream job is the way to feed it
 #                         a computed value.
 #
-#   build               : cross-compiles loopback.device + SanaInfo + the
-#                         Copperline test harness ONCE, running natively
-#                         *inside* the pinned Bebbo m68k-amigaos-gcc image
-#                         via the job-level `container:` key (not a manual
-#                         `docker run`). Uploads the release-relevant
+#   build               : cross-compiles loopback.device + SanaInfo/SanaDump/
+#                         SanaSend + the Copperline test harness ONCE, running
+#                         natively *inside* the pinned Bebbo m68k-amigaos-gcc
+#                         image via the job-level `container:` key (not a
+#                         manual `docker run`). Uploads the release-relevant
 #                         binaries and the harness as separate artifacts.
 #
 #   copperline-smoke-aros : on-target smoke test (tests/copperline/) against
@@ -37,6 +37,17 @@
 #                         locally before trusting a Phase 1 claim or cutting
 #                         a release -- this job can't confirm 1.3-specific
 #                         behavior.
+#
+#   copperline-smoke-tools-aros : the SanaDump/SanaSend on-target round-trip
+#                         test (tests/copperline/run-tools.sh), in its own
+#                         SEPARATE Copperline boot session from the job
+#                         above (see run-tools.sh's own comment for why --
+#                         short version: the device's own test run leaves
+#                         too little chip memory for a second clib2 program
+#                         to load in the same session). No real-Kickstart-
+#                         1.3 equivalent exists for this job to be missing:
+#                         SanaDump/SanaSend are V36+ tools, a real 1.3 ROM
+#                         cannot run them at all.
 #
 #   docs-build          : strict-builds the MkDocs user-docs site
 #                         (userdocs/) and the AmigaGuide conversion
@@ -101,7 +112,7 @@ jobs:
           echo "Using image ref: $REF"
 
   build:
-    name: Amiga cross-build (device + SanaInfo + test harness)
+    name: Amiga cross-build (device + tools + test harness)
     needs: resolve-image
     runs-on: ubuntu-latest
     container:
@@ -121,6 +132,8 @@ jobs:
           path: |
             build/loopback.device
             build/SanaInfo
+            build/SanaDump
+            build/SanaSend
           retention-days: 14
 
       # Separate, short-lived artifact: internal wiring for the smoke-test
@@ -176,6 +189,50 @@ jobs:
 
       - name: make copperline-smoke (bundled AROS, no KICK=, no rebuild)
         run: sh tests/copperline/run.sh
+
+  copperline-smoke-tools-aros:
+    name: Copperline smoke test (SanaDump/SanaSend, bundled AROS)
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      COPPERLINE_VERSION: "0.13.0"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: "sana2loop-${{ github.sha }}"
+          merge-multiple: true
+          path: build
+
+      - name: Restore executable bits
+        run: chmod +x build/loopback.device build/SanaInfo build/SanaDump build/SanaSend
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+
+      - name: Install xdftool (amitools)
+        run: pip install --quiet amitools
+
+      - name: Install Copperline (prebuilt AppImage, bundled AROS)
+        run: |
+          url="https://github.com/CopperlineHQ/Copperline/releases/download/v${COPPERLINE_VERSION}/Copperline-${COPPERLINE_VERSION}-x86_64.AppImage"
+          curl -fsSL "$url" -o copperline.AppImage
+          chmod +x copperline.AppImage
+          ./copperline.AppImage --appimage-extract >/dev/null
+          mkdir -p "$HOME/.local/bin"
+          ln -sf "$PWD/squashfs-root/AppRun" "$HOME/.local/bin/copperline"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # A DELIBERATELY SEPARATE Copperline boot session from run.sh's own
+      # (see run-tools.sh's own header comment for why) -- SanaDump/
+      # SanaSend are V36+ tools, so unlike copperline-smoke-aros above,
+      # there is no equivalent real-Kickstart-1.3 lane for this job to be
+      # missing: a real 1.3 ROM cannot run these at all.
+      - name: make copperline-smoke-tools (bundled AROS, no rebuild)
+        run: sh tests/copperline/run-tools.sh
 
   docs-build:
     name: Docs site + AmigaGuide build

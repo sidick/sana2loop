@@ -49,6 +49,7 @@ nav:
       - Replay and Record: Replay-and-Record.md
       - Fault Injection: Fault-Injection.md
       - SanaInfo Reference: SanaInfo-Reference.md
+      - SanaDump and SanaSend: SanaDump-and-SanaSend.md
   - Help:
       - Troubleshooting and FAQ: Troubleshooting-and-FAQ.md
       - Building and Testing: Building-and-Testing.md

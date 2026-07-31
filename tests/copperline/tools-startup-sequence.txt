@@ -1,0 +1,12 @@
+; M11 SanaDump/SanaSend on-target round-trip boot (see run-tools.sh).
+; SanaDump runs FIRST, backgrounded via Run, so unit 12 stays continuously
+; open (its own OpenDevice() is what keeps the open count above 0) across
+; SanaSend's later write -- rxqueue=5 (unit12.config) means it doesn't
+; matter whether SanaDump's own queued read is in place before SanaSend
+; writes, only that the unit's open count never drops back to 0 in
+; between (which would trigger reset_unit() and discard anything
+; buffered -- a real gap in an earlier version of this test, not a device
+; bug: reset-at-first-open is fully intentional, documented behavior).
+Run >NIL: SanaDump 12 S:sana2loop/captured.pcap COUNT=2
+SanaSend 12 S:sana2loop/arp.pcap
+Wait 2

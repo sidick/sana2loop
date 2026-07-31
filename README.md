@@ -1,11 +1,12 @@
 # sana2loop
 
 `loopback.device` -- a hardware-free SANA-II network device for AmigaOS
-providing echo, crossover, and pcap replay/capture modes, plus a companion
-Shell tool (`SanaInfo`). No null/dummy SANA-II device has existed before
-this, despite being the obvious first tool for testing any network stack,
-shim, or driver-consuming software -- deterministically, with zero
-hardware and zero emulator network support required.
+providing echo, crossover, and pcap replay/capture modes, plus companion
+Shell tools (`SanaInfo`, `SanaDump`, `SanaSend`). No null/dummy SANA-II
+device has existed before this, despite being the obvious first tool for
+testing any network stack, shim, or driver-consuming software --
+deterministically, with zero hardware and zero emulator network support
+required.
 
 Targets plain 68000 and Kickstart 1.3 -- a test tool's value is
 universality, and nothing here needs more.
@@ -20,15 +21,15 @@ reference and implementation notes this project has accumulated, and
 
 ## Status
 
-**M0 through M9 done and validated on-target** under the Copperline
+**M0 through M11 done and validated on-target** under the Copperline
 emulator against both a real Kickstart 1.3 ROM and a bundled,
 redistributable AROS Kickstart replacement: echo and crossover modes, real
 SANA-II buffer-management hooks, per-unit configuration files, a fault
 injection pipeline (drop/duplicate/truncate/reorder/oversilent/online-flap),
-pcap replay (on-demand and real-time-scheduled), and pcap recording.
+pcap replay (on-demand and real-time-scheduled), pcap recording, and the
+`SanaDump`/`SanaSend` companion tools.
 
-Not yet done: a docs pass through the source itself, `SanaDump`/`SanaSend`
-companion tools, and Aminet packaging/release. See
+Not yet done: Aminet packaging and a first tagged release. See
 [`docs/PLAN.md`](docs/PLAN.md)'s milestone table for the exact remaining
 scope.
 
@@ -42,7 +43,7 @@ BSD-licensed and open for review.
 ## Build
 
 ```
-make docker   # cross-compile build/loopback.device + build/SanaInfo
+make docker   # cross-compile build/loopback.device + SanaInfo/SanaDump/SanaSend
               # (needs Docker; no local toolchain required)
 ```
 

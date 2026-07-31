@@ -25,7 +25,18 @@
  * matching the on-disk layout exactly, which isn't guaranteed (and isn't
  * needed -- the pcap_parse_*() helpers below read every field explicitly,
  * byte by byte, through pcap_read_u16()/pcap_read_u32(), and are the only
- * sanctioned way to get bytes from a file into one of these). */
+ * sanctioned way to get bytes from a file into one of these).
+ *
+ * Every function below is `static inline`, not just `static`: this header
+ * is included by multiple translation units (the device, and -- since
+ * M11 -- src/tools/pcapio.c and any tool that includes pcapio.h) that
+ * each use a different SUBSET of these functions (a writer-only tool
+ * never calls the parse side, for instance). Plain `static` would make
+ * an unused function in any one of those TUs a real `-Werror=unused-
+ * function` build failure; `inline` tells the compiler these are
+ * header-style utility functions some includers may legitimately not
+ * call, without changing their semantics (still internal, still no
+ * external symbol). */
 
 #ifndef SANA2LOOP_PCAP_H
 #define SANA2LOOP_PCAP_H
@@ -75,7 +86,7 @@ struct pcap_pkthdr {
  * magic against PCAP_MAGIC_NATIVE/_SWAPPED above) -- not this CPU's own. A
  * big-endian 68000 reading a little-endian-written host capture needs
  * swapped=TRUE despite nothing about the 68000 itself changing. */
-static ULONG pcap_read_u32(const UBYTE *p, BOOL swapped)
+static inline ULONG pcap_read_u32(const UBYTE *p, BOOL swapped)
 {
     if (swapped)
         return ((ULONG)p[0]) | ((ULONG)p[1] << 8) |
@@ -84,7 +95,7 @@ static ULONG pcap_read_u32(const UBYTE *p, BOOL swapped)
            ((ULONG)p[2] << 8) | (ULONG)p[3];
 }
 
-static UWORD pcap_read_u16(const UBYTE *p, BOOL swapped)
+static inline UWORD pcap_read_u16(const UBYTE *p, BOOL swapped)
 {
     if (swapped)
         return (UWORD)(((UWORD)p[0]) | ((UWORD)p[1] << 8));
@@ -95,7 +106,7 @@ static UWORD pcap_read_u16(const UBYTE *p, BOOL swapped)
  * (the caller's job to determine -- reading just the first 4 bytes and
  * comparing against PCAP_MAGIC_NATIVE/_SWAPPED is cheap and doesn't need
  * this function's help). */
-static void pcap_parse_file_header(const UBYTE *buf, BOOL swapped, struct pcap_file_header *out)
+static inline void pcap_parse_file_header(const UBYTE *buf, BOOL swapped, struct pcap_file_header *out)
 {
     out->magic         = pcap_read_u32(buf + 0, swapped);
     out->version_major = pcap_read_u16(buf + 4, swapped);
@@ -109,7 +120,7 @@ static void pcap_parse_file_header(const UBYTE *buf, BOOL swapped, struct pcap_f
 /* Parses a PCAP_PKTHDR_SIZE-byte buffer into `out`, same `swapped`
  * contract as pcap_parse_file_header() above (one file, one byte order,
  * decided once from the file header and reused for every record in it). */
-static void pcap_parse_pkthdr(const UBYTE *buf, BOOL swapped, struct pcap_pkthdr *out)
+static inline void pcap_parse_pkthdr(const UBYTE *buf, BOOL swapped, struct pcap_pkthdr *out)
 {
     out->ts_sec   = pcap_read_u32(buf + 0, swapped);
     out->ts_usec  = pcap_read_u32(buf + 4, swapped);
@@ -125,7 +136,7 @@ static void pcap_parse_pkthdr(const UBYTE *buf, BOOL swapped, struct pcap_pkthdr
  * is fully interoperable, not a limitation. No `swapped` parameter, unlike
  * the readers above: this is this device's OWN writer for its OWN native
  * format, not a general-purpose any-order encoder. */
-static void pcap_write_u32(UBYTE *p, ULONG v)
+static inline void pcap_write_u32(UBYTE *p, ULONG v)
 {
     p[0] = (UBYTE)(v >> 24);
     p[1] = (UBYTE)(v >> 16);
@@ -133,14 +144,14 @@ static void pcap_write_u32(UBYTE *p, ULONG v)
     p[3] = (UBYTE)v;
 }
 
-static void pcap_write_u16(UBYTE *p, UWORD v)
+static inline void pcap_write_u16(UBYTE *p, UWORD v)
 {
     p[0] = (UBYTE)(v >> 8);
     p[1] = (UBYTE)v;
 }
 
 /* Writes a PCAP_FILE_HEADER_SIZE-byte native-order file header. */
-static void pcap_build_file_header(UBYTE *buf, ULONG snaplen, ULONG linktype)
+static inline void pcap_build_file_header(UBYTE *buf, ULONG snaplen, ULONG linktype)
 {
     pcap_write_u32(buf + 0, PCAP_MAGIC_NATIVE);
     pcap_write_u16(buf + 4, 2);   /* version_major */
@@ -152,7 +163,7 @@ static void pcap_build_file_header(UBYTE *buf, ULONG snaplen, ULONG linktype)
 }
 
 /* Writes a PCAP_PKTHDR_SIZE-byte native-order record header. */
-static void pcap_build_pkthdr(UBYTE *buf, ULONG ts_sec, ULONG ts_usec, ULONG incl_len, ULONG orig_len)
+static inline void pcap_build_pkthdr(UBYTE *buf, ULONG ts_sec, ULONG ts_usec, ULONG incl_len, ULONG orig_len)
 {
     pcap_write_u32(buf + 0, ts_sec);
     pcap_write_u32(buf + 4, ts_usec);

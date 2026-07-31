@@ -68,7 +68,4 @@ SanaInfo: unit 3 set OFFLINE (io_Error=0)
 
 `SanaInfo` is a query/toggle tool, not a traffic generator or capture tool
 — it never issues `CMD_WRITE`/`CMD_READ`. For sending or capturing traffic
-from the Shell, see the planned `SanaSend`/`SanaDump` tools (not yet built
-— see the [Changelog](Changelog.md)); for now, write a small program
-against the device directly, or use `mode=replay`/`record=`
-(see [Replay and Record](Replay-and-Record.md)).
+from the Shell, see [SanaDump and SanaSend](SanaDump-and-SanaSend.md).

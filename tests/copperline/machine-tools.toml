@@ -1,0 +1,54 @@
+# Copperline machine profile for the M11 SanaDump/SanaSend on-target test
+# (run-tools.sh) -- deliberately a SEPARATE, fresh boot from the device's
+# own smoke test (machine.toml/run.sh), not appended to that same
+# Startup-Sequence.
+#
+# Why separate: empirically, by the time sana2test.c's own full run
+# finishes, this profile's 512K chip memory is down to ~12 KB free --
+# loopback.device's own documented design ("free replay-mode buffers only
+# at the NEXT open, never at close" -- see src/loopback_device.c) leaves
+# M8/M9's replay-mode units' buffers permanently allocated for as long as
+# the device stays loaded, which is fine for sana2test.c itself (it never
+# needed to run anything afterward) but starves any clib2 program that
+# tries to load and run in the SAME boot session afterward -- confirmed by
+# a minimal trivial-clib2-program probe that ran fine as the ONLY
+# Startup-Sequence entry but silently never even reached main() when run
+# straight after sana2test.c. A fresh boot sidesteps this entirely.
+#
+# Memory is DELIBERATELY more generous than machine.toml's 512K+512K
+# (the device's own bare-minimum target floor): SanaDump/SanaSend are
+# documented V36+/2.0+ convenience tools, never claimed to run on the
+# device's own bare-512K floor in the first place (see their own source
+# comments, and docs/PLAN.md decision #9: "Tools stay 2.0+ ... the device
+# is the 1.3 artifact"). Confirmed empirically (AvailMem(MEMF_CHIP)
+# checked right at the failing OpenDevice() call) that 512K+512K genuinely
+# runs out -- only ~9 KB chip free by the time a full clib2 program
+# (ReadArgs, stdio, the SANA-II open-cookie tag list) plus
+# loopback.device's own load footprint (its device base holds all
+# SANA2LOOP_NUM_UNITS units' state, not just the one being opened) both
+# need to coexist, especially under bundled AROS specifically -- which,
+# per this project's own established M8/M9 findings, has measurably less
+# free memory than real hardware for an identical profile (AROS has to
+# load its own Kickstart replacement into the same budget a real ROM
+# never touches). Real Kickstart 2.0+/3.x hardware has never been this
+# tight in practice; there is no reason to hold these convenience tools
+# to the device's own hardware-floor memory budget.
+[cpu]
+model = "68000"
+
+[memory]
+chip = "1M"
+slow = "512K"
+fast = "1M"
+
+[floppy]
+drives = 1
+speed = 0
+
+[floppy.df0]
+path = "tools-boot.adf"   # built fresh by run-tools.sh via xdftool
+write_protected = false
+
+[emulation]
+power_on = true
+warp_speed = "max"

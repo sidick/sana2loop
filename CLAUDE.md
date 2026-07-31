@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `sana2loop` builds **`loopback.device`**, a hardware-free SANA-II network
 device for AmigaOS: echo, crossover, and pcap replay/capture modes, plus
-companion Shell tools (`SanaInfo`, later `SanaDump`/`SanaSend`). It exists
+companion Shell tools (`SanaInfo`, `SanaDump`, `SanaSend`). It exists
 because no null/dummy SANA-II device has ever existed, despite being the
 obvious first tool for testing any network stack, shim, or driver-consuming
 software -- deterministically, with zero hardware and zero emulator network
@@ -32,7 +32,7 @@ they may require Kickstart 2.0+ where convenient (documented per-tool).
 ## Current state
 
 Working through `docs/PLAN.md`'s milestones (M0-M12: spec-correctness
-backfill, then Phases 2-4). **M0-M10 done**, each validated on-target under
+backfill, then Phases 2-4). **M0-M11 done**, each validated on-target under
 Copperline against both bundled AROS (CI) and a real Kickstart 1.3 ROM
 (`make copperline-smoke` / `KICK=... make copperline-smoke`,
 see `tests/copperline/`) before being considered complete. M9 initially
@@ -67,6 +67,52 @@ The device's own top-of-file overview comment was still describing "Phase
 1" only (echo + a handful of commands) despite M0-M9 having long since
 added crossover, replay, record, and fault injection -- rewritten to match
 current reality.
+
+**M11** (companion tools): `SanaDump`/`SanaSend` (V36+/2.0+ Shell tools,
+like `SanaInfo`), `src/tools/pcapio.c` (host/tool-side pcap file I/O) and
+`src/tools/sana2open.c` (shared "open with real buffer-management hooks"
+helper -- a model-citizen reference, not just a bare `OpenDevice()`), plus
+`host/make_fixtures.py`/`host/lint_pcap.py` and a top-level `fixtures/`
+canonical corpus (ARP, DHCP discover, TCP handshake). Building the
+on-target round-trip test surfaced two real, non-device-code findings:
+(1) clib2's `fopen()` reliably failed under Copperline's minimal
+Startup-Sequence boot where plain dos.library `Open()` didn't -- fixed by
+switching `pcapio.c` to dos.library I/O entirely, matching
+`loopback_device.c`'s own established pattern; (2) running the tools in
+the SAME Copperline boot session right after `sana2test.c`'s own full run
+reliably ran out of chip memory (confirmed via `AvailMem()`: ~9 KB free)
+because the device's own "never free replay-mode buffers at close" design
+(see M8/M9) leaves them permanently allocated for as long as it stays
+loaded -- fixed with a **separate** Copperline boot session for the tools
+(`tests/copperline/run-tools.sh`/`machine-tools.toml`) with a more
+generous memory profile (SanaDump/SanaSend are documented 2.0+
+convenience tools, never claimed to run on the device's own bare-512K
+target floor). See docs/PLAN.md's M11 risk note for the full
+investigation, including a third, genuinely test-design gap (reopening a
+unit resets it, discarding buffered traffic -- fixed by keeping SanaDump's
+own open alive across both tools via `Run`).
+
+**Post-M11** (found by code review while documenting the device's memory
+behavior, not on-target testing): the device never calls `AddMemHandler()`
+(no participation in Exec's low-memory recovery protocol -- invisible to
+system memory pressure until its own `AllocMem()` fails, handled locally
+with no retry), and every `AllocMem()` it makes asks only for `MEMF_CLEAR`
+(fast RAM preferred, chip only as fallback -- the M11 "chip RAM exhausted"
+findings above were the test machine profile's lack of any `fast=` memory
+at all, not a device preference for chip). Writing that up surfaced a real
+gap: `expunge()` (Exec unloading the whole device once its device-wide
+`lib_OpenCnt` hits 0 -- e.g. via the Shell's `Avail FLUSH`) froze only the
+device base struct, never looping over units first to free any held
+replay/record buffers -- worse than the documented "held until next open"
+cost, since those buffers become permanently unreachable once the base
+itself is freed. Fixed by looping over every unit and calling
+`reset_unit()` on each (reusing its existing free logic) before the base's
+own `FreeMem()`. Also documented a manual, no-reboot recipe for reclaiming
+a unit's held memory (close it, drop `replay=`/`record=` from its config,
+reopen once) and the whole-device recipe (`Avail FLUSH` once every unit is
+closed) -- see `docs/sana2-notes.md`'s "Memory lifetime" section and
+`userdocs/Replay-and-Record.md`. Verified the fix via `make
+copperline-smoke` (bundled AROS) and `run-tools.sh`, both still green.
 
 - `src/loopback_device.c` -- the device. Hand-rolled Resident/auto-init
   (see "Architecture" below for why, and for the on-target Guru
@@ -279,14 +325,43 @@ current reality.
   top for a real on-target bug this tripped over and how it was found.
 
 - `userdocs/` (M10) -- the user-facing documentation site source (MkDocs
-  Material, `mkdocs.yml`), 11 pages covering installation, configuration,
-  every mode, fault injection, `SanaInfo`, troubleshooting, and a
-  changelog. `tools/docs2guide.py` converts the same source into an
-  on-Amiga AmigaGuide manual (`make guide`) -- one source, two outputs.
-  Not yet published (repo is private, no gh-pages workflow yet); CI only
-  build-checks it (`docs-build` job).
+  Material, `mkdocs.yml`), 12 pages covering installation, configuration,
+  every mode, fault injection, `SanaInfo`, `SanaDump`/`SanaSend`,
+  troubleshooting, and a changelog. `tools/docs2guide.py` converts the
+  same source into an on-Amiga AmigaGuide manual (`make guide`) -- one
+  source, two outputs. Not yet published (repo is private, no gh-pages
+  workflow yet); CI only build-checks it (`docs-build` job).
 
-Not yet done: `SanaDump`/`SanaSend` (M11), Aminet packaging (M12).
+- `src/tools/` (M11) -- `sanadump.c`/`sanasend.c` (the CLI tools), plus
+  two shared building blocks: `pcapio.c`/`.h` (host-side pcap file I/O,
+  dos.library-based -- see that header's own comment for why not stdio)
+  and `sana2open.c`/`.h` (shared "open with real, explicit buffer-
+  management hooks" helper -- a model-citizen reference for consumers,
+  not just a bare `OpenDevice()`). Each tool compiles+links directly
+  against both shared files in one `gcc` invocation (see the Makefile) --
+  no intermediate `.o` management needed at this project's size.
+
+- `host/make_fixtures.py`/`host/lint_pcap.py` (M11) -- a `scapy`-based
+  canonical `.pcap` corpus generator (ARP, DHCP discover, TCP handshake,
+  written to top-level `fixtures/`) and a general-purpose structural
+  linter (magic/linktype/header-size/monotonic-timestamp checks) --
+  distinct from `tests/copperline/fixtures/`, which holds on-target-
+  test-specific captures with fixed byte content the harness asserts
+  against exactly.
+
+- `tests/copperline/run-tools.sh` (M11) -- the SanaDump/SanaSend
+  on-target round-trip test, in its own **separate** Copperline boot
+  session (`machine-tools.toml`) from the device's own `run.sh` -- see
+  that file's own comment for why (short version: the device's own test
+  run leaves too little chip memory for a second clib2 program to load
+  afterward in the same session). `tools-startup-sequence.txt` runs
+  SanaDump first (backgrounded via `Run`, keeping unit 12's open count
+  above 0 across SanaSend's later write -- reopening it would trigger
+  `reset_unit()` and discard whatever was buffered); verified via
+  `verify_sanadump.py` extracting the produced capture post-run, the same
+  pattern as `run.sh`'s own M9 record= check.
+
+Not yet done: Aminet packaging + release flow (M12).
 
 ## Architecture
 
