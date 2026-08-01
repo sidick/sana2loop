@@ -739,31 +739,45 @@ string has a single source of truth from day one.
 serial output). Run it with `make copperline-smoke KICK=/path/to/kick13.rom`
 (local, real Kickstart 1.3) or with `KICK` unset (bundled AROS, weaker but
 ROM-free -- what public CI runs; see the `copperline-smoke-aros` CI job).
-Any released `copperline` works for both -- see the `[[filesys]]` note
-below for why no special build is needed here.
+Any released `copperline` 0.14.0+ works for both.
 
 - **Prefer a real Kickstart 1.3 ROM (`KICK=`) locally.** AROS can't validate
   this project's actual 1.3-fidelity claims -- it's a fine ROM-free stand-in
   for catching gross regressions in CI, but confirm against real 1.3 before
   trusting a Phase 1 claim or cutting a release.
-- **A real 68000+`[[filesys]]` doorbell bug exists in Copperline 0.12.0/
-  0.13.0** (any host-directory mount hangs forever on a 68000/68010 guest,
-  bundled AROS or a real ROM alike -- root cause: the bug's fix is on the
-  unmerged `fix/filesys-68000-doorbell-split` branch of the local checkout
-  at `/Users/simond/src/external/Copperline`). **This project's own test
-  doesn't hit it** -- it boots from a plain floppy image, never
-  `[[filesys]]`, confirmed empirically with released 0.13.0 against both a
-  real 1.3 ROM and AROS. Only relevant if a *future* test here wants a
-  host-directory mount instead of a floppy -- that would need the fix
-  branch built in an isolated worktree (`git -C
-  /Users/simond/src/external/Copperline worktree add <dir>
-  fix/filesys-68000-doorbell-split && cd <dir> && cargo build --release`;
-  check `worktree list` first, one may already exist from prior work).
-- **Kickstart 1.3 does not autoboot a `[[filesys]]` host-directory mount** --
-  confirmed empirically: a real 1.3 ROM shows the "insert Workbench disk"
-  hand icon and waits for a floppy in DF0, unlike 2.0+'s boot-node scanning
-  across Zorro-autoconfig filesystem devices. Boot from an actual ADF
-  (`[floppy.df0] path = ...`) instead.
+- **The real 68000+`[[filesys]]` doorbell bug that existed in Copperline
+  0.12.0/0.13.0 is fixed and released in 0.14.0** ("68000 split writes":
+  a 68000's word write split across the services board's MMIO doorbell now
+  fires the doorbell correctly). This project's own test never hit it
+  itself -- it boots from a plain floppy image, never `[[filesys]]`,
+  confirmed empirically with 0.13.0 against both a real 1.3 ROM and AROS.
+  No more local `fix/filesys-68000-doorbell-split` branch/worktree needed
+  (`/Users/simond/src/external/Copperline`) if a future test here ever
+  does want `[[filesys]]` -- that fix shipped upstream in 0.14.0.
+- **Tried and reverted: `[[filesys]]` hostfs mounts as a replacement for
+  this project's own `xdftool`-built fixture/output floppy layout.**
+  Copperline 0.14.0's release notes say hostfs volumes (`HOSTFS0:`, ...)
+  "now mount under Kickstart 1.3", and the underlying board genuinely does
+  initialize on a real 1.3 ROM (visible in Copperline's own boot log: `filesys:
+  expansion init at board 0x00EA0000, 1 mount(s)`) -- but empirically, in
+  this project's own minimal from-scratch boot ADF (no `SetPatch`, no
+  Workbench boot init), a guest `Open()` of `HOSTFS0:` -- for **either**
+  read or write -- reliably **fails** on both a real Kickstart 1.3 ROM and
+  a real Kickstart 3.1 ROM, while succeeding cleanly on Copperline's own
+  bundled AROS. Root cause not chased further than that (plausibly: AROS
+  auto-registers autoconfig filesystem boards into the DOS device list at
+  a point real Kickstart's dos.library only does via boot-time init this
+  project's own bare-bones Startup-Sequence never runs, e.g. `SetPatch` or
+  the disk-validator boot-node scan) -- confirmed via direct `copperline`
+  invocations isolating read from write and ruling out a `--benchmark-until`
+  timing cutoff. **Net effect: building this project's own on-target
+  fixture/output handling around hostfs would have made it pass only on
+  AROS and silently break on every real ROM** -- exactly the kind of
+  AROS-diverges-from-real-hardware trap this project's own testing
+  philosophy exists to catch (see "Prefer a real Kickstart 1.3 ROM" above),
+  just inverted (AROS does MORE here, not less). `run.sh`/`run-tools.sh`
+  were reverted to their pre-0.14.0 `xdftool`-based approach; `[[filesys]]`
+  stays unused by this project's own tests for now.
 - **Use a minimal from-scratch bootable ADF, not a full Workbench disk.** A
   real Workbench 1.3 image takes ~90 emulated seconds to reach a usable
   state under `warp_speed = "max"` (disk-validator/font/icon overhead this

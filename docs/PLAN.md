@@ -390,6 +390,31 @@ proper.
   RAM floor from 1 MB to 2 MB rather than re-shrinking future fixes
   indefinitely (a deliberate, user-approved decision, now documented in
   `userdocs/Installation.md`).
+- **Copperline 0.14.0 upgrade (2026-08-01)**: bumped `COPPERLINE_VERSION`
+  0.13.0 -> 0.14.0 in CI (`.github/workflows/ci.yml`); release notes
+  reviewed for anything load-bearing to this project. Two items were:
+  the real 68000+`[[filesys]]` MMIO doorbell bug (contributed upstream by
+  the user, sidick) is fixed and released, and hostfs (`HOSTFS0:`) volumes
+  now advertise mounting under Kickstart 1.3 (also contributed by the
+  user), not just 2.0+. Explored restructuring `run.sh`/`run-tools.sh` to
+  boot a static ADF plus a `[[filesys]]` hostfs mount for fixture/output
+  data, replacing the `xdftool`-built-and-extracted floppy layout and
+  sidestepping the M13/pre-launch-review floppy write-back-ordering quirk
+  class entirely. Implemented and passed 4/4 clean against bundled AROS --
+  but empirically, on both a real Kickstart 1.3 ROM AND a real Kickstart
+  3.1 ROM, guest `Open()` of `HOSTFS0:` (read or write) reliably fails in
+  this project's own minimal from-scratch boot ADF (no `SetPatch`, no
+  Workbench boot init), despite the underlying board visibly initializing
+  in Copperline's own boot log. Root cause not chased past that (plausibly
+  a real-Kickstart boot-node-scan step this project's bare-bones
+  Startup-Sequence never triggers, that AROS performs unconditionally).
+  **Reverted** rather than shipped: building this project's own on-target
+  verification around a mechanism that only works on the ROM-free stand-in
+  and fails on every real ROM tested would invert this project's own
+  "AROS can't validate real hardware fidelity" stance into an active trap.
+  `run.sh`/`run-tools.sh` stay on their pre-0.14.0 `xdftool`-based
+  approach; `[[filesys]]` remains unused by this project's own tests. See
+  CLAUDE.md's "Testing under Copperline" section for the full account.
 
 ## Verification
 
