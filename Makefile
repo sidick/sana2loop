@@ -181,12 +181,15 @@ version:
 # --- guide: AmigaGuide user documentation, generated from userdocs/ --------
 # userdocs/ is the single source of truth for user docs (built as the
 # MkDocs site, see mkdocs.yml); this converts it for on-Amiga reading
-# (MultiView/AmigaGuide).
-guide: | $(BUILD)
-	python3 tools/docs2guide.py userdocs $(BUILD)/sana2loop.guide
-
-$(BUILD):
+# (MultiView/AmigaGuide). @mkdir's own recipe line, not a `| $(BUILD)`
+# order-only prerequisite on a separate $(BUILD): rule -- BUILD's value is
+# literally the string "build", so a target named $(BUILD) collided with
+# the verb-contract `build:` target above and silently pulled the full
+# cross-compile into every `make guide` (caught by ci.yml's docs-build job
+# needing m68k-amigaos-gcc on a plain runner that doesn't have it).
+guide:
 	@mkdir -p $(BUILD)
+	python3 tools/docs2guide.py userdocs $(BUILD)/sana2loop.guide
 
 # --- lha: build the real LHa for UNIX (archive-capable), pinned ------------
 # Homebrew's and Ubuntu's `lha` is Lhasa -- extract-only, useless for
