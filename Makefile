@@ -6,12 +6,16 @@
 #   make amiga   - both of the above
 #   make docker  - run 'make amiga' inside the cross-compiler container
 #   make dist    - package build/dist/sana2loop.{lha,readme} for Aminet
-#                  (needs prebuilt m68k binaries: make amiga / make docker)
+#                  (builds the m68k binaries itself if needed)
 #   make clean
 #
-# Amiga toolchain: Bebbo m68k-amigaos GCC, same pinned image sana2loop's
-# sibling project (narrator.wyoming) uses. Use 'make docker' if you don't
-# have the cross-compiler installed locally.
+# Also implements sidick/amiga-workflows' five-verb CI contract (build,
+# test-host, test-target, lint, dist) - see the "Verb contract" comment
+# below amiga/test-harness for how those map onto the targets above.
+#
+# Amiga toolchain: Bebbo m68k-amigaos GCC, via the shared sidick/amiga-dev
+# image (ghcr.io/sidick/amiga-dev). Use 'make docker' if you don't have the
+# cross-compiler installed locally.
 #
 # Target floor: 68000 / Kickstart 1.3 for the device itself (see
 # docs/sana2-notes.md for why). The companion Shell tools may require more
@@ -54,8 +58,8 @@ TOOLS_COMMON := $(TOOLS_SRCDIR)/pcapio.c $(TOOLS_SRCDIR)/sana2open.c
 TEST_CFLAGS := -nostdlib -nostartfiles -O2 -Wall -Wextra -m68000 -msoft-float
 TEST_BIN    := $(BUILD)/sana2test
 
-# --- Docker (same pinned image as narrator.wyoming's Bebbo toolchain) ---
-IMAGE      ?= ghcr.io/reinauer/container-amiga-gcc@sha256:75eee7a55bcffdde76e0a4f42ca025b89796053807e8f1b05bab9294b640f4e8
+# --- Docker (shared toolchain image, see sidick/amiga-dev) ---
+IMAGE      ?= ghcr.io/sidick/amiga-dev:1
 # --user matches the container process's UID/GID to the host caller's, so
 # every file `make amiga` creates under build/ (bind-mounted, not a
 # container-private volume) is host-owned, not root-owned. Without this,
@@ -71,7 +75,7 @@ IMAGE      ?= ghcr.io/reinauer/container-amiga-gcc@sha256:75eee7a55bcffdde76e0a4
 # the real proof is release.yml's own CI run succeeding end to end.
 DOCKER_RUN := docker run --rm --user "$$(id -u):$$(id -g)" -v "$(CURDIR)":/work -w /work $(IMAGE)
 
-.PHONY: all device tools amiga test-harness docker docker-test-harness copperline-smoke copperline-smoke-tools guide dist clean version
+.PHONY: all device tools amiga test-harness docker docker-test-harness copperline-smoke copperline-smoke-tools guide dist clean version build test-host test-target lint
 
 all: amiga
 
@@ -80,12 +84,42 @@ tools:  $(TOOL_BIN) $(SANADUMP_BIN) $(SANASEND_BIN) $(SANACONFORM_BIN)
 amiga:  $(DEV_BIN) $(TOOL_BIN) $(SANADUMP_BIN) $(SANASEND_BIN) $(SANACONFORM_BIN)
 test-harness: $(TEST_BIN)
 
+# --- Verb contract (sidick/amiga-workflows' build-test.yml) ---------------
+# ci.yml calls these five names; each build-test.yml job is independent (no
+# artifact-passing between them), so test-target and dist below each pull in
+# `build` themselves rather than assuming a prior job already ran it. The
+# named targets above (amiga/docker/test-harness/copperline-smoke/...) stay
+# as the documented local entry points -- README.md, CLAUDE.md, and
+# userdocs/Building-and-Testing.md all reference them by name already, so
+# this adds the contract's names rather than renaming what they point to.
+build: amiga test-harness
+
+# No host-side tests exist yet (host/lint_pcap.py and host/make_fixtures.py
+# are fixture-generation helpers, not assertions) - a real no-op per the
+# verb contract's own allowance, not a disabled/skipped job.
+test-host:
+	@echo "test-host: no host-side tests yet"
+
+# Two separate Copperline boot sessions, same as copperline-smoke +
+# copperline-smoke-tools below - see run-tools.sh's own header comment for
+# why they can't share one session. AMIGA_REAL_ROM, if the workflow decoded
+# one from the optional AMIGA_REAL_ROM_B64 secret, becomes KICK= for both;
+# unset (the common case - see CLAUDE.md's "Why the real-1.3 ROM stays out
+# of CI"), both boot Copperline's bundled AROS instead.
+test-target: build
+	KICK="$${AMIGA_REAL_ROM:-}" sh tests/copperline/run.sh
+	KICK="$${AMIGA_REAL_ROM:-}" sh tests/copperline/run-tools.sh
+
+lint:
+	pip install --quiet semgrep
+	semgrep --config auto --error --include='*.c' --include='*.h' src/
+
 # version.mk is a prerequisite of every binary below (not just `include`d
 # above): VERSION/REVISION feed each one's $VER string via -D, so a local
 # version bump without this would let an incremental `make dist` package
 # binaries still carrying the OLD $VER (release CI always builds from a
-# clean checkout, so this is a local-only hazard -- release.yml's own
-# $VER grep would still catch it there).
+# clean checkout, so this is a local-only hazard -- dist's own $VER grep,
+# below, would still catch it either way).
 $(DEV_BIN): $(DEV_SRC) src/pcap.h version.mk
 	@mkdir -p $(BUILD)
 	$(CC) $(DEV_CFLAGS) -o $@ $(DEV_SRC)
@@ -177,13 +211,27 @@ $(BUILD)/tools/lha:
 	rm -rf $(BUILD)/tools/lha-src
 
 # --- dist: assemble the Aminet upload pair (archive + .readme) -------------
-# Expects prebuilt m68k binaries (make amiga / make docker); the lha
-# archiver is built automatically (above). Produces build/dist/sana2loop.lha
-# (drawer with device+tools+guide+license) and build/dist/sana2loop.readme
-# alongside it -- the two files Aminet wants.
-dist: guide $(LHA)
-	@test -f $(DEV_BIN) -a -f $(TOOL_BIN) -a -f $(SANADUMP_BIN) -a -f $(SANASEND_BIN) -a -f $(SANACONFORM_BIN) || \
-		{ echo "dist: missing m68k binaries; run: make amiga (or make docker)"; exit 1; }
+# Builds the m68k binaries itself (build-test.yml's dist job runs `make
+# dist` standalone, with no prior `build` job's artifacts to reuse - see the
+# verb-contract comment above); the lha archiver is built automatically
+# (below). Produces build/dist/sana2loop.lha (drawer with
+# device+tools+guide+license) and build/dist/sana2loop.readme alongside it
+# -- the two files Aminet wants.
+#
+# The $VER grep below confirms the binaries just built actually embed the
+# CURRENT version.mk VERSION/REVISION - catching a stale build/ directory
+# left over from before a local version bump (the DEV_BIN/TOOL_BIN comment
+# above already flags this as a local-only hazard; this makes `make dist`
+# self-checking instead of relying on a clean checkout to avoid it). CI
+# separately confirms the git tag matches version.mk itself
+# (scripts/verify-version.sh, run before this target), closing the loop:
+# tag == version.mk == what's actually in the binaries.
+dist: build guide $(LHA)
+	@v="$(VERSION).$(REVISION)"; \
+	grep -aqF "\$$VER: sana2loop $$v (" $(DEV_BIN) || { echo "dist: $(DEV_BIN) lacks \"\$$VER: sana2loop $$v (...)\" - stale build/?"; exit 1; }; \
+	for b in SanaInfo SanaDump SanaSend SanaConform; do \
+		grep -aqF "\$$VER: $$b $$v (" $(BUILD)/$$b || { echo "dist: $(BUILD)/$$b lacks \"\$$VER: $$b $$v (...)\" - stale build/?"; exit 1; }; \
+	done
 	rm -rf $(BUILD)/dist
 	mkdir -p $(BUILD)/dist/sana2loop
 	cp $(DEV_BIN) $(TOOL_BIN) $(SANADUMP_BIN) $(SANASEND_BIN) $(SANACONFORM_BIN) $(BUILD)/sana2loop.guide \

@@ -2,121 +2,39 @@ name: Release
 
 # Tag-driven releases: a release PR bumps version.mk + sana2loop.readme's
 # Version: field through normal review/CI, then pushing the matching
-# v<version> tag runs this. The GitHub release (with the Aminet package
-# attached) is created automatically; the actual Aminet FTP upload waits
-# for manual approval via the `aminet` environment. Pattern adopted from
-# sibling project amiauth's own release.yml (see docs/PLAN.md's M12 entry
-# and CLAUDE.md for why this pattern was preferred over narrator.wyoming's
-# simpler one).
+# v<version> tag runs this. verify-version confirms the pushed tag actually
+# matches those two files; release then delegates the build -> GitHub
+# release -> Aminet-upload-behind-required-review pipeline to
+# sidick/amiga-workflows' aminet-release.yml. The old inline $VER-embedded-
+# in-binary check moved into the Makefile's own `dist` target (see its
+# comment there) - aminet-release.yml's dist job runs `make dist` standalone
+# with no separate build step to hang a caller-side check off of.
 
 on:
   push:
     tags: ['v*']
 
-permissions:
-  contents: write
-
 jobs:
-  release:
-    name: Build and publish GitHub release
+  verify-version:
+    name: Verify tag matches version.mk / sana2loop.readme
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - run: ./scripts/verify-version.sh "${{ github.ref_name }}"
 
-      - name: Verify tag matches version.mk and sana2loop.readme
-        run: |
-          tag="${GITHUB_REF_NAME#v}"
-          ver=$(sed -n 's/^VERSION[[:space:]]*:=[[:space:]]*//p' version.mk)
-          rev=$(sed -n 's/^REVISION[[:space:]]*:=[[:space:]]*//p' version.mk)
-          src="$ver.$rev"
-          readme=$(sed -n 's/^Version:[[:space:]]*\(.*\)$/\1/p' sana2loop.readme)
-          echo "tag=$tag version.mk=$src sana2loop.readme=$readme"
-          [ "$tag" = "$src" ]    || { echo "::error file=version.mk::Tag v$tag does not match version.mk \"$src\""; exit 1; }
-          [ "$tag" = "$readme" ] || { echo "::error file=sana2loop.readme::Tag v$tag does not match Version: \"$readme\""; exit 1; }
-
-      - name: Cross-build m68k binaries (device + tools)
-        run: make docker
-
-      - name: Check the $VER strings made it into the binaries
-        run: |
-          v="${GITHUB_REF_NAME#v}"
-          # -F: fixed-string match (the pattern contains $ and parens);
-          # -a: search the binary as text.
-          grep -aqF "\$VER: sana2loop $v (" build/loopback.device || { echo "::error::build/loopback.device lacks \"\$VER: sana2loop $v (...)\""; exit 1; }
-          for b in SanaInfo SanaDump SanaSend SanaConform; do
-            grep -aqF "\$VER: $b $v (" "build/$b" || { echo "::error::build/$b lacks \"\$VER: $b $v (...)\""; exit 1; }
-          done
-
-      # `make dist` builds its own pinned lha (Ubuntu's lhasa is extract-only)
-      - name: Package the Aminet upload pair
-        run: make dist
-
-      - name: Validate the readme (no upload)
-        uses: sidick/aminet-release-action@v1
-        with:
-          filename: build/dist/sana2loop.lha
-          readme: build/dist/sana2loop.readme
-          category: comm/net
-          validate-only: true
-
-      - name: Create GitHub release with the package attached
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if [ "$(gh release list --limit 1 --json tagName -q 'length')" = "0" ]; then
-            # First-ever release: a --generate-notes PR-title dump has
-            # nothing meaningful to diff against (every merged PR since the
-            # repo's creation), so use a curated body sourced from
-            # sana2loop.readme's own intro + Features section instead.
-            # Later releases have a previous tag to diff against, so they
-            # fall through to --generate-notes below, which becomes
-            # genuinely useful once there's real release-to-release history.
-            {
-              sed -n '/^Distribution:/,/^Features$/p' sana2loop.readme | sed '1d;$d;/^--------$/d'
-              echo "**Features:**"
-              echo
-              sed -n '/^Features$/,/^Requirements$/p' sana2loop.readme | sed '1d;$d;/^--------$/d;/^$/d'
-              echo
-              echo "See [docs/PLAN.md](https://github.com/sidick/sana2loop/blob/main/docs/PLAN.md) for the full milestone history and the [full documentation site](https://sidick.github.io/sana2loop/) (also included as sana2loop.guide in this release's archive)."
-            } > /tmp/release-notes.md
-            gh release create "$GITHUB_REF_NAME" \
-              --title "sana2loop $GITHUB_REF_NAME" \
-              --notes-file /tmp/release-notes.md \
-              build/dist/sana2loop.lha build/dist/sana2loop.readme
-          else
-            gh release create "$GITHUB_REF_NAME" \
-              --title "sana2loop $GITHUB_REF_NAME" \
-              --generate-notes \
-              build/dist/sana2loop.lha build/dist/sana2loop.readme
-          fi
-
-      - name: Keep the package for the Aminet job
-        uses: actions/upload-artifact@v7
-        with:
-          name: aminet-dist
-          path: |
-            build/dist/sana2loop.lha
-            build/dist/sana2loop.readme
-          if-no-files-found: error
-
-  aminet:
-    name: Upload to Aminet (waits for approval)
-    runs-on: ubuntu-latest
-    needs: release
-    # The `aminet` environment has a required reviewer, so this job pauses
-    # until the upload is explicitly approved in the Actions UI. Publishing
-    # to Aminet is irreversible-ish (uploads land in /new for moderation) --
-    # keep the human in the loop.
-    environment: aminet
-    steps:
-      - uses: actions/download-artifact@v8
-        with:
-          name: aminet-dist
-          path: build/dist
-
-      - name: Upload to Aminet and attach to the GitHub release
-        uses: sidick/aminet-release-action@v1
-        with:
-          filename: build/dist/sana2loop.lha
-          readme: build/dist/sana2loop.readme
-          category: comm/net
+  release:
+    name: Build, release, and (on approval) publish to Aminet
+    needs: verify-version
+    # A reusable workflow's own `permissions:` can only narrow, never
+    # widen, what the calling job already has - aminet-release.yml's
+    # `gh release create` step needs contents: write, so it has to be
+    # granted here too, not just relied on inside that workflow.
+    permissions:
+      contents: write
+    uses: sidick/amiga-workflows/.github/workflows/aminet-release.yml@v1
+    with:
+      tag: ${{ github.ref_name }}
+      project-name: sana2loop
+      lha-path: build/dist/sana2loop.lha
+      readme-path: build/dist/sana2loop.readme
+      category: comm/net
