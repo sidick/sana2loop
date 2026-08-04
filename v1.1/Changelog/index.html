@@ -1,0 +1,1533 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="A hardware-free SANA-II network device for AmigaOS">
+      
+      
+      
+        <link rel="canonical" href="https://sidick.github.io/sana2loop/v1.1/Changelog/">
+      
+      
+        <link rel="prev" href="../Building-and-Testing/">
+      
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Changelog - sana2loop</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#changelog" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+      <div data-md-color-scheme="default" data-md-component="outdated" hidden>
+        
+      </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="sana2loop" class="md-header__button md-logo" aria-label="sana2loop" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            sana2loop
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Changelog
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/sidick/sana2loop" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    sidick/sana2loop
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="sana2loop" class="md-nav__button md-logo" aria-label="sana2loop" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    sana2loop
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/sidick/sana2loop" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    sidick/sana2loop
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting going
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting going
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../Installation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Installation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../Getting-Started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Using loopback.device
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Using loopback.device
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../Configuration-Reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Configuration Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../Echo-and-Crossover/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Echo and Crossover Modes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../Replay-and-Record/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Replay and Record
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../Fault-Injection/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Fault Injection
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../SanaInfo-Reference/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SanaInfo Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../SanaDump-and-SanaSend/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SanaDump and SanaSend
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../SANA-II-Conformance/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SANA-II Conformance
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Help
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Help
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../Troubleshooting-and-FAQ/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting and FAQ
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../Building-and-Testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Building and Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#foundational-milestones-m0m4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Foundational milestones (M0–M4)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#m5-configuration-files" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        M5 — Configuration files
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#m6-crossover-mode" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        M6 — Crossover mode
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#m7-fault-injection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        M7 — Fault injection
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#m8-pcap-replay-consume-mode" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        M8 — pcap replay (consume mode)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#m9-scheduled-replay-and-recording" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        M9 — Scheduled replay and recording
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#m10-documentation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        M10 — Documentation
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#m11-sanadump-and-sanasend" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        M11 — SanaDump and SanaSend
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#m12-aminet-packaging-and-release-flow" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        M12 — Aminet packaging and release flow
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#m13-sana-ii-rev-2347-conformance" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        M13 — SANA-II Rev 2/3/4/7 conformance
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#m14-configurable-replay-capacity" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        M14 — Configurable replay capacity
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#m15-wire-types-reported-bps-minimum-write-size" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        M15 — Wire types, reported BPS, minimum write size
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#m16-pinned-addresses-visible-error-injection-finer-loss-rates" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        M16 — Pinned addresses, visible error injection, finer loss rates
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#m17-simulated-link-latency-and-jitter" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        M17 — Simulated link latency and jitter
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#m18-multi-open-fan-out-real-s2_packetfilter-dispatch-sana2opf_mine" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        M18 — Multi-open fan-out, real S2_PacketFilter dispatch, SANA2OPF_MINE
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#m19-companion-tools-become-general-purpose-sana-ii-utilities" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        M19 — Companion tools become general-purpose SANA-II utilities
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#whats-next" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What's next
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#foundational-milestones-m0m4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Foundational milestones (M0–M4)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#m5-configuration-files" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        M5 — Configuration files
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#m6-crossover-mode" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        M6 — Crossover mode
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#m7-fault-injection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        M7 — Fault injection
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#m8-pcap-replay-consume-mode" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        M8 — pcap replay (consume mode)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#m9-scheduled-replay-and-recording" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        M9 — Scheduled replay and recording
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#m10-documentation" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        M10 — Documentation
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#m11-sanadump-and-sanasend" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        M11 — SanaDump and SanaSend
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#m12-aminet-packaging-and-release-flow" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        M12 — Aminet packaging and release flow
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#m13-sana-ii-rev-2347-conformance" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        M13 — SANA-II Rev 2/3/4/7 conformance
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#m14-configurable-replay-capacity" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        M14 — Configurable replay capacity
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#m15-wire-types-reported-bps-minimum-write-size" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        M15 — Wire types, reported BPS, minimum write size
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#m16-pinned-addresses-visible-error-injection-finer-loss-rates" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        M16 — Pinned addresses, visible error injection, finer loss rates
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#m17-simulated-link-latency-and-jitter" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        M17 — Simulated link latency and jitter
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#m18-multi-open-fan-out-real-s2_packetfilter-dispatch-sana2opf_mine" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        M18 — Multi-open fan-out, real S2_PacketFilter dispatch, SANA2OPF_MINE
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#m19-companion-tools-become-general-purpose-sana-ii-utilities" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        M19 — Companion tools become general-purpose SANA-II utilities
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#whats-next" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What's next
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+    <a href="https://github.com/sidick/sana2loop/edit/main/userdocs/Changelog.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
+    </a>
+  
+  
+
+
+<h1 id="changelog">Changelog<a class="headerlink" href="#changelog" title="Permanent link">&para;</a></h1>
+<p>sana2loop is developed milestone by milestone; each one is validated
+on-target under Copperline against both a real Kickstart 1.3 ROM and
+bundled AROS before being considered done. This page summarizes what
+landed in each, in user-facing terms — see the repository's
+<a href="https://github.com/sidick/sana2loop/blob/main/docs/PLAN.md"><code>docs/PLAN.md</code></a>
+for the full engineering detail behind each one.</p>
+<p><strong>v1.0</strong> shipped 2026-07-31 (M0–M13, up through SANA-II Rev 2/3/4/7
+conformance). Everything from <strong>M14</strong> onward lands in the next tagged
+release.</p>
+<h2 id="foundational-milestones-m0m4">Foundational milestones (M0–M4)<a class="headerlink" href="#foundational-milestones-m0m4" title="Permanent link">&para;</a></h2>
+<ul>
+<li>Echo mode (unit 0's default): <code>S2_DEVICEQUERY</code>, <code>S2_ONLINE</code>/<code>S2_OFFLINE</code>,
+  <code>S2_ONEVENT</code>, <code>CMD_FLUSH</code>, <code>AbortIO</code>.</li>
+<li>Real SANA-II buffer-management hooks (<code>S2_CopyToBuff</code>/<code>S2_CopyFromBuff</code>/
+  <code>S2_PacketFilter</code>).</li>
+<li>The core delivery precedence: typed <code>CMD_READ</code> → <code>S2_READORPHAN</code> →
+  bounded <code>rxqueue</code> → drop, with <code>Sana2DeviceStats.UnknownTypesReceived</code>
+  counting drops.</li>
+<li><code>S2_CONFIGINTERFACE</code>, current-vs-factory station address split,
+  <code>S2_TRACKTYPE</code>/<code>S2_GETTYPESTATS</code>.</li>
+<li><code>S2_BROADCAST</code>/<code>S2_MULTICAST</code>, <code>S2_ADD/DELMULTICASTADDRESS</code>,
+  <code>SANA2IOF_RAW</code>.</li>
+</ul>
+<h2 id="m5-configuration-files">M5 — Configuration files<a class="headerlink" href="#m5-configuration-files" title="Permanent link">&para;</a></h2>
+<p><code>ENV:sana2loop/unitN.config</code> (falling back to <code>S:</code>), read once at first
+open. See <a href="../Configuration-Reference/">Configuration Reference</a>.</p>
+<h2 id="m6-crossover-mode">M6 — Crossover mode<a class="headerlink" href="#m6-crossover-mode" title="Permanent link">&para;</a></h2>
+<p>Two units can be paired (<code>mode=crossover</code>/<code>peer=</code>) so writes on one deliver
+to the other with real, unswapped addressing and standard 802.3-style
+receive filtering — see
+<a href="../Echo-and-Crossover/">Echo and Crossover Modes</a>. Units 2 and 3 are
+paired this way by default.</p>
+<h2 id="m7-fault-injection">M7 — Fault injection<a class="headerlink" href="#m7-fault-injection" title="Permanent link">&para;</a></h2>
+<p><code>droppct</code>/<code>duppct</code>/<code>truncate</code>/<code>reorder</code>/<code>oversilent</code>/<code>offlineafter</code>/
+<code>onlineafter</code> — see <a href="../Fault-Injection/">Fault Injection</a>.</p>
+<h2 id="m8-pcap-replay-consume-mode">M8 — pcap replay (consume mode)<a class="headerlink" href="#m8-pcap-replay-consume-mode" title="Permanent link">&para;</a></h2>
+<p><code>mode=replay</code>/<code>replay=&lt;path&gt;</code> plays back a captured <code>.pcap</code> trace,
+one record per read, in order. See <a href="../Replay-and-Record/">Replay and Record</a>.</p>
+<h2 id="m9-scheduled-replay-and-recording">M9 — Scheduled replay and recording<a class="headerlink" href="#m9-scheduled-replay-and-recording" title="Permanent link">&para;</a></h2>
+<p><code>replaymode=scheduled</code> delivers each record on its own real captured
+timing instead of on-demand; <code>record=&lt;path&gt;</code> captures whatever a unit
+actually receives back out to a <code>.pcap</code> file. Both are driven by a real
+VBlank interrupt, including invoking buffer-management hooks from genuine
+interrupt context — a first for this device.</p>
+<p><strong>A note on how this was validated</strong>: this milestone initially shipped
+with the bundled AROS Kickstart replacement hanging specifically once a
+unit used <code>replaymode=scheduled</code> or <code>record=</code>, while real Kickstart 1.3
+passed every check cleanly. Root cause, found through careful on-target
+instrumentation: bundled AROS's <code>CheckIO()</code>/<code>WaitIO()</code> can falsely report
+an I/O request as already complete immediately after submission, before
+the device has actually replied to it, specifically for requests destined
+to complete via a real hardware interrupt rather than ordinary program
+context. The device itself was correct throughout; the fix (waiting on
+independent evidence of real delivery, then always safely re-checking
+regardless of what <code>CheckIO()</code>/<code>WaitIO()</code> claimed) landed entirely in the
+test suite. This is exactly the kind of platform-specific gap real
+hardware testing exists to catch — the bundled AROS Kickstart replacement
+is a convenient, license-free stand-in for catching <em>gross</em> regressions in
+public CI, but it is not a substitute for validating against real
+Kickstart 1.3 before trusting a release claim.</p>
+<h2 id="m10-documentation">M10 — Documentation<a class="headerlink" href="#m10-documentation" title="Permanent link">&para;</a></h2>
+<p>This site (MkDocs Material), plus an on-Amiga AmigaGuide manual built
+from the same source (<code>make guide</code>) — one docs source feeding both. A
+standard AmigaDOS <code>$VER:</code> version cookie was also added to the device and
+<code>SanaInfo</code> along the way (previously missing entirely).</p>
+<h2 id="m11-sanadump-and-sanasend">M11 — SanaDump and SanaSend<a class="headerlink" href="#m11-sanadump-and-sanasend" title="Permanent link">&para;</a></h2>
+<p>Companion Shell tools for capturing and sending traffic through a unit
+without writing your own program against the device — see
+<a href="../SanaDump-and-SanaSend/">SanaDump and SanaSend</a>.</p>
+<h2 id="m12-aminet-packaging-and-release-flow">M12 — Aminet packaging and release flow<a class="headerlink" href="#m12-aminet-packaging-and-release-flow" title="Permanent link">&para;</a></h2>
+<p>The infrastructure (not yet a shipped release) for packaging and
+publishing tagged versions to Aminet, with a human-approval gate before
+any actual upload.</p>
+<h2 id="m13-sana-ii-rev-2347-conformance">M13 — SANA-II Rev 2/3/4/7 conformance<a class="headerlink" href="#m13-sana-ii-rev-2347-conformance" title="Permanent link">&para;</a></h2>
+<p>Support for the post-Commodore SANA-II extensions real-world stacks
+probe for: wider buffer-management hooks (<code>S2_CopyToBuff16/32</code>),
+peer/DNS address queries and <code>RawMTU</code> (<code>S2_GETPEERADDRESS</code>,
+<code>S2_GETDNSADDRESS</code>), and DMA-capable hooks (accepted, never invoked —
+this device has no real DMA to offer). Plus a new <code>SanaConform</code> probe
+tool. See <a href="../SANA-II-Conformance/">SANA-II Conformance</a>.</p>
+<h2 id="m14-configurable-replay-capacity">M14 — Configurable replay capacity<a class="headerlink" href="#m14-configurable-replay-capacity" title="Permanent link">&para;</a></h2>
+<p><code>replaycap=N</code> (1–256, default 4) lets you raise or lower the record
+ceiling on a <code>mode=replay</code> unit per-unit, instead of living with a
+fixed limit — see <a href="../Replay-and-Record/#replay">Replay and Record</a>. The
+default itself hasn't changed; this only adds an escape hatch for
+captures bigger than 4 records on targets with the memory to spare.</p>
+<h2 id="m15-wire-types-reported-bps-minimum-write-size">M15 — Wire types, reported BPS, minimum write size<a class="headerlink" href="#m15-wire-types-reported-bps-minimum-write-size" title="Permanent link">&para;</a></h2>
+<p>Three new config keys, all inspired by reviewing
+<a href="https://aminet.net/package/comm/tcp/nullsana">nullsana</a> (the 2000-era
+virtual SANA-II device found as prior art):</p>
+<ul>
+<li><code>wire=ethernet|slip|cslip|ppp</code> — a unit can now pretend to be a
+  point-to-point serial wire: 4-byte IP-style addressing, per-wire
+  MTU/BPS defaults, no broadcast/multicast/raw. Lets you exercise a
+  stack's SLIP/PPP code paths with zero hardware.</li>
+<li><code>bps=N</code> — the link speed <code>S2_DEVICEQUERY</code> reports (previously always
+  10000000). Reported only, never a throttle.</li>
+<li><code>mintu=N</code> — a minimum write size; shorter writes fail
+  <code>S2ERR_BAD_ARGUMENT</code> instead of being accepted. Catches stacks that
+  forget real Ethernet's minimum-frame padding.</li>
+</ul>
+<p>One more unit is pre-allocated (unit numbers now run 0–15). See
+<a href="../Configuration-Reference/">Configuration Reference</a> for all three keys.</p>
+<h2 id="m16-pinned-addresses-visible-error-injection-finer-loss-rates">M16 — Pinned addresses, visible error injection, finer loss rates<a class="headerlink" href="#m16-pinned-addresses-visible-error-injection-finer-loss-rates" title="Permanent link">&para;</a></h2>
+<p>The second batch of nullsana-inspired config keys:</p>
+<ul>
+<li><code>addr=02:11:22:33:44:55</code> — pin a unit's factory station address from
+  config, so recorded fixtures are reproducible and crossover pairs can
+  mimic a specific real topology. Works with 4-byte addresses on
+  non-Ethernet <code>wire=</code> units too.</li>
+<li><code>errors=N</code> — 1 in N writes fails <strong>visibly</strong> (<code>S2ERR_TX_FAILURE</code>,
+  with <code>S2EVENT_TX|S2EVENT_ERROR</code> fired) — the loud counterpart to the
+  existing silent-loss knobs, for exercising a stack's error-handling
+  and retry paths rather than its timeout recovery.</li>
+<li><code>loss=N</code> — 1-in-N silent packet loss, for rates a whole percent can't
+  express (<code>loss=1000</code> ≈ 0.1%) — real-world loss is usually much rarer
+  than <code>droppct</code>'s 1-in-100 floor.</li>
+</ul>
+<p>Two more units are pre-allocated (unit numbers now run 0–17). See
+<a href="../Fault-Injection/">Fault Injection</a> for where the new knobs sit in the
+pipeline.</p>
+<h2 id="m17-simulated-link-latency-and-jitter">M17 — Simulated link latency and jitter<a class="headerlink" href="#m17-simulated-link-latency-and-jitter" title="Permanent link">&para;</a></h2>
+<p><code>delay=N</code>/<code>deviation=N</code> — the last of the nullsana-inspired batch: a
+written packet's delivery can now be deferred by a fixed number of
+VBlank ticks, with optional symmetric jitter, instead of always
+happening synchronously. Runs last in the fault-injection pipeline,
+after <code>reorder</code>. <code>CMD_FLUSH</code>, <code>S2_OFFLINE</code>, and last-close all
+immediately deliver anything still waiting, same as they already do for
+the reorder buffer. See <a href="../Fault-Injection/#simulating-latency-and-jitter-delay-and-deviation">Fault Injection</a>.</p>
+<p>One more unit is pre-allocated (unit numbers now run 0–18).</p>
+<h2 id="m18-multi-open-fan-out-real-s2_packetfilter-dispatch-sana2opf_mine">M18 — Multi-open fan-out, real S2_PacketFilter dispatch, SANA2OPF_MINE<a class="headerlink" href="#m18-multi-open-fan-out-real-s2_packetfilter-dispatch-sana2opf_mine" title="Permanent link">&para;</a></h2>
+<p>Open a unit more than once — a stack plus a passive monitor, the
+<code>sanamon</code>-style pattern nullsana's own review surfaced — and every open
+with a matching typed <code>CMD_READ</code> now gets its own independent copy of
+each packet, instead of only whichever opened first. <code>S2_PacketFilter</code>
+(previously accepted but never actually invoked) is now genuinely
+dispatched per candidate, immediately before the copy hook, so a caller
+can reject packet types it doesn't want without paying for the copy.
+<code>SANA2OPF_MINE</code> (exclusive access) is now enforced too. See
+<a href="../Echo-and-Crossover/#multiple-opens-and-monitoring">Echo and Crossover: Multiple opens and monitoring</a>.</p>
+<p>No new units needed; no config or wire-level changes for existing
+single-open usage.</p>
+<h2 id="m19-companion-tools-become-general-purpose-sana-ii-utilities">M19 — Companion tools become general-purpose SANA-II utilities<a class="headerlink" href="#m19-companion-tools-become-general-purpose-sana-ii-utilities" title="Permanent link">&para;</a></h2>
+<p>Prompted by reviewing Aminet's <code>sanamon</code> (<code>comm/net/sanamon</code>): all four
+companion tools (<code>SanaInfo</code>, <code>SanaDump</code>, <code>SanaSend</code>, <code>SanaConform</code>)
+previously only ever opened sana2loop's own <code>loopback.device</code>. Now:</p>
+<ul>
+<li><strong><code>DEVICE=</code></strong> on all four -- point any of them at a real SANA-II
+  driver, not just this project's own device. <code>SanaConform</code> in
+  particular is arguably more useful probing an unknown real driver's
+  actual conformance than confirming this project's own.</li>
+<li><strong><code>CONFIG</code></strong> (opt-in) -- issues <code>S2_CONFIGINTERFACE</code> using the
+  driver's own factory address, for a real driver with no protocol
+  stack already running to configure it. sana2loop's own units never
+  need this.</li>
+<li><strong><code>ONLINE</code>'s default flipped</strong>: <code>SanaDump</code>/<code>SanaSend</code>/<code>SanaConform</code>
+  used to force the unit online unconditionally. That's now opt-in --
+  the safer default once these tools can target a real driver a stack
+  might be actively managing. See
+  <a href="../SanaDump-and-SanaSend/#bringing-a-unit-online">SanaDump and SanaSend: Bringing a unit online</a>.</li>
+<li><strong><code>SanaConform</code> now probes <code>S2_PacketFilter</code> dispatch</strong> -- whether the
+  driver actually invokes a negotiated filter hook, not just accepts
+  the tag. The exact gap Aminet's <code>sanamon</code> readme calls out as rare in
+  the wild, and the same gap sana2loop's own M18 closed.</li>
+<li><strong><code>SanaDump DUMP</code>/<code>LEN</code></strong> -- live console packet view (type, length,
+  error/wire-error, BCAST/MCAST/HOST, addresses, hex) as packets are
+  captured, sanamon-style, alongside the existing <code>.pcap</code> file output.</li>
+</ul>
+<p>See <a href="../SanaDump-and-SanaSend/">SanaDump and SanaSend</a>,
+<a href="../SanaInfo-Reference/">SanaInfo Reference</a>, and
+<a href="../SANA-II-Conformance/">SANA-II Conformance</a> for the full details.</p>
+<h2 id="whats-next">What's next<a class="headerlink" href="#whats-next" title="Permanent link">&para;</a></h2>
+<ul>
+<li>A proper first tagged release (the M12 packaging pipeline is built and
+  tested, but no version has been tagged/published yet).</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer" >
+        
+          
+          <a href="../Building-and-Testing/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Building and Testing">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Building and Testing
+              </div>
+            </div>
+          </a>
+        
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      sana2loop — a hardware-free SANA-II device for AmigaOS. BSD 2-Clause.
+    </div>
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.sections", "navigation.footer", "content.action.edit"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
