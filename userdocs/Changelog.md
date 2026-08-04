@@ -8,8 +8,10 @@ landed in each, in user-facing terms — see the repository's
 for the full engineering detail behind each one.
 
 **v1.0** shipped 2026-07-31 (M0–M13, up through SANA-II Rev 2/3/4/7
-conformance). Everything from **M14** onward lands in the next tagged
-release.
+conformance). **v1.1** shipped 2026-08-04 (M14–M19: the configurable
+replay capacity, the nullsana-inspired config keys, multi-open fan-out,
+and the general-purpose companion tools — all additive and
+backward-compatible).
 
 ## Foundational milestones (M0–M4)
 
@@ -88,9 +90,9 @@ without writing your own program against the device — see
 
 ## M12 — Aminet packaging and release flow
 
-The infrastructure (not yet a shipped release) for packaging and
-publishing tagged versions to Aminet, with a human-approval gate before
-any actual upload.
+The infrastructure for packaging and publishing tagged versions to
+Aminet, with a human-approval gate before any actual upload — first
+exercised for real by the v1.0 release.
 
 ## M13 — SANA-II Rev 2/3/4/7 conformance
 
@@ -208,5 +210,16 @@ See [SanaDump and SanaSend](SanaDump-and-SanaSend.md),
 
 ## What's next
 
-- A proper first tagged release (the M12 packaging pipeline is built and
-  tested, but no version has been tagged/published yet).
+Two feature ideas from reviewing [vlink](https://aminet.net/package/comm/tcp/vlink)
+(Chris Brenner's 2000-era virtual SANA-II device, a second piece of
+prior art alongside nullsana) are queued but not yet scheduled:
+
+- A second device name (e.g. `loopmirror.device`) whose unit N
+  crossover-pairs with `loopback.device`'s unit N — vlink's own
+  `vlink.device`/`vlinkmirror.device` pattern, for consumers such as
+  ShapeShifter/Fusion that can only open unit 0 of a named device
+  ([#31](https://github.com/sidick/sana2loop/issues/31)).
+- Step-by-step walkthroughs for wiring the device into real network
+  stacks (Miami, AmiTCP, Roadshow), modeled on vlink.guide's own
+  numbered setup instructions
+  ([#32](https://github.com/sidick/sana2loop/issues/32)).

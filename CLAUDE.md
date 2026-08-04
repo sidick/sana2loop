@@ -844,13 +844,19 @@ investigation.
 -- caught and fixed 2026-08-04 while preparing the next release; if this
 sentence is now itself stale, distrust it the same way and check
 `git tag`/`gh release list` directly rather than propagating it forward
-again). `version.mk` is bumped to 1.1 for M15-M19 (all additive,
-backward-compatible -- REVISION bump, not VERSION); `sana2loop.readme`'s
-`Version:` field and every `$VER:` date cookie (device + all four tools)
-were updated to match ahead of the next tag push. No further milestones
-remain unscheduled except actually pushing that `v1.1` tag. The
-nullsana/vlink-inspired feature-idea queue is down to #31 (mirror device
-name) and #32 (stack-wiring walkthrough docs).
+again). **v1.1 released 2026-08-04** (M14-M19, all additive,
+backward-compatible -- REVISION bump, not VERSION; `sana2loop.readme`'s
+`Version:` field and every `$VER:` date cookie were updated to match
+before the tag push). The same day, `userdocs/Changelog.md` was caught
+still carrying the pre-v1.0 "no version has been tagged/published yet"
+claim in its What's-next section -- the exact staleness class this
+paragraph warns about, and it had already shipped to the published v1.1
+docs site (docs deploy on tag push; `docs.yml`'s `workflow_dispatch`
+exists for re-publishing a version after a docs-only fix like this).
+Fixed alongside its release header and M12 section. No further
+milestones are scheduled; the nullsana/vlink-inspired feature-idea
+queue is down to #31 (mirror device name) and #32 (stack-wiring
+walkthrough docs).
 
 ## Architecture
 
@@ -897,6 +903,21 @@ task calls it), or queues the packet for the next `CMD_READ` to pick up.
 Both the pending-reads list and the pending-echoed-data list are wrapped in
 `Disable()`/`Enable()` critical sections since multiple tasks can call
 `BeginIO`/`AbortIO` on the same unit concurrently.
+
+## Workflow: all changes go via pull requests (since 2026-08-04)
+
+Never commit or push directly to `main` -- branch protection (enforced
+for admins too) requires a PR with passing status checks (`ci / build`,
+`ci / lint`, `ci / test-host`, `ci / test-target`,
+`Docs site + AmigaGuide build`; 0 approving reviews, since a solo owner
+can't approve their own PR) and blocks force pushes/deletion. Tag pushes
+are unaffected, so the `v<version>` release flow works unchanged.
+Motivated partly by the v1.1 release's `--generate-notes` coming out
+nearly empty: GitHub's generated notes only see PRs, and M14-M19 all
+landed as direct commits (the v1.1 notes were rewritten by hand
+afterwards). If a required check's job name ever changes (they come from
+`sidick/amiga-workflows`' reusable workflow), update the protection's
+required contexts to match or every merge will block.
 
 ## Build / test
 
