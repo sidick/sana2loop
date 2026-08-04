@@ -9,10 +9,14 @@ Distribution: Aminet
 sana2loop builds loopback.device, a hardware-free SANA-II network
 device for AmigaOS: echo, crossover, and pcap replay/capture modes,
 plus companion Shell tools (SanaInfo, SanaDump, SanaSend, SanaConform).
-No null/dummy SANA-II device has ever existed before this, despite
-being the obvious first tool for testing any network stack, shim, or
-driver-consuming software - deterministically, with zero hardware and
-zero emulator network support required.
+It gives any network stack, shim, or driver-consuming software a
+deterministic test partner - with zero hardware and zero emulator
+network support required.
+
+(Prior art: nullsana (Aminet comm/tcp/nullsana, 2000), a binary-only
+virtual SANA-II device, was found only after sana2loop's first release.
+sana2loop is open source, runs on Kickstart 1.3, and adds pcap
+replay/record, fault injection, and conformance tooling.)
 
 Features
 --------

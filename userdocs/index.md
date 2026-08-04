@@ -4,10 +4,15 @@
 
 `loopback.device` gives any network stack, shim, or driver-consuming
 software a deterministic test partner with **zero hardware and zero
-emulator network support required**. No null/dummy SANA-II device has
-existed before this, despite being the obvious first thing to reach for
-when testing a TCP/IP stack, a shim, or anything else that talks to a
-SANA-II driver.
+emulator network support required** — the obvious first thing to reach
+for when testing a TCP/IP stack, a shim, or anything else that talks to
+a SANA-II driver.
+
+(Prior art: [nullsana](https://aminet.net/package/comm/tcp/nullsana), a
+binary-only virtual SANA-II device from 2000, was found only after
+sana2loop's first release. sana2loop is open source, runs on Kickstart
+1.3, and adds pcap replay/record, fault injection, and conformance
+tooling.)
 
 It provides three modes on the same device: **echo** (whatever you write
 comes straight back to you), **crossover** (two opens of the device talk to

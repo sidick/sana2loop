@@ -6,11 +6,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `sana2loop` builds **`loopback.device`**, a hardware-free SANA-II network
 device for AmigaOS: echo, crossover, and pcap replay/capture modes, plus
-companion Shell tools (`SanaInfo`, `SanaDump`, `SanaSend`). It exists
-because no null/dummy SANA-II device has ever existed, despite being the
-obvious first tool for testing any network stack, shim, or driver-consuming
-software -- deterministically, with zero hardware and zero emulator network
-support required.
+companion Shell tools (`SanaInfo`, `SanaDump`, `SanaSend`). It gives any
+network stack, shim, or driver-consuming software a deterministic test
+partner -- with zero hardware and zero emulator network support required.
+(The docs originally claimed no null/dummy SANA-II device had ever
+existed; **nullsana** (Aminet `comm/tcp/nullsana`, 2000, binary-only,
+based on Pekka Pessi's agnet.device) turned out to be prior art, found
+only after the first release -- the shipped docs now say so instead of
+claiming primacy. sana2loop still differentiates on being open source,
+KS1.3-capable, and on pcap replay/record, fault injection, and
+conformance tooling -- see GitHub issues #24-#30 for nullsana-inspired
+feature ideas.)
 
 **Full design rationale and the phased plan live in the original proposal**:
 https://github.com/sidick/project-ideas/blob/main/sana2loop-proposal.md --

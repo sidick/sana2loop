@@ -2,11 +2,16 @@
 
 `loopback.device` -- a hardware-free SANA-II network device for AmigaOS
 providing echo, crossover, and pcap replay/capture modes, plus companion
-Shell tools (`SanaInfo`, `SanaDump`, `SanaSend`, `SanaConform`). No
-null/dummy SANA-II device has existed before this, despite being the
-obvious first tool for testing any network stack, shim, or
-driver-consuming software -- deterministically, with zero hardware and
-zero emulator network support required.
+Shell tools (`SanaInfo`, `SanaDump`, `SanaSend`, `SanaConform`). It
+gives any network stack, shim, or driver-consuming software a
+deterministic test partner -- with zero hardware and zero emulator
+network support required.
+
+(Prior art: [nullsana](https://aminet.net/package/comm/tcp/nullsana), a
+binary-only virtual SANA-II device from 2000, was found only after
+sana2loop's first release. sana2loop is open source, runs on Kickstart
+1.3, and adds pcap replay/record, fault injection, and conformance
+tooling.)
 
 Targets plain 68000 and Kickstart 1.3 -- a test tool's value is
 universality, and nothing here needs more. 2 MB RAM minimum (see
