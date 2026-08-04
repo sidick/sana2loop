@@ -33,8 +33,26 @@
  * config/mode a given unit is actually in, not just this project's own
  * on-target test fixtures.
  *
- * Usage: SanaConform UNIT/N
- *   UNIT - unit number to probe (default 0).
+ * Usage: SanaConform UNIT/N,DEVICE/K,CONFIG/S,ONLINE/S
+ *   UNIT   - unit number to probe (default 0).
+ *   DEVICE - SANA-II device to probe; omitted = loopback.device. Not
+ *            limited to this project's own device -- probing an unknown
+ *            real driver's actual conformance is arguably more useful
+ *            than confirming this project's own, which it already
+ *            controls. See userdocs/SANA-II-Conformance.md.
+ *   CONFIG - issue S2_CONFIGINTERFACE first, using whatever address
+ *            S2_GETSTATIONADDRESS reports as the driver's own factory
+ *            default -- see sanadump.c's matching CONFIG comment.
+ *   ONLINE - bring the unit online for the probe and back offline on
+ *            exit -- own the whole online lifecycle for this session.
+ *            Omitted (the default) assumes a protocol stack already
+ *            manages online state and doesn't touch it; the self-echo
+ *            round-trip probe below already tolerates "not online" as a
+ *            graceful, reported skip rather than a failure, so omitting
+ *            ONLINE against a driver with no stack running just means
+ *            that one probe step reports itself skipped. See
+ *            sanadump.c's matching ONLINE comment for the full
+ *            real-driver reasoning.
  */
 
 #include <exec/types.h>
@@ -42,6 +60,7 @@
 #include <exec/errors.h>
 #include <devices/sana2.h>
 #include <utility/tagitem.h>
+#include <utility/hooks.h>
 #include <dos/rdargs.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
@@ -69,8 +88,8 @@ static volatile char version[] =
  * stack is a mere 4 KB. */
 static volatile char stack_cookie[] = "$STACK: 16384";
 
-#define TEMPLATE "UNIT/N"
-enum { ARG_UNIT, ARG_COUNT_TOTAL };
+#define TEMPLATE "UNIT/N,DEVICE/K,CONFIG/S,ONLINE/S"
+enum { ARG_UNIT, ARG_DEVICE, ARG_CONFIG, ARG_ONLINE, ARG_COUNT_TOTAL };
 
 /* M13: this toolchain's <devices/sana2.h> has no Rev 4/7 additions at all
  * -- same gap, same local #defines as loopback_device.c's own (see that
@@ -112,6 +131,14 @@ struct Sana2LoopDeviceQuery {
  * one the driver picks), each incrementing its own counter so this probe
  * can report EXACTLY which negotiated width actually got invoked. */
 static ULONG g_ToBase, g_FromBase, g_To16, g_From16, g_To32, g_From32, g_DMACalls;
+
+/* #34: S2_PacketFilter invocation counter -- this probe only measures
+ * WHETHER the driver calls it at all (accepting every packet
+ * unconditionally, same "real behavior, not a no-op" discipline the
+ * copy hooks above already follow), matching sana2loop's own M18 work
+ * closing exactly this gap and sanamon's own readme calling this "very
+ * few SANA-2 drivers implement". */
+static ULONG g_FilterCalls;
 
 static BOOL hook_to_base(APTR to asm("a0"), APTR from asm("a1"), ULONG size asm("d0"))
 {
@@ -163,6 +190,28 @@ static APTR hook_dma(APTR data asm("a0"))
     return NULL;
 }
 
+/* #34: S2_PacketFilter's own calling convention -- register order per
+ * wiki.amigaos.net's Autodocs (`keep = PacketFilter(hook, ios2, data)` /
+ * `d0 a0 a2 a1`), the same source and same convention
+ * loopback_device.c's own Sana2FilterFunc and its objdump-verified M18
+ * implementation use. Accepts unconditionally: this probe measures
+ * INVOCATION, not filtering decisions. */
+static BOOL hook_filter(struct Hook *hook asm("a0"), struct IOSana2Req *io asm("a2"), APTR data asm("a1"))
+{
+    (void)hook;
+    (void)io;
+    (void)data;
+    g_FilterCalls++;
+    return TRUE;
+}
+
+/* Zero-initialized BSS, h_Entry set once in main() before OpenDevice() --
+ * see tests/copperline/sana2test.c's matching g_FilterHook for why this
+ * needs to be static (the device keeps the pointer live for the whole
+ * open's lifetime, past any function-local scope) and why h_MinNode's
+ * contents don't matter (never registered on a real Exec list). */
+static struct Hook g_FilterHook;
+
 static void print_addr(const char *label, const UBYTE *addr)
 {
     printf("%s: %02x:%02x:%02x:%02x:%02x:%02x\n", label,
@@ -177,7 +226,8 @@ int main(int argc, char **argv)
     struct IOSana2Req *io;
     struct MsgPort *wport = NULL;
     struct IOSana2Req *wio = NULL;
-    struct TagItem tags[9];
+    struct TagItem tags[11];
+    const char *device = "loopback.device";
     ULONG unit = 0;
     UBYTE station[SANA2_MAX_ADDR_BYTES];
     int rc = 0;
@@ -193,6 +243,8 @@ int main(int argc, char **argv)
     }
     if (args[ARG_UNIT])
         unit = (ULONG)*(LONG *)args[ARG_UNIT];
+    if (args[ARG_DEVICE])
+        device = (char *)args[ARG_DEVICE];
 
     port = CreateMsgPort();
     if (!port) {
@@ -216,13 +268,15 @@ int main(int argc, char **argv)
     tags[5].ti_Tag = S2_CopyFromBuff32;     tags[5].ti_Data = (ULONG)hook_from32;
     tags[6].ti_Tag = S2_DMACopyToBuff32;    tags[6].ti_Data = (ULONG)hook_dma;
     tags[7].ti_Tag = S2_DMACopyFromBuff32;  tags[7].ti_Data = (ULONG)hook_dma;
-    tags[8].ti_Tag = TAG_DONE;              tags[8].ti_Data = 0;
+    tags[8].ti_Tag = S2_PacketFilter;       tags[8].ti_Data = (ULONG)&g_FilterHook;
+    tags[9].ti_Tag = TAG_DONE;              tags[9].ti_Data = 0;
+    g_FilterHook.h_Entry = (ULONG (*)())hook_filter;
     io->ios2_BufferManagement = tags;
 
-    printf("SanaConform: probing loopback.device unit %lu\n", (unsigned long)unit);
+    printf("SanaConform: probing %s unit %lu\n", device, (unsigned long)unit);
 
-    if (OpenDevice((STRPTR)"loopback.device", (LONG)unit, (struct IORequest *)io, 0)) {
-        fprintf(stderr, "SanaConform: can't open loopback.device unit %lu\n", (unsigned long)unit);
+    if (OpenDevice((STRPTR)device, (LONG)unit, (struct IORequest *)io, 0)) {
+        fprintf(stderr, "SanaConform: can't open %s unit %lu\n", device, (unsigned long)unit);
         DeleteIORequest((struct IORequest *)io);
         DeleteMsgPort(port);
         FreeArgs(rda);
@@ -231,9 +285,37 @@ int main(int argc, char **argv)
     printf("OpenDevice: OK (Rev 2/3/7 buffer/DMA hooks all accepted without error --\n"
            "  advisory tags are legal to offer even to a driver that ignores them)\n");
 
-    io->ios2_Req.io_Command = S2_ONLINE;
-    DoIO((struct IORequest *)io);
-    printf("S2_ONLINE: %s\n", io->ios2_Req.io_Error ? "FAILED" : "OK");
+    /* CONFIG (opt-in, #35) -- see sanadump.c's matching comment. Done
+     * before the S2_GETSTATIONADDRESS query below so that query reflects
+     * any address just configured here. */
+    if (args[ARG_CONFIG]) {
+        io->ios2_Req.io_Command = S2_GETSTATIONADDRESS;
+        DoIO((struct IORequest *)io);
+        if (io->ios2_Req.io_Error != 0) {
+            printf("CONFIG: S2_GETSTATIONADDRESS failed, io_Error=%d\n", io->ios2_Req.io_Error);
+        } else {
+            memcpy(io->ios2_SrcAddr, io->ios2_DstAddr, SANA2_MAX_ADDR_BYTES);
+            io->ios2_Req.io_Command = S2_CONFIGINTERFACE;
+            DoIO((struct IORequest *)io);
+            if (io->ios2_Req.io_Error == 0)
+                printf("CONFIG: configured with the driver's own factory address\n");
+            else if (io->ios2_WireError == S2WERR_IS_CONFIGURED)
+                printf("CONFIG: already configured -- leaving as-is\n");
+            else
+                printf("CONFIG: S2_CONFIGINTERFACE failed, io_Error=%d\n", io->ios2_Req.io_Error);
+        }
+    }
+
+    /* ONLINE (opt-in, #36) -- see sanadump.c's matching comment. The
+     * self-echo round trip below already tolerates "not online" as a
+     * graceful skip, so this probe stays useful either way. */
+    if (args[ARG_ONLINE]) {
+        io->ios2_Req.io_Command = S2_ONLINE;
+        DoIO((struct IORequest *)io);
+        printf("S2_ONLINE: %s\n", io->ios2_Req.io_Error ? "FAILED" : "OK");
+    } else {
+        printf("S2_ONLINE: skipped (pass ONLINE to bring the unit up first)\n");
+    }
 
     /* --- Rev 4: RawMTU via the extended Sana2DeviceQuery -- graceful
      * fallback: SizeSupplied less than the extended struct's size means
@@ -359,6 +441,9 @@ int main(int argc, char **argv)
                 printf("base 8-bit (to=%lu from=%lu)\n", (unsigned long)g_ToBase, (unsigned long)g_FromBase);
             else
                 printf("none of the negotiated hooks (driver used an internal default)\n");
+            printf("S2_PacketFilter invoked: %s (%lu call%s)\n",
+                   g_FilterCalls ? "YES" : "no",
+                   (unsigned long)g_FilterCalls, g_FilterCalls == 1 ? "" : "s");
         } else {
             AbortIO((struct IORequest *)io);
             WaitIO((struct IORequest *)io);
@@ -415,6 +500,11 @@ int main(int argc, char **argv)
                 printf("sana2loop quirk stat: no DMA-hook-offered record (unexpected -- this "
                        "probe's own open above should have counted as one)\n");
         }
+    }
+
+    if (args[ARG_ONLINE]) {
+        io->ios2_Req.io_Command = S2_OFFLINE;
+        DoIO((struct IORequest *)io);
     }
 
     CloseDevice((struct IORequest *)io);

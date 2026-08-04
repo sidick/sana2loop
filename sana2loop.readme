@@ -61,9 +61,13 @@ Features
     S2_GETPEERADDRESS/S2_GETDNSADDRESS, Sana2DeviceQuery.RawMTU, and Rev 7
     DMA hook negotiation (accepted and counted, gracefully never invoked).
   - Companion Shell tools: SanaInfo (open/query/online-offline a unit),
-    SanaDump (capture a unit's traffic to a pcap file), SanaSend (replay a
-    pcap file's frames onto a unit), SanaConform (probes a unit's SANA-II
-    Rev 2/3/4/7 conformance and reports what it finds).
+    SanaDump (capture a unit's traffic to a pcap file, plus a live
+    console packet view), SanaSend (replay a pcap file's frames onto a
+    unit), SanaConform (probes a unit's SANA-II Rev 2/3/4/7 conformance
+    and reports what it finds, including whether a negotiated
+    S2_PacketFilter hook actually gets invoked, not just accepted). All
+    four target any SANA-II driver via DEVICE=, not just loopback.device,
+    with opt-in CONFIG/ONLINE for pointing at real hardware safely.
   - Targets plain 68000 and Kickstart 1.3 for the device itself - a test
     tool's value is universality, and nothing here needs more.
 

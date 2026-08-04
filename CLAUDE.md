@@ -799,6 +799,46 @@ try) + real Kickstart 1.3 + real 3.1 (43 sub-tests) + `run-tools.sh`.
 See `docs/sana2-notes.md`'s M18 section for the full design-fork
 reasoning.
 
+**M19** (companion tools become general-purpose SANA-II utilities --
+GitHub #33-#37, sanamon-inspired: `comm/net/sanamon`, 1995, a general
+packet monitor whose whole design assumes it can target any driver):
+`DEVICE=` added to all four tools (`SanaInfo`/`SanaDump`/`SanaSend`/
+`SanaConform`), each previously hardcoding `"loopback.device"` as a
+literal. Opt-in `CONFIG` (`S2_GETSTATIONADDRESS` then
+`S2_CONFIGINTERFACE` with the driver's own factory address, matching
+sanamon's own documented behavior, tolerating `S2WERR_IS_CONFIGURED`
+gracefully). `ONLINE`'s default FLIPPED on `SanaDump`/`SanaSend`/
+`SanaConform` -- pre-M19 always forced `S2_ONLINE` unconditionally with
+no offline at exit; now opt-in, matching sanamon's own opt-in `ONLINE`
+flag design, since unconditional forcing became a real footgun once
+`DEVICE=` can target a live driver a stack manages. Real, unplanned
+multi-consumer bug found wiring this into
+`tests/copperline/tools-startup-sequence.txt`: giving BOTH `SanaDump`
+and `SanaSend` their own `ONLINE` in that shared-unit test would be
+wrong (`SanaSend`'s own exit would take the unit offline while
+`SanaDump` is still relying on it staying online) -- resolved by giving
+`ONLINE` only to `SanaDump` (first user, longest open). `SanaConform`
+gained a genuine `S2_PacketFilter` invocation probe (same `a0`/`a2`/`a1`
+convention M18 established) -- the exact gap sanamon's own readme calls
+out as rare in the wild, now also validating M18's own dispatch
+end-to-end. `SanaDump` gained `DUMP`/`LEN` -- live sanamon-styled
+console output per captured packet. Two real findings chasing on-target
+`DUMP`/`LEN` coverage, one red herring: a backgrounded `Run`'s stdout
+redirected to a real file captures only AmigaDOS's own `"[CLI N]"`
+banner, never a child clib2 program's actual stdout, on BOTH bundled
+AROS and real Kickstart 3.1 -- a genuine environment/toolchain
+limitation (not a bug), reached after first chasing a bundled-AROS-only
+hang that turned out to depend on a 3rd `/K/N` template field (real 3.1
+never reproduced it, and it stopped mattering once the redirect itself
+proved unable to capture content anyway). Resolved by exercising
+`DUMP LEN=16` via the working `>NIL:` redirect (proves the code runs
+without error) with its own printed text verified by code review
+instead. Verified: `make copperline-smoke` (unaffected) on bundled AROS
++ real Kickstart 1.3 + real 3.1; `make copperline-smoke-tools` on
+bundled AROS + real Kickstart 3.1 (real 1.3 not applicable -- these are
+V36+ tools). See `docs/sana2-notes.md`'s M19 section for the full
+investigation.
+
 No further milestones remain unscheduled except Aminet packaging's own
 "cut and publish a first tagged release" step (the M12 pipeline itself
 is built and tested, but no tag has been pushed) -- see docs/PLAN.md.

@@ -9,9 +9,18 @@
  * may be "documented as 2.0+ conveniences" even though the device stays
  * 1.3-compatible.
  *
- * Usage: SanaInfo [unit] [ONLINE|OFFLINE]
- *   No arguments: opens unit 0, prints S2_DEVICEQUERY + station address.
+ * Usage: SanaInfo [unit] [ONLINE|OFFLINE] [CONFIG] [DEVICE=<name>]
+ *   No arguments: opens unit 0 of loopback.device, prints
+ *     S2_DEVICEQUERY + station address.
  *   ONLINE/OFFLINE: issues S2_ONLINE or S2_OFFLINE first, then queries.
+ *   CONFIG: issues S2_CONFIGINTERFACE first, using whatever address
+ *     S2_GETSTATIONADDRESS reports as the driver's own factory default
+ *     -- for a real driver with no protocol stack already running to
+ *     configure it (sana2loop's own units never need this). A no-op
+ *     (reported, not fatal) if already configured. Independent of
+ *     ONLINE/OFFLINE -- combine freely, e.g. "SanaInfo 0 CONFIG ONLINE".
+ *   DEVICE=<name>: SANA-II device to open; omitted = loopback.device.
+ *     Not limited to this project's own device.
  */
 
 #include <exec/types.h>
@@ -56,12 +65,18 @@ int main(int argc, char **argv)
     struct IOSana2Req *io;
     LONG unit = 0;
     const char *mode = NULL;
+    const char *device = "loopback.device";
+    BOOL do_config = FALSE;
     int i;
     int rc = 0;
 
     for (i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "ONLINE") || !strcmp(argv[i], "OFFLINE"))
             mode = argv[i];
+        else if (!strcmp(argv[i], "CONFIG"))
+            do_config = TRUE;
+        else if (!strncmp(argv[i], "DEVICE=", 7))
+            device = argv[i] + 7;
         else
             unit = atol(argv[i]);
     }
@@ -79,11 +94,40 @@ int main(int argc, char **argv)
         return 20;
     }
 
-    if (OpenDevice((STRPTR)"loopback.device", unit, (struct IORequest *)io, 0)) {
-        fprintf(stderr, "SanaInfo: can't open loopback.device unit %d\n", (int)unit);
+    if (OpenDevice((STRPTR)device, unit, (struct IORequest *)io, 0)) {
+        fprintf(stderr, "SanaInfo: can't open %s unit %d\n", device, (int)unit);
         DeleteIORequest((struct IORequest *)io);
         DeleteMsgPort(port);
         return 20;
+    }
+
+    /* CONFIG: most real drivers have no usable station address until a
+     * stack calls S2_CONFIGINTERFACE -- sana2loop's own units never need
+     * this. Uses whatever S2_GETSTATIONADDRESS already reports as the
+     * FACTORY default (ios2_DstAddr), matching sanamon's own documented
+     * "configure interface with its default address" behavior.
+     * S2WERR_IS_CONFIGURED (already configured, e.g. by a real stack) is
+     * reported, not fatal -- S2_CONFIGINTERFACE's own one-shot contract
+     * makes that a normal outcome. Done before the mode/query steps
+     * below so they reflect any address just configured here. */
+    if (do_config) {
+        io->ios2_Req.io_Command = S2_GETSTATIONADDRESS;
+        DoIO((struct IORequest *)io);
+        if (io->ios2_Req.io_Error != 0) {
+            fprintf(stderr, "SanaInfo: S2_GETSTATIONADDRESS failed, io_Error=%d\n",
+                    io->ios2_Req.io_Error);
+        } else {
+            memcpy(io->ios2_SrcAddr, io->ios2_DstAddr, SANA2_MAX_ADDR_BYTES);
+            io->ios2_Req.io_Command = S2_CONFIGINTERFACE;
+            DoIO((struct IORequest *)io);
+            if (io->ios2_Req.io_Error == 0)
+                printf("SanaInfo: configured with the driver's own factory address\n");
+            else if (io->ios2_WireError == S2WERR_IS_CONFIGURED)
+                printf("SanaInfo: already configured -- leaving as-is\n");
+            else
+                fprintf(stderr, "SanaInfo: S2_CONFIGINTERFACE failed, io_Error=%d\n",
+                        io->ios2_Req.io_Error);
+        }
     }
 
     if (mode) {

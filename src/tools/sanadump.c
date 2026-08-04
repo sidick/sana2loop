@@ -12,7 +12,8 @@
  * helper (real S2_CopyToBuff/S2_CopyFromBuff hooks) rather than a bare
  * OpenDevice().
  *
- * Usage: SanaDump UNIT/A/N,FILE/A,TYPE/K,PROM/S,COUNT/K/N
+ * Usage: SanaDump UNIT/A/N,FILE/A,TYPE/K,PROM/S,COUNT/K/N,DEVICE/K,
+ *                 CONFIG/S,ONLINE/S,DUMP/S,LEN/K/N
  *   UNIT   - unit number to open.
  *   FILE   - output .pcap path.
  *   TYPE   - hex packet type (e.g. "0800") to capture only that type via
@@ -21,9 +22,28 @@
  *            crossover peer's own destination filtering, a no-op on an
  *            echo unit (see userdocs/Echo-and-Crossover.md).
  *   COUNT  - stop after this many packets; omitted = run until Ctrl-C.
- *
- * Forces the unit online at startup (a capture tool that isn't online
- * captures nothing) -- see userdocs/SanaDump-and-SanaSend.md.
+ *   DEVICE - SANA-II device to open; omitted = loopback.device. Not
+ *            limited to this project's own device -- see
+ *            userdocs/SanaDump-and-SanaSend.md's "Other drivers" section.
+ *   CONFIG - issue S2_CONFIGINTERFACE first, using whatever address
+ *            S2_GETSTATIONADDRESS reports as the driver's own factory
+ *            default -- for a real driver with no protocol stack already
+ *            running to configure it. A no-op (reported, not fatal) if
+ *            already configured. sana2loop's own units never need this
+ *            (they're usable from a factory default with zero setup).
+ *   ONLINE - bring the unit online before capturing and back offline on
+ *            exit -- i.e. OWN the whole online lifecycle for this
+ *            session. Omitted (the default) means "assume a protocol
+ *            stack already manages online state, don't touch it" -- the
+ *            safe default once this tool can target a real driver a
+ *            stack might be actively using (see
+ *            userdocs/SanaDump-and-SanaSend.md).
+ *   DUMP   - also print each captured packet live to stdout (type,
+ *            length, error/wire-error, BCAST/MCAST/HOST, addresses, and
+ *            up to LEN bytes of hex) as it's captured, not just written
+ *            to FILE.
+ *   LEN    - bytes of hex to print per packet under DUMP; omitted = 16.
+ *            Ignored without DUMP.
  */
 
 #include <exec/types.h>
@@ -65,8 +85,9 @@ static volatile char version[] =
  * concern. */
 static volatile char stack_cookie[] = "$STACK: 16384";
 
-#define TEMPLATE "UNIT/A/N,FILE/A,TYPE/K,PROM/S,COUNT/K/N"
-enum { ARG_UNIT, ARG_FILE, ARG_TYPE, ARG_PROM, ARG_COUNT, ARG_COUNT_TOTAL };
+#define TEMPLATE "UNIT/A/N,FILE/A,TYPE/K,PROM/S,COUNT/K/N,DEVICE/K,CONFIG/S,ONLINE/S,DUMP/S,LEN/K/N"
+enum { ARG_UNIT, ARG_FILE, ARG_TYPE, ARG_PROM, ARG_COUNT, ARG_DEVICE, ARG_CONFIG,
+       ARG_ONLINE, ARG_DUMP, ARG_LEN, ARG_COUNT_TOTAL };
 
 /* SANA2LOOP_MAX_PACKET-equivalent from the device's own header isn't
  * shared with tools (that header is device-internal) -- 1514 is the
@@ -107,18 +128,68 @@ static BOOL parse_type(const char *s, ULONG *out)
     return TRUE;
 }
 
+/* DUMP mode's compact address form -- colon-separated hex, no trailing
+ * colon, matching print_addr()'s own byte formatting in sanainfo.c/
+ * sanaconform.c but on one line (this prints "addr -> addr", not a
+ * labelled line of its own). Always 6 bytes: SANA-II's own address
+ * fields are a fixed SANA2_MAX_ADDR_BYTES-sized buffer regardless of the
+ * actual driver's real address width, and this project's existing
+ * address-printing convention already only ever shows the first 6 --
+ * see sanainfo.c's own print_addr() for the same choice. */
+static void print_addr_compact(const UBYTE *addr)
+{
+    int k;
+    for (k = 0; k < 6; k++)
+        printf(k < 5 ? "%02x:" : "%02x", addr[k]);
+}
+
+/* DUMP mode's per-packet line -- deliberately modeled on sanamon's own
+ * documented output ("in 45 bytes, type=240, err=0, werr=0, HOST,
+ * 29->2a") for anyone who's used that tool before, not sana2loop's own
+ * invention. `io` must already carry a just-completed read's metadata
+ * (BCAST/MCAST classification, addresses, type, length) -- exactly what
+ * `so.io` holds right after a successful read in the capture loop below.
+ * `payload`/`len_cap` are separate from `io` because the caller's own
+ * frame buffer layout (payload starting past a prepended Ethernet
+ * header) isn't something this function needs to know about. */
+static void dump_packet(struct IOSana2Req *io, const UBYTE *payload, ULONG len_cap)
+{
+    ULONG shown = (io->ios2_DataLength < len_cap) ? io->ios2_DataLength : len_cap;
+    ULONG i;
+
+    printf("in %lu bytes, type=%04lx, err=%d, werr=%u, %s, ",
+           (unsigned long)io->ios2_DataLength, (unsigned long)io->ios2_PacketType,
+           io->ios2_Req.io_Error, (unsigned int)io->ios2_WireError,
+           (io->ios2_Req.io_Flags & SANA2IOF_BCAST) ? "BCAST" :
+           (io->ios2_Req.io_Flags & SANA2IOF_MCAST) ? "MCAST" : "HOST");
+    print_addr_compact(io->ios2_SrcAddr);
+    printf("->");
+    print_addr_compact(io->ios2_DstAddr);
+    printf("\n");
+
+    for (i = 0; i < shown; i++) {
+        printf("%02x ", payload[i]);
+        if ((i % 16) == 15)
+            printf("\n");
+    }
+    if (shown == 0 || (shown % 16) != 0)
+        printf("\n");
+}
+
 int main(int argc, char **argv)
 {
     LONG args[ARG_COUNT_TOTAL];
     struct RDArgs *rda;
     struct Sana2Open so;
     struct PcapWriter writer;
+    const char *device = "loopback.device";
     ULONG unit;
     ULONG want_count = 0; /* 0 = unlimited */
     ULONG type = 0;
     BOOL typed = FALSE;
     ULONG flags = 0;
     ULONG captured = 0;
+    ULONG dump_len = 16;
     /* Not a stack local -- see stack_cookie's own comment. Sized
      * MAX_FRAME + ETH_HDR_SIZE, not MAX_FRAME: the PAYLOAD alone can be a
      * full MAX_FRAME bytes (a SANA2IOF_RAW writer gets the MTU check
@@ -152,17 +223,46 @@ int main(int argc, char **argv)
         flags |= SANA2OPF_PROM;
     if (args[ARG_COUNT])
         want_count = (ULONG)*(LONG *)args[ARG_COUNT];
+    if (args[ARG_DEVICE])
+        device = (char *)args[ARG_DEVICE];
+    if (args[ARG_LEN])
+        dump_len = (ULONG)*(LONG *)args[ARG_LEN];
 
-    if (!sana2_open(&so, "loopback.device", (LONG)unit, flags)) {
-        fprintf(stderr, "SanaDump: can't open loopback.device unit %lu\n", (unsigned long)unit);
+    if (!sana2_open(&so, device, (LONG)unit, flags)) {
+        fprintf(stderr, "SanaDump: can't open %s unit %lu\n", device, (unsigned long)unit);
         FreeArgs(rda);
         return 20;
     }
 
-    /* A capture tool that isn't online captures nothing -- see this
-     * file's own header comment. */
-    so.io->ios2_Req.io_Command = S2_ONLINE;
-    DoIO((struct IORequest *)so.io);
+    /* CONFIG (opt-in, #35): most real drivers have no usable station
+     * address until a stack calls S2_CONFIGINTERFACE -- sana2loop's own
+     * units never need this (a usable factory address from the moment
+     * they're opened), but a real driver run standalone might. Uses
+     * whatever S2_GETSTATIONADDRESS already reports as the FACTORY
+     * default (ios2_DstAddr) -- matching sanamon's own documented
+     * "configure interface with its default address" behavior, not an
+     * arbitrary synthesized one. S2WERR_IS_CONFIGURED (a stack already
+     * beat us to it) is reported, not fatal -- S2_CONFIGINTERFACE's own
+     * one-shot-per-lifetime contract makes that a normal outcome. */
+    if (args[ARG_CONFIG]) {
+        so.io->ios2_Req.io_Command = S2_GETSTATIONADDRESS;
+        DoIO((struct IORequest *)so.io);
+        if (so.io->ios2_Req.io_Error != 0) {
+            fprintf(stderr, "SanaDump: S2_GETSTATIONADDRESS failed, io_Error=%d\n",
+                    so.io->ios2_Req.io_Error);
+        } else {
+            memcpy(so.io->ios2_SrcAddr, so.io->ios2_DstAddr, SANA2_MAX_ADDR_BYTES);
+            so.io->ios2_Req.io_Command = S2_CONFIGINTERFACE;
+            DoIO((struct IORequest *)so.io);
+            if (so.io->ios2_Req.io_Error == 0)
+                printf("SanaDump: configured with the driver's own factory address\n");
+            else if (so.io->ios2_WireError == S2WERR_IS_CONFIGURED)
+                printf("SanaDump: already configured -- leaving as-is\n");
+            else
+                fprintf(stderr, "SanaDump: S2_CONFIGINTERFACE failed, io_Error=%d\n",
+                        so.io->ios2_Req.io_Error);
+        }
+    }
 
     /* Snaplen advertises the largest record this file may contain -- a
      * full MAX_FRAME payload plus the 14-byte header this tool prepends,
@@ -174,8 +274,21 @@ int main(int argc, char **argv)
         return 20;
     }
 
-    printf("SanaDump: capturing unit %lu to %s (Ctrl-C to stop)\n",
-           (unsigned long)unit, (char *)args[ARG_FILE]);
+    /* ONLINE (opt-in, #36): a capture tool that isn't online captures
+     * nothing, but forcing it unconditionally (the pre-M19 behavior) is
+     * a real footgun once this tool can target a real driver (#33) a
+     * stack might be actively managing -- e.g. deliberately left offline
+     * mid error-recovery. Default is now sanamon's own safer posture:
+     * assume a stack already owns online state and don't touch it;
+     * ONLINE opts into owning the whole lifecycle instead (brought up
+     * here, taken back down at every exit path below). */
+    if (args[ARG_ONLINE]) {
+        so.io->ios2_Req.io_Command = S2_ONLINE;
+        DoIO((struct IORequest *)so.io);
+    }
+
+    printf("SanaDump: capturing unit %lu on %s to %s (Ctrl-C to stop)\n",
+           (unsigned long)unit, device, (char *)args[ARG_FILE]);
 
     for (;;) {
         ULONG sigs;
@@ -223,6 +336,9 @@ int main(int argc, char **argv)
             frame[13] = (UBYTE)so.io->ios2_PacketType;
         }
 
+        if (args[ARG_DUMP])
+            dump_packet(so.io, frame + ETH_HDR_SIZE, dump_len);
+
         /* Real wall-clock time, unlike this device's own tick-relative
          * record= timestamps (see userdocs/Replay-and-Record.md) -- a
          * capture of REAL traffic (from a real stack talking through
@@ -236,6 +352,13 @@ int main(int argc, char **argv)
             break;
         }
         captured++;
+    }
+
+    /* ONLINE's own symmetric half: only take the unit back offline if
+     * this session was the one that brought it up. */
+    if (args[ARG_ONLINE]) {
+        so.io->ios2_Req.io_Command = S2_OFFLINE;
+        DoIO((struct IORequest *)so.io);
     }
 
     /* Close() is where a filesystem's deferred flush errors finally

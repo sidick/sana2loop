@@ -173,6 +173,37 @@ can reject packet types it doesn't want without paying for the copy.
 No new units needed; no config or wire-level changes for existing
 single-open usage.
 
+## M19 — Companion tools become general-purpose SANA-II utilities
+
+Prompted by reviewing Aminet's `sanamon` (`comm/net/sanamon`): all four
+companion tools (`SanaInfo`, `SanaDump`, `SanaSend`, `SanaConform`)
+previously only ever opened sana2loop's own `loopback.device`. Now:
+
+- **`DEVICE=`** on all four -- point any of them at a real SANA-II
+  driver, not just this project's own device. `SanaConform` in
+  particular is arguably more useful probing an unknown real driver's
+  actual conformance than confirming this project's own.
+- **`CONFIG`** (opt-in) -- issues `S2_CONFIGINTERFACE` using the
+  driver's own factory address, for a real driver with no protocol
+  stack already running to configure it. sana2loop's own units never
+  need this.
+- **`ONLINE`'s default flipped**: `SanaDump`/`SanaSend`/`SanaConform`
+  used to force the unit online unconditionally. That's now opt-in --
+  the safer default once these tools can target a real driver a stack
+  might be actively managing. See
+  [SanaDump and SanaSend: Bringing a unit online](SanaDump-and-SanaSend.md#bringing-a-unit-online).
+- **`SanaConform` now probes `S2_PacketFilter` dispatch** -- whether the
+  driver actually invokes a negotiated filter hook, not just accepts
+  the tag. The exact gap Aminet's `sanamon` readme calls out as rare in
+  the wild, and the same gap sana2loop's own M18 closed.
+- **`SanaDump DUMP`/`LEN`** -- live console packet view (type, length,
+  error/wire-error, BCAST/MCAST/HOST, addresses, hex) as packets are
+  captured, sanamon-style, alongside the existing `.pcap` file output.
+
+See [SanaDump and SanaSend](SanaDump-and-SanaSend.md),
+[SanaInfo Reference](SanaInfo-Reference.md), and
+[SANA-II Conformance](SANA-II-Conformance.md) for the full details.
+
 ## What's next
 
 - A proper first tagged release (the M12 packaging pipeline is built and

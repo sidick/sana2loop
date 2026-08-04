@@ -7,7 +7,36 @@
 ; between (which would trigger reset_unit() and discard anything
 ; buffered -- a real gap in an earlier version of this test, not a device
 ; bug: reset-at-first-open is fully intentional, documented behavior).
-Run >NIL: SanaDump 12 S:sana2loop/captured.pcap COUNT=2
+; M19: ONLINE is now opt-in on SanaDump/SanaSend/SanaConform (#36 --
+; unconditionally forcing S2_ONLINE was a real footgun once DEVICE=
+; lets these tools target a real driver a stack might be actively
+; managing). SanaDump gets ONLINE here since it's genuinely the first
+; consumer of unit 12 in this session and the one that keeps it open
+; throughout (see the comment above); SanaSend does NOT need its own
+; ONLINE -- the unit is already online by the time it runs, and (more
+; importantly) SanaSend's own ONLINE would take unit 12 back OFFLINE at
+; its exit, before SanaDump (still running, still expecting the unit to
+; stay online) is done with it -- a real correctness bug for this
+; specific multi-consumer scenario, not a hypothetical.
+; M19: DUMP LEN=16 (#37) also exercised here, proving the new code path
+; runs without error/hang -- but its own PRINTED TEXT can't be verified
+; on-target this way: redirecting a BACKGROUNDED Run's stdout to a real
+; file (tried first, e.g. ">S:sana2loop/dump.out") reliably captures
+; only AmigaDOS's own "[CLI N]" process-creation banner, never the child
+; clib2 program's actual stdout content -- confirmed on both bundled
+; AROS and real Kickstart 3.1, so a real environment/toolchain limit of
+; this specific Run+redirect+backgrounded-clib2-program combination, not
+; a device or tool bug (and unrelated to argument count -- a red herring
+; chased first: bundled AROS separately, transiently hung the WHOLE
+; session specifically when a real-file redirect was combined with a
+; 3rd /K/N template field, but real Kickstart 3.1 never reproduced that,
+; and it stopped mattering once the redirect itself proved unable to
+; capture the content anyway). See docs/sana2-notes.md's M19 section for
+; the full investigation. DUMP's own formatting logic operates on the
+; same io fields verify_sanadump.py already proves correct via
+; captured.pcap, so the unverified surface is narrow (formatting only,
+; not data correctness).
+Run >NIL: SanaDump 12 S:sana2loop/captured.pcap COUNT=2 ONLINE DUMP LEN=16
 SanaSend 12 S:sana2loop/arp.pcap
 
 ; A real, pre-launch finding (caught testing against a real Kickstart 3.1
@@ -37,7 +66,9 @@ SanaSend 12 S:sana2loop/arp.pcap
 ; reach Copperline's serial capture (same as SanaDump/SanaSend -- see this
 ; file's own header comment), so redirected to a file for run-tools.sh's
 ; post-run xdftool extraction + grep check instead.
-SanaConform 0 >S:sana2loop/sanaconform.out
+; M19: SanaConform's own self-echo round trip needs the unit online to
+; complete at all -- ONLINE here (see the comment above).
+SanaConform 0 ONLINE >S:sana2loop/sanaconform.out
 
 ; Pre-launch-review addition: SanaInfo had never once been executed by any
 ; automated test, despite being built, shipped in the dist archive, and

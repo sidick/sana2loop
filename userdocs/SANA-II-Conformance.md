@@ -87,13 +87,27 @@ reporting what it finds in plain English rather than requiring you to
 write your own test program:
 
 ```
-SanaConform UNIT/N
+SanaConform UNIT/N,DEVICE/K,CONFIG/S,ONLINE/S
 ```
 
 - `UNIT` -- unit number to probe (default 0).
+- `DEVICE` -- SANA-II device to probe; omitted = `loopback.device`. Not
+  limited to this project's own device -- probing an unknown real
+  driver's actual conformance is arguably more useful than confirming
+  this project's own, which it already controls.
+- `CONFIG` -- issue `S2_CONFIGINTERFACE` first, using the driver's own
+  factory address -- see
+  [SanaDump and SanaSend's matching `CONFIG` entry](SanaDump-and-SanaSend.md#sanadump).
+- `ONLINE` -- bring the unit online for the probe and back offline on
+  exit. Omitted (the default) assumes a stack already manages online
+  state and doesn't touch it; the self-echo round-trip probe below
+  already tolerates "not online" as a graceful, reported skip rather
+  than a failure. See
+  [SanaDump and SanaSend: Bringing a unit online](SanaDump-and-SanaSend.md#bringing-a-unit-online)
+  for the full reasoning (unconditional forcing was the pre-M19 default).
 
 ```
-> SanaConform 0
+> SanaConform 0 ONLINE
 SanaConform: probing loopback.device unit 0
 OpenDevice: OK (Rev 2/3/7 buffer/DMA hooks all accepted without error --
   advisory tags are legal to offer even to a driver that ignores them)
@@ -106,19 +120,28 @@ S2_GETDNSADDRESS primary  : 00:00:00:00:00:00
 S2_GETDNSADDRESS secondary: 00:00:00:00:00:00
 Self-echo round trip: OK
 Buffer hooks actually invoked: base 8-bit (to=1 from=1)
+S2_PacketFilter invoked: YES (1 call)
 DMA hooks invoked: 0 (0 expected -- DMA is always advisory, a driver
   may legitimately decline every buffer and fall back to CPU copies)
 sana2loop quirk stat: 2 open(s) on this unit have offered a DMA hook
 ```
 
-It offers every Rev 2/3/7 hook it knows about at `OpenDevice()` time,
-then runs a real self-echo round trip (a second open on the same unit as
-a write partner) through instrumented counting hooks to report *which*
-negotiated width the driver actually chose -- not just whether it
-accepted the tag. If the probed unit is crossover-paired (or otherwise
-doesn't self-deliver), the self-echo step gracefully times out
-(~1 second) and reports that plainly instead of hanging -- that's a
-meaningful result about the unit's mode, not a tool failure.
+It offers every Rev 2/3/7 hook it knows about, plus a real
+`S2_PacketFilter` hook, at `OpenDevice()` time, then runs a real
+self-echo round trip (a second open on the same unit as a write partner)
+through instrumented counting hooks to report *which* negotiated buffer
+width the driver actually chose, and whether the filter hook was
+actually called before delivery -- not just whether the driver accepted
+the tags. `S2_PacketFilter invoked` is exactly the check Aminet's
+`sanamon` readme calls out most SANA-II drivers as never having actually
+implemented, despite it existing since the SANA-II V2.0 spec -- see
+[Echo and Crossover Modes: Multiple opens and monitoring](Echo-and-Crossover.md#multiple-opens-and-monitoring)
+for what a genuinely-dispatched filter enables. If the probed unit is
+crossover-paired (or otherwise doesn't self-deliver), the self-echo step
+gracefully times out (~1 second) and reports that plainly instead of
+hanging -- that's a meaningful result about the unit's mode, not a tool
+failure (and means the buffer-hook and filter checks are skipped too,
+since neither can be observed without a completed round trip).
 
 Every Rev 4 check is deliberately reported with **graceful fallback** in
 mind: an older driver, or a unit in a mode where a given addition

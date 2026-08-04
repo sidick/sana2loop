@@ -58,7 +58,12 @@ to silent drops -- fails writes with `S2ERR_TX_FAILURE` and fires
 scatter). M18 added multi-open fan-out delivery (open a unit more than
 once -- a stack plus a passive monitor -- and every open with a matching
 typed read gets its own independent copy), real `S2_PacketFilter`
-dispatch, and `SANA2OPF_MINE` exclusive-open enforcement -- see
+dispatch, and `SANA2OPF_MINE` exclusive-open enforcement. M19 turned the
+companion tools into general-purpose SANA-II utilities: `DEVICE=` on all
+four (they're no longer limited to sana2loop's own device), opt-in
+`CONFIG`/`ONLINE` for pointing at real hardware safely, `SanaConform`
+probing `S2_PacketFilter` dispatch, and `SanaDump` gaining a live
+console packet view -- see
 [`userdocs/Changelog.md`](userdocs/Changelog.md). **No release tag has
 been pushed yet** -- see [`docs/PLAN.md`](docs/PLAN.md)'s milestone
 table for what's left.

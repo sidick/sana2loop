@@ -102,6 +102,17 @@ else
 fi
 rm -f "$CAPTURED"
 
+# M19: DUMP LEN=16 (#37) is exercised in tools-startup-sequence.txt (it
+# runs without error, alongside the rest of SanaDump's own session, or
+# SANADUMP_VERIFY above would already be failing) but its own printed
+# TEXT isn't independently checked here -- see that file's own comment
+# for why: a backgrounded Run's stdout redirected to a real file only
+# ever captures AmigaDOS's "[CLI N]" banner in this environment, never
+# the child clib2 program's actual output, on both bundled AROS and real
+# Kickstart 3.1. Not a viable on-target content-verification path;
+# formatting logic reviewed by hand instead, operating on io fields
+# verify_sanadump.py already proves correct via captured.pcap.
+
 # M13: SanaConform's own stdout doesn't reach Copperline's serial capture
 # either (same as SanaDump/SanaSend -- see tools-startup-sequence.txt's own
 # comment), so its redirected output file is the only way to check it
@@ -121,6 +132,7 @@ if "$XDFTOOL" "$ADF" type s/sana2loop/sanaconform.out > "$CONFORM" 2>/dev/null; 
         'OpenDevice: OK' \
         'S2_ONLINE: OK' \
         'Self-echo round trip: OK' \
+        'S2_PacketFilter invoked: YES' \
         'open(s) on this unit have offered a DMA hook'
     do
         grep -qF "$marker" "$CONFORM" || {

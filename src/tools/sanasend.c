@@ -8,7 +8,8 @@
  * Normal AmigaOS 2.0+/clib2, like SanaDump -- see that file's own header
  * comment for why (and for sana2open.c's "model citizen" open helper).
  *
- * Usage: SanaSend UNIT/A/N,FILE/A,DEST/K,TYPE/K,DELAY/K/N
+ * Usage: SanaSend UNIT/A/N,FILE/A,DEST/K,TYPE/K,DELAY/K/N,DEVICE/K,
+ *                 CONFIG/S,ONLINE/S
  *   UNIT   - unit number to open.
  *   FILE   - input .pcap path.
  *   DEST   - override destination address, "aa:bb:cc:dd:ee:ff"; omitted =
@@ -17,6 +18,19 @@
  *            each record's own captured type.
  *   DELAY  - dos.library Delay() ticks between writes; omitted = 0 (as
  *            fast as the device accepts them).
+ *   DEVICE - SANA-II device to open; omitted = loopback.device. Not
+ *            limited to this project's own device -- see
+ *            userdocs/SanaDump-and-SanaSend.md's "Other drivers" section.
+ *   CONFIG - issue S2_CONFIGINTERFACE first, using whatever address
+ *            S2_GETSTATIONADDRESS reports as the driver's own factory
+ *            default -- see sanadump.c's matching CONFIG comment for why
+ *            and when this matters (a real driver with no stack already
+ *            running; sana2loop's own units never need it).
+ *   ONLINE - bring the unit online before sending and back offline on
+ *            exit -- own the whole online lifecycle for this session.
+ *            Omitted (the default) assumes a protocol stack already
+ *            manages online state and doesn't touch it -- see
+ *            sanadump.c's matching ONLINE comment for the full reasoning.
  *
  * A real constraint worth knowing before reaching for this tool: SANA-II
  * (and this device) never lets CMD_WRITE fake an arbitrary SOURCE address
@@ -72,8 +86,9 @@ static volatile char version[] =
  * ReadArgs()/etc. 16 KB is comfortably generous, not just "enough". */
 static volatile char stack_cookie[] = "$STACK: 16384";
 
-#define TEMPLATE "UNIT/A/N,FILE/A,DEST/K,TYPE/K,DELAY/K/N"
-enum { ARG_UNIT, ARG_FILE, ARG_DEST, ARG_TYPE, ARG_DELAY, ARG_COUNT_TOTAL };
+#define TEMPLATE "UNIT/A/N,FILE/A,DEST/K,TYPE/K,DELAY/K/N,DEVICE/K,CONFIG/S,ONLINE/S"
+enum { ARG_UNIT, ARG_FILE, ARG_DEST, ARG_TYPE, ARG_DELAY, ARG_DEVICE, ARG_CONFIG,
+       ARG_ONLINE, ARG_COUNT_TOTAL };
 
 #define MAX_FRAME 1514
 #define ETH_HDR_SIZE 14
@@ -136,6 +151,7 @@ int main(int argc, char **argv)
     struct RDArgs *rda;
     struct Sana2Open so;
     struct PcapReader reader;
+    const char *device = "loopback.device";
     ULONG unit;
     ULONG delay_ticks = 0;
     BOOL dest_override = FALSE, type_override = FALSE;
@@ -192,23 +208,52 @@ int main(int argc, char **argv)
         delay_ticks = (ULONG)d;
     }
 
+    if (args[ARG_DEVICE])
+        device = (char *)args[ARG_DEVICE];
+
     if (!pcapio_open_read(&reader, (char *)args[ARG_FILE])) {
         fprintf(stderr, "SanaSend: can't open %s as a pcap capture\n", (char *)args[ARG_FILE]);
         FreeArgs(rda);
         return 20;
     }
 
-    if (!sana2_open(&so, "loopback.device", (LONG)unit, 0)) {
-        fprintf(stderr, "SanaSend: can't open loopback.device unit %lu\n", (unsigned long)unit);
+    if (!sana2_open(&so, device, (LONG)unit, 0)) {
+        fprintf(stderr, "SanaSend: can't open %s unit %lu\n", device, (unsigned long)unit);
         pcapio_close_read(&reader);
         FreeArgs(rda);
         return 20;
     }
 
-    so.io->ios2_Req.io_Command = S2_ONLINE;
-    DoIO((struct IORequest *)so.io);
+    /* CONFIG/ONLINE (opt-in, #35/#36) -- see sanadump.c's matching
+     * comments for the full reasoning; kept byte-for-byte equivalent
+     * here. */
+    if (args[ARG_CONFIG]) {
+        so.io->ios2_Req.io_Command = S2_GETSTATIONADDRESS;
+        DoIO((struct IORequest *)so.io);
+        if (so.io->ios2_Req.io_Error != 0) {
+            fprintf(stderr, "SanaSend: S2_GETSTATIONADDRESS failed, io_Error=%d\n",
+                    so.io->ios2_Req.io_Error);
+        } else {
+            memcpy(so.io->ios2_SrcAddr, so.io->ios2_DstAddr, SANA2_MAX_ADDR_BYTES);
+            so.io->ios2_Req.io_Command = S2_CONFIGINTERFACE;
+            DoIO((struct IORequest *)so.io);
+            if (so.io->ios2_Req.io_Error == 0)
+                printf("SanaSend: configured with the driver's own factory address\n");
+            else if (so.io->ios2_WireError == S2WERR_IS_CONFIGURED)
+                printf("SanaSend: already configured -- leaving as-is\n");
+            else
+                fprintf(stderr, "SanaSend: S2_CONFIGINTERFACE failed, io_Error=%d\n",
+                        so.io->ios2_Req.io_Error);
+        }
+    }
 
-    printf("SanaSend: sending %s to unit %lu\n", (char *)args[ARG_FILE], (unsigned long)unit);
+    if (args[ARG_ONLINE]) {
+        so.io->ios2_Req.io_Command = S2_ONLINE;
+        DoIO((struct IORequest *)so.io);
+    }
+
+    printf("SanaSend: sending %s to unit %lu on %s\n", (char *)args[ARG_FILE],
+           (unsigned long)unit, device);
 
     for (;;) {
         struct pcap_pkthdr hdr;
@@ -251,6 +296,11 @@ int main(int argc, char **argv)
 
         if (delay_ticks)
             Delay((LONG)delay_ticks);
+    }
+
+    if (args[ARG_ONLINE]) {
+        so.io->ios2_Req.io_Command = S2_OFFLINE;
+        DoIO((struct IORequest *)so.io);
     }
 
     sana2_close(&so);

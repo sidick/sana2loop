@@ -1123,6 +1123,119 @@ settled first), then implemented per that plan.
   underlying reason (real 1.3's dos.library is measurably slower than
   AROS's).
 
+## Companion tools become general-purpose SANA-II utilities (M19)
+
+Prompted by reviewing sanamon (Aminet `comm/net/sanamon`, Michael van
+Elst, 1995) -- a general SANA-II packet monitor whose whole design
+assumes it can target *any* driver. Reviewing it against sana2loop's own
+four companion tools (which, until this milestone, ALL hardcoded
+`"loopback.device"` as a string literal) surfaced the gap directly.
+
+- **`DEVICE=`** everywhere, default unchanged. `sana2_open()` (the
+  shared helper `SanaDump`/`SanaSend` already use) already took a device
+  name parameter -- only the *callers* were hardcoding it.
+- **`CONFIG` matches sanamon's own documented behavior exactly**: "Try
+  to configure interface with its default address." Implemented as
+  `S2_GETSTATIONADDRESS` (reads the driver's own factory default from
+  `ios2_DstAddr`) then `S2_CONFIGINTERFACE` with that same address --
+  not an arbitrary synthesized one. `S2WERR_IS_CONFIGURED` (a stack beat
+  us to it) is reported, not fatal, matching `S2_CONFIGINTERFACE`'s own
+  one-shot-per-lifetime contract.
+- **`ONLINE`'s default flip is the one genuine behavior CHANGE, not just
+  an addition.** Pre-M19, `SanaDump`/`SanaSend`/`SanaConform` all forced
+  `S2_ONLINE` unconditionally at startup, never `S2_OFFLINE` at exit.
+  Harmless against sana2loop's own device (a test tool, no real-world
+  consequence). A genuine risk once `DEVICE=` means these can target a
+  driver a stack is actively managing -- forcing a unit online (or,
+  worse, taking it back offline on exit) out from under a stack that
+  deliberately put it in a specific state is real interference a
+  monitoring/testing tool shouldn't cause by default. sanamon's own
+  `ONLINE` flag is opt-in for exactly this reason ("tell driver to go
+  online first and to go offline when sanamon is exiting" -- i.e. own
+  the WHOLE lifecycle, not just flip a bit). Matched that: omitted
+  (default) means "assume a stack already manages this, don't touch
+  it"; `ONLINE` given means own start-to-finish.
+- **A real, unplanned multi-consumer correctness bug found wiring the
+  new default into `tests/copperline/tools-startup-sequence.txt`**:
+  `SanaDump` and `SanaSend` share unit 12 in that test (`SanaDump` opens
+  first and stays open across `SanaSend`'s later write -- the M11-era
+  design). Giving BOTH tools their own `ONLINE` flag would have been
+  wrong: `SanaSend`'s own `ONLINE` would take unit 12 back OFFLINE at
+  ITS OWN exit, potentially before `SanaDump` (still running, still
+  expecting the unit to stay online) is done with it. Resolved by giving
+  `ONLINE` only to `SanaDump` (genuinely first to use the unit, and the
+  one that keeps it open longest) -- `SanaSend` needs no flag at all,
+  since the unit is already online by the time it runs. Documented in
+  `tools-startup-sequence.txt`'s own comment as general guidance for
+  anyone driving two of these tools against the same unit.
+- **`SanaConform`'s new `S2_PacketFilter` probe** reuses its existing
+  instrumented-counting-hook pattern (same shape as the Rev 2/3 buffer-
+  hook probes already there) -- `hook_filter()` uses the identical
+  `a0`(hook)/`a2`(ios2)/`a1`(data) register convention M18's own
+  `Sana2FilterFunc` established and objdump-verified; adding it to
+  SanaConform is the independent, harness-side confirmation that a
+  genuine caller-supplied hook (not just the device's own internal one)
+  receives exactly what M18 claimed. Placed in the SAME `tags[]` array
+  the self-echo round trip already uses, so one round trip proves buffer
+  hook AND filter invocation together -- no separate probe needed.
+
+### The DUMP/LEN on-target verification investigation (two real findings, one red herring)
+
+Trying to get real on-target coverage for `SanaDump`'s new `DUMP`/`LEN`
+console output surfaced a genuine environment limitation, reached via a
+false lead worth recording so it isn't re-chased:
+
+1. **First attempt**: redirect the backgrounded `Run`'s own stdout to a
+   real file (`Run >S:sana2loop/dump.out SanaDump ... DUMP LEN=8`) and
+   grep the extracted file for `dump_packet()`'s own expected text,
+   exactly the pattern already established for `SanaConform`/`SanaInfo`'s
+   own redirected-output checks. This broke the WHOLE session on bundled
+   AROS specifically: `SanaSend`'s write never got through, and
+   `SanaConform`/`SanaInfo`'s own later steps never even ran (their
+   output files never got created at all) -- not a clean failure, a
+   stall.
+2. **Red herring chased first**: bisecting by removing pieces
+   (`LEN=8` -> `LEN=16` -> renaming the keyword to `DUMPLEN` entirely)
+   showed the hang tracked with having a THIRD `/K/N` (numeric keyword)
+   field in `SanaDump`'s `ReadArgs()` template (`UNIT/A/N` + `COUNT/K/N`
+   + a new one), regardless of that field's name or value -- strongly
+   suggesting a bundled-AROS-specific `ReadArgs()`/dos.library limit on
+   simultaneous numeric-keyword fields. Tested against real Kickstart
+   3.1 to check: the SAME 3-numeric-field combination worked FINE there
+   (main pipeline succeeded) -- confirming this half was a genuine
+   bundled-AROS-only quirk, in the same class as M9's `CheckIO()`/
+   `WaitIO()` bug and M13's floppy write-back ordering issue (AROS
+   diverging from real hardware, not a device/tool bug).
+3. **But it stopped mattering**: inspecting `dump.out`'s own content on
+   the run where the pipeline DID succeed (real Kickstart 3.1, 3
+   numeric fields, no hang) showed it contained only 8 bytes:
+   `"[CLI 2]"` -- AmigaDOS's own new-process banner text, NOT any of
+   `dump_packet()`'s own `printf()` output. Confirmed the SAME result on
+   bundled AROS once the 3-numeric-field hang was avoided (2 fields,
+   `DUMP` alone, no `LEN=`). **A backgrounded `Run`'s stdout redirected
+   to a real file, in this Copperline+dos.library combination, simply
+   does not deliver a child clib2 program's own stdout content to that
+   file at all** -- only the CLI-creation banner reaches it, on BOTH
+   bundled AROS and real Kickstart 3.1. A genuine environment/toolchain
+   limitation of this specific mechanism (backgrounded process + file
+   redirect + clib2 stdio), not a device or tool bug, and orthogonal to
+   the numeric-field finding above (which only ever explained *whether
+   the session hangs*, never *whether the redirect captures anything*).
+4. **Resolution**: `DUMP LEN=16` stays exercised in the shared
+   round-trip session (`tools-startup-sequence.txt`), proving the new
+   code path runs without error or hang, via the ORIGINAL working
+   `Run >NIL:` redirect (not a real file) -- consistent with this
+   project's own established stance (M14's own positive-case resolution
+   is the closest precedent): verify what's mechanically checkable
+   on-target, and be explicit in the docs/comments about what isn't,
+   rather than either skipping coverage silently or forcing a workaround
+   that doesn't actually prove anything. `dump_packet()`'s own printed
+   TEXT isn't independently checked on-target; its correctness rests on
+   code review plus the fact that it formats the SAME `io` fields
+   `verify_sanadump.py` already proves correct via `captured.pcap` (a
+   narrower, lower-risk unverified surface: formatting only, not data
+   correctness).
+
 ## `S2_DEVICEQUERY` convention (easy to get backwards)
 
 The caller pre-sets `ios2_StatData->SizeAvailable` to the size of *its own*
