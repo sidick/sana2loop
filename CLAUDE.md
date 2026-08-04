@@ -839,11 +839,18 @@ bundled AROS + real Kickstart 3.1 (real 1.3 not applicable -- these are
 V36+ tools). See `docs/sana2-notes.md`'s M19 section for the full
 investigation.
 
-No further milestones remain unscheduled except Aminet packaging's own
-"cut and publish a first tagged release" step (the M12 pipeline itself
-is built and tested, but no tag has been pushed) -- see docs/PLAN.md.
-The nullsana/vlink-inspired feature-idea queue is down to #31 (mirror
-device name) and #32 (stack-wiring walkthrough docs).
+**v1.0 released 2026-07-31** (this section had stubbornly kept saying
+"no tag pushed yet" for several milestones after that actually happened
+-- caught and fixed 2026-08-04 while preparing the next release; if this
+sentence is now itself stale, distrust it the same way and check
+`git tag`/`gh release list` directly rather than propagating it forward
+again). `version.mk` is bumped to 1.1 for M15-M19 (all additive,
+backward-compatible -- REVISION bump, not VERSION); `sana2loop.readme`'s
+`Version:` field and every `$VER:` date cookie (device + all four tools)
+were updated to match ahead of the next tag push. No further milestones
+remain unscheduled except actually pushing that `v1.1` tag. The
+nullsana/vlink-inspired feature-idea queue is down to #31 (mirror device
+name) and #32 (stack-wiring walkthrough docs).
 
 ## Architecture
 

@@ -2,7 +2,7 @@ Short:        Hardware-free SANA-II loopback device
 Author:       simond@irrelevant.org (Simon Dick)
 Uploader:     simond@irrelevant.org (Simon Dick)
 Type:         comm/net
-Version:      1.0
+Version:      1.1
 Architecture: m68k-amigaos
 Distribution: Aminet
 

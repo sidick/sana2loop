@@ -64,11 +64,11 @@ four (they're no longer limited to sana2loop's own device), opt-in
 `CONFIG`/`ONLINE` for pointing at real hardware safely, `SanaConform`
 probing `S2_PacketFilter` dispatch, and `SanaDump` gaining a live
 console packet view -- see
-[`userdocs/Changelog.md`](userdocs/Changelog.md). **No release tag has
-been pushed yet** -- see [`docs/PLAN.md`](docs/PLAN.md)'s milestone
-table for what's left.
-
-Not yet done: cutting and publishing a first tagged release.
+[`userdocs/Changelog.md`](userdocs/Changelog.md). **Released as
+[v1.0](https://github.com/sidick/sana2loop/releases/tag/v1.0)
+(2026-07-31)**; M15-M19 land in the next tagged release
+([`version.mk`](version.mk) is now 1.1) -- see
+[`docs/PLAN.md`](docs/PLAN.md)'s milestone table for the full history.
 
 ## Quick start
 

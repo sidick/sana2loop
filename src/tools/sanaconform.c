@@ -82,7 +82,7 @@
 /* See sanainfo.c's matching comment for why `volatile`, not `const`, and
  * the numeric dd.mm.yyyy date. */
 static volatile char version[] =
-    "$VER: SanaConform " XSTR(SANACONFORM_VERSION) "." XSTR(SANACONFORM_REVISION) " (31.07.2026)";
+    "$VER: SanaConform " XSTR(SANACONFORM_VERSION) "." XSTR(SANACONFORM_REVISION) " (04.08.2026)";
 
 /* See sanadump.c's matching comment: a plain Shell CLI process's default
  * stack is a mere 4 KB. */

@@ -150,7 +150,7 @@ struct Sana2LoopDeviceQuery {
  * cookie parses this field as three decimal numbers (day/month/year), so
  * a textual month wouldn't parse as a date at all (see DEVICE_ID_STRING's
  * own comment). */
-#define DEVICE_DATE       "(30.07.2026)"
+#define DEVICE_DATE       "(04.08.2026)"
 #ifndef DEVICE_VERSION
 #define DEVICE_VERSION 1
 #endif

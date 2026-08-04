@@ -73,7 +73,7 @@
 #endif
 
 static volatile char version[] =
-    "$VER: SanaSend " XSTR(SANASEND_VERSION) "." XSTR(SANASEND_REVISION) " (30.07.2026)";
+    "$VER: SanaSend " XSTR(SANASEND_VERSION) "." XSTR(SANASEND_REVISION) " (04.08.2026)";
 
 /* AmigaDOS's own "$STACK:" cookie (RKRM: DOS, "The Stack Cookie") --
  * scanned by the Shell/Workbench at load time and used to RAISE (never

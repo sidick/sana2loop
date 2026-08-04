@@ -51,7 +51,7 @@
  * this program. dd.mm.yyyy: the cookie's date field is three decimal
  * numbers, not a textual month. */
 static volatile char version[] =
-    "$VER: SanaInfo " XSTR(SANAINFO_VERSION) "." XSTR(SANAINFO_REVISION) " (30.07.2026)";
+    "$VER: SanaInfo " XSTR(SANAINFO_VERSION) "." XSTR(SANAINFO_REVISION) " (04.08.2026)";
 
 static void print_addr(const char *label, const UBYTE *addr)
 {

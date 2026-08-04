@@ -75,7 +75,7 @@
 /* See sanainfo.c's matching comment for why `volatile`, not `const`, and
  * the numeric dd.mm.yyyy date. */
 static volatile char version[] =
-    "$VER: SanaDump " XSTR(SANADUMP_VERSION) "." XSTR(SANADUMP_REVISION) " (30.07.2026)";
+    "$VER: SanaDump " XSTR(SANADUMP_VERSION) "." XSTR(SANADUMP_REVISION) " (04.08.2026)";
 
 /* See sanasend.c's matching comment: a plain Shell CLI process's default
  * stack is a mere 4 KB, and this program's own frame buffer alone (see

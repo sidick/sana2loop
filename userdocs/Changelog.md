@@ -7,7 +7,9 @@ landed in each, in user-facing terms — see the repository's
 [`docs/PLAN.md`](https://github.com/sidick/sana2loop/blob/main/docs/PLAN.md)
 for the full engineering detail behind each one.
 
-No numbered release has shipped yet — this project is still pre-1.0.
+**v1.0** shipped 2026-07-31 (M0–M13, up through SANA-II Rev 2/3/4/7
+conformance). Everything from **M14** onward lands in the next tagged
+release.
 
 ## Foundational milestones (M0–M4)
 

@@ -78,10 +78,10 @@ the Shell `Version` command reports it:
 
 ```
 > Version DEVS:loopback.device
-sana2loop 1.0 (30.07.2026)
+sana2loop 1.1 (04.08.2026)
 
 > Version SanaInfo
-SanaInfo 1.0 (30.07.2026)
+SanaInfo 1.1 (04.08.2026)
 ```
 
 ## Next steps
