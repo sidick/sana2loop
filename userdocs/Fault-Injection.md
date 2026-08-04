@@ -35,13 +35,28 @@ Every `CMD_WRITE` (and `S2_BROADCAST`/`S2_MULTICAST`) that reaches a live
    genuinely independent time.
 7. `reorder` — if enabled, delivery is buffered and released out of
    strict arrival order.
+8. `delay`/`deviation` — if either is set, delivery is deferred by a
+   simulated transit latency (plus optional jitter) instead of happening
+   synchronously.
 
 This fixed order matters when combining knobs: a duplicate (from
 `duppct`) is made **after** truncation (so both copies are the same,
 already-truncated length) but **before** reordering (so a duplicate is just
 as subject to being reordered as the original — you can get two copies of
 the same packet delivered in either order, or with other traffic
-interleaved between them).
+interleaved between them). `delay`/`deviation` run **last**, after
+reorder: whatever a packet's simulated transit latency ends up being, it
+applies to whatever the rest of the pipeline already decided to deliver
+(a duplicate, a reordering-evicted original, or a plain single write).
+
+One pipeline exception worth knowing: `CMD_FLUSH`, `S2_OFFLINE` (manual
+or auto via `offlineafter`), and last-close don't run new packets
+through this pipeline at all — they instead **flush** whatever's already
+buffered in the reorder and delay stages, delivering everything
+immediately, bypassing any further wait. See
+["Simulating out-of-order delivery"](#simulating-out-of-order-delivery)
+and ["Simulating latency and jitter"](#simulating-latency-and-jitter-delay-and-deviation)
+below for what that means for each.
 
 `offlineafter`/`onlineafter` aren't part of this packet-shaping pipeline —
 they're side effects ticked once per write attempt, covered
@@ -113,6 +128,41 @@ overtake it before it's forced out — not an unbounded shuffle. Anything
 still buffered is flushed, in original arrival order, on `S2_OFFLINE`
 (manual or auto via `offlineafter`), `CMD_FLUSH`, or the unit's last close
 — nothing is ever silently stuck there forever.
+
+## Simulating latency and jitter (`delay` and `deviation`)
+
+```
+delay=25
+deviation=5
+seed=3
+```
+
+Instead of delivering synchronously (the default), a written packet is
+held for `delay` VBlank ticks (50/sec — `delay=25` is roughly half a
+second) before it becomes deliverable. `deviation` adds symmetric
+jitter: the actual latency for each write is independently drawn from
+`[delay - deviation, delay + deviation]`, clamped so it never goes
+negative (a packet can't arrive before it was sent) — so `delay=25
+deviation=5` gives each write somewhere between 20 and 30 ticks. Setting
+only `deviation` (leaving `delay=0`) is legal too — it models pure
+scatter with no floor, each write's latency drawn from `[0,
+deviation]`.
+
+Because jitter can make a later write's due tick arrive sooner than an
+earlier write's, `delay`/`deviation` can reorder delivery on their own,
+independently of the `reorder` knob — the two compose if both are set.
+
+Latency is measured in whole VBlank ticks, not wall-clock time or
+microseconds — the same deliberately coarse, deterministic-under-
+emulation granularity `replaymode=scheduled` uses (see
+[Replay and Record](Replay-and-Record.md)), not an attempt at
+real-world timing fidelity.
+
+A unit with `delay`/`deviation` configured needs to be **online** for
+time to pass at all — `CMD_FLUSH`, `S2_OFFLINE` (manual or auto via
+`offlineafter`), and last-close all immediately deliver everything still
+waiting rather than leaving it stuck with no further ticks coming (going
+offline stops the clock for that unit entirely).
 
 ## PMTUD black hole (`oversilent`, crossover only)
 

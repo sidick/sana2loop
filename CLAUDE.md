@@ -308,7 +308,7 @@ copperline-smoke` (bundled AROS) and `run-tools.sh`, both still green.
     replies, fixed in the test harness (`reap_interrupt_io()`), not the
     device -- see `docs/PLAN.md`'s M9 risk note and
     `docs/sana2-notes.md`'s M9 section for the full investigation.
-  - 18 units pre-allocated in the device base as of M16 (unit 0 wired for
+  - 19 units pre-allocated in the device base as of M17 (unit 0 wired for
     echo by default; units 2-3 default-paired for crossover; every other
     unit spare/echo, each claimed by exactly one on-target test's own
     config fixture so no two tests' expectations ever collide on the same
@@ -716,13 +716,57 @@ discipline for copies still stands. `SANA2LOOP_NUM_UNITS` is now 18
 real Kickstart 1.3 + real 3.1 (39 sub-tests) + `run-tools.sh`. See
 `docs/sana2-notes.md`'s M16 section.
 
+A follow-up review of vlink (Aminet `comm/tcp/vlink`, Chris Brenner,
+1999/2000, magPLIP-derived -- a second known virtual SANA-II device,
+alongside nullsana) filed two more feature ideas: #31 (a second device
+name, e.g. `loopmirror.device`, whose unit N crossover-pairs with
+`loopback.device`'s unit N -- vlink's own `vlink.device`/
+`vlinkmirror.device` pattern, needed for consumers like ShapeShifter/
+Fusion that can only open unit 0 of a named device) and #32
+(step-by-step real-stack wiring walkthroughs in userdocs, modeled on
+vlink.guide's own numbered Miami/ShapeShifter/MacTCP setup instructions).
+
+**M17** (`delay=`/`deviation=` config keys -- GitHub issue #24, the
+third and final nullsana-inspired batch item): a written packet's
+delivery can be deferred `delay` VBlank ticks (0 = disabled, unchanged
+synchronous behavior) with optional symmetric `deviation` jitter
+(uniform draw in `[delay-deviation, delay+deviation]`, clamped at 0 --
+same 16x16 mulu.w top-bits technique as `prng_hits_pct()`/
+`prng_hits_one_in()`, not `%`: M16 added `__mulsi3` but not
+`__umodsi3`, so a general modulo still wouldn't link). New
+`su_DelayQueue` (a plain `List` of `EchoPacket`s via their own
+`ep_Node` -- no wrapper allocation, and genuinely unbounded unlike
+`su_ReorderBuf`'s fixed 8 slots, since delay has no natural window to
+bound it; backed by the same `AllocMem()` backpressure every packet
+allocation here already has). Runs LAST in the fault pipeline, after
+`reorder` (`deliver_with_delay()` replaces `deliver_or_reorder()`'s
+direct delivery call and reorder's own natural-eviction path).
+`vblank_server()`'s tick gate widened to a third, config-derived reason
+(never misses a drain); `delay_queue_tick()` scans the WHOLE queue
+every tick, not a sorted prefix -- jitter can make a later write due
+sooner than an earlier one. `CMD_FLUSH`/`S2_OFFLINE`/last-close gained
+a parallel `delay_queue_flush()` mirroring `reorder_flush()`'s own
+placement exactly (same reason: `su_Tick` only advances while online,
+so anything left queued at OFFLINE would otherwise wait forever) --
+and, like `reorder_flush()`, calls `deliver_packet()` DIRECTLY,
+bypassing `deliver_with_delay()`, since a flush's whole point is
+delivering NOW, not re-queuing into a fresh wait. `SANA2LOOP_NUM_UNITS`
+is now 19 (unit 18: the `delay=10` fixture, PRNG-free). The on-target
+`delay` sub-test needed a technique `scheduled` never did: right after
+the write's own (always-synchronous) `do_io()` returns, a plain read of
+the `g_HookToCount` side-effect global (not `CheckIO()`/`WaitIO()`,
+flagged unreliable on bundled AROS by the M9 risk note) proves delivery
+hasn't happened yet, before `reap_interrupt_io()` proves it eventually
+does correctly. Verified: bundled AROS (clean first try) + real
+Kickstart 1.3 + real 3.1 (40 sub-tests) + `run-tools.sh`. See
+`docs/sana2-notes.md`'s M17 section.
+
 No further milestones remain unscheduled except Aminet packaging's own
 "cut and publish a first tagged release" step (the M12 pipeline itself
 is built and tested, but no tag has been pushed) -- see docs/PLAN.md.
-Remaining nullsana-inspired feature ideas stay filed as GitHub issues
-#24 (delay/jitter) and #25 (multi-open fan-out + real `S2_PacketFilter`
-dispatch); a review of vlink (Aminet `comm/tcp/vlink`) for further
-adaptable features is queued.
+The nullsana/vlink-inspired feature-idea queue is down to #25
+(multi-open fan-out + real `S2_PacketFilter` dispatch), #31 (mirror
+device name), and #32 (stack-wiring walkthrough docs).
 
 ## Architecture
 

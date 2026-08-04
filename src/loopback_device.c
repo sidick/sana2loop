@@ -214,8 +214,13 @@ struct Sana2LoopDeviceQuery {
  * the growth, same as every struct-size change here must be.
  * M16: 18 (units 16/17 -- the errors=1 and loss=1 fixtures; each needs
  * its own unit because both knobs change what a plain write observably
- * does, which every other unit's own sub-test depends on). */
-#define SANA2LOOP_NUM_UNITS   18
+ * does, which every other unit's own sub-test depends on).
+ * M17: 19 (unit 18 -- the delay=10 fixture; needs its own unit for the
+ * same reason as M16's pair, and because it's also the first unit whose
+ * su_Tick advances from an ordinary CMD_WRITE, not just scheduled
+ * replay/recording -- sharing a unit with either of those would make
+ * su_Tick's own advance ambiguous between the two features). */
+#define SANA2LOOP_NUM_UNITS   19
 #define SANA2LOOP_DEFAULT_MTU 1500
 /* Reported by S2_DEVICEQUERY (BPS field) unless `bps=` (M15) overrides it
  * per unit -- was a bare hardcoded 10000000 at the query site before
@@ -397,6 +402,14 @@ struct DosLibrary *DOSBase;
 /* `truncate=N` can't usefully exceed the biggest packet this device ever
  * builds -- same ceiling `mtu` itself uses. */
 #define SANA2LOOP_CONFIG_MAX_TRUNCATE (SANA2LOOP_MAX_PACKET - SANA2LOOP_RAW_HDR_SIZE)
+/* M17 `delay=`/`deviation=` ceiling, in VBlank ticks (SANA2LOOP_VBLANK_HZ
+ * below) -- 3000 ticks is ~60 seconds at 50Hz, generously past any
+ * realistic test scenario (a guard against a typo'd huge value hanging a
+ * test run, same spirit as SANA2LOOP_CONFIG_MAX_RXQUEUE). Also load-
+ * bearing for compute_delay_ticks()'s jitter draw: `deviation*2+1` must
+ * fit a UWORD (<=65535) for its inline mulu.w operand -- 3000 leaves
+ * enormous headroom under that, so the two constraints never fight. */
+#define SANA2LOOP_CONFIG_MAX_DELAY 3000
 
 /* M6: a unit is either a standalone echo loopback (Phase 1 behavior,
  * unchanged) or crossover-paired with exactly one other unit (a real,
@@ -475,6 +488,11 @@ struct UnitConfig {
     ULONG truncate;     /* M7: 0 = disabled, else cap packet length to this */
     ULONG oversilent;   /* M7: 0 or 1 */
     ULONG reorder;      /* M7: 0-SANA2LOOP_MAX_REORDER window size */
+    ULONG delay;        /* M17: `delay=N` -- fixed VBlank-tick delivery
+                            latency, 0 = disabled (synchronous, unchanged
+                            pre-M17 behavior) */
+    ULONG deviation;    /* M17: `deviation=N` -- symmetric uniform jitter
+                            around `delay` (ticks), 0 = no jitter */
     ULONG offlineafter; /* M7: 0 = disabled, else auto-offline after N writes */
     ULONG onlineafter;  /* M7: 0 = disabled, else auto-online after N failed
                             write attempts while offline */
@@ -854,6 +872,28 @@ static BOOL parse_config_line(struct UnitConfig *cfg, const char *line, const ch
         cfg->reorder = value;
         return TRUE;
     }
+    if (key_matches(line, eq, "delay")) {
+        /* M17: fixed VBlank-tick delivery latency -- 0 (default) means
+         * synchronous delivery, byte-for-byte pre-M17 behavior. */
+        if (!parse_ulong(eq + 1, line_end, &value))
+            return FALSE;
+        if (value > SANA2LOOP_CONFIG_MAX_DELAY)
+            return FALSE;
+        cfg->delay = value;
+        return TRUE;
+    }
+    if (key_matches(line, eq, "deviation")) {
+        /* M17: symmetric jitter around `delay` (ticks), 0 = none. Legal
+         * with delay=0 too -- that models pure scatter with no floor
+         * (each write's actual latency independently drawn from
+         * [0, deviation]), not an error. */
+        if (!parse_ulong(eq + 1, line_end, &value))
+            return FALSE;
+        if (value > SANA2LOOP_CONFIG_MAX_DELAY)
+            return FALSE;
+        cfg->deviation = value;
+        return TRUE;
+    }
     if (key_matches(line, eq, "offlineafter")) {
         if (!parse_ulong(eq + 1, line_end, &value))
             return FALSE;
@@ -1140,6 +1180,11 @@ struct EchoPacket {
     UBYTE       ep_SrcAddr[SANA2_MAX_ADDR_BYTES];
     UBYTE       ep_DstAddr[SANA2_MAX_ADDR_BYTES];
     ULONG       ep_Length;
+    ULONG       ep_DueTick;  /* M17: absolute su_Tick this packet becomes
+                                 deliverable at, while parked in a writer's
+                                 su_DelayQueue -- meaningless (never read)
+                                 once the packet reaches su_PendingData or
+                                 any other list. */
     UBYTE       ep_Data[SANA2LOOP_MAX_PACKET];
 };
 
@@ -1222,6 +1267,24 @@ struct Sana2LoopUnit {
                                           ordered while buffered -- see
                                           reorder_push()/reorder_flush() */
     ULONG       su_ReorderCount;      /* current fill level, <= su_ReorderWindow */
+    ULONG       su_DelayTicks;        /* M17: `delay=N` -- fixed VBlank-tick
+                                          delivery latency, 0 = disabled */
+    ULONG       su_Deviation;         /* M17: `deviation=N` -- symmetric
+                                          jitter around su_DelayTicks
+                                          (ticks), 0 = none */
+    struct List su_DelayQueue;        /* M17: packets awaiting their
+                                          ep_DueTick, most recently written
+                                          at the tail -- NOT due-tick
+                                          ordered (jitter can make a later
+                                          write due sooner than an earlier
+                                          one), so vblank_server() scans
+                                          the whole list every tick rather
+                                          than assuming sorted order; same
+                                          reasoning ruled out reusing
+                                          su_ReorderBuf's fixed-array shape
+                                          here (an unbounded number of
+                                          packets can be in flight at once,
+                                          unlike reorder's fixed window) */
     ULONG       su_ErrorsOneIn;       /* M16: `errors=N` -- 1-in-N writes
                                           fail visibly (S2ERR_TX_FAILURE +
                                           S2EVENT_TX|ERROR fired), 0 =
@@ -1284,10 +1347,13 @@ struct Sana2LoopUnit {
     /* M9: which of the two replay delivery models (see
      * SANA2LOOP_REPLAYMODE_CONSUME/_SCHEDULED's own comment). su_Tick
      * ticks once per VBlank (vblank_server()) while this unit is online
-     * AND (scheduled-replay mode OR recording) -- gated on su_Online so a
-     * replay session's own "elapsed time" only counts while the link is
-     * actually up, matching how a real interface only experiences
-     * traffic time while connected. su_ReplayDueTicks[i] (ULONG, safely
+     * AND (scheduled-replay mode OR recording OR M17's delay/deviation
+     * active) -- gated on su_Online so a replay session's own "elapsed
+     * time" (and, as of M17, a write's own transit delay) only counts
+     * while the link is actually up, matching how a real interface only
+     * experiences traffic time while connected -- see force_offline()'s
+     * own su_DelayQueue-flush call for what happens to anything already
+     * in flight when that gate slams shut. su_ReplayDueTicks[i] (ULONG, safely
      * indexable -- power-of-2 element size, unlike su_ReplayPackets) is
      * each loaded record's own due tick, computed once at load time from
      * its captured pcap timestamp relative to the FIRST record's own
@@ -1901,6 +1967,12 @@ static void fire_event(struct Sana2LoopUnit *unit, ULONG event)
  * near do_write(), its other caller. */
 static void deliver_packet(struct Sana2LoopUnit *unit, struct EchoPacket *pkt);
 
+/* Forward declaration, same reasoning: M17's reorder_push() needs to call
+ * this (a naturally-evicted packet is still subject to delay=), but its
+ * own definition lives after reorder_flush() below, near the rest of
+ * this M17 delay-queue machinery. */
+static void deliver_with_delay(struct Sana2LoopDevice *sld, struct Sana2LoopUnit *writer, struct EchoPacket *pkt);
+
 /* Which unit does a packet WRITTEN on `unit` actually get delivered to?
  * `unit` itself for echo (Phase 1's reflexive self-delivery), its
  * configured peer for crossover (M6). Shared by do_write() and the M7
@@ -1991,6 +2063,45 @@ static BOOL prng_hits_one_in(ULONG *state, ULONG n)
     return roll * n < 65536UL;
 }
 
+/* M17 `delay=`/`deviation=`: resolves the actual delivery latency (in
+ * VBlank ticks) for one write, drawing jitter only if `deviation` is
+ * nonzero -- same exact-boundary discipline as every other PRNG-gated
+ * knob here (a disabled knob draws nothing, so it never perturbs the
+ * seeded sequence of any OTHER knob sharing this unit's PRNG stream).
+ *
+ * Jitter is symmetric uniform in [-deviation, +deviation], clamped so the
+ * result never goes negative (a packet cannot arrive before it was
+ * sent): `idx = (roll16 * window) >> 16` draws uniformly in
+ * [0, window) from a 16-bit roll, where window = 2*deviation+1 -- the
+ * same "top bits of a 16x16->32 mulu.w" technique prng_hits_pct()/
+ * prng_hits_one_in() already use, not `% window` (a general modulo by a
+ * runtime divisor needs __umodsi3, which this build still doesn't
+ * provide -- only __mulsi3 got that treatment at M16). `idx - deviation`
+ * (done in two unsigned branches below, since this file has no signed
+ * arithmetic precedent to lean on) then lands anywhere in
+ * [-deviation, +deviation]. `deviation` is config-capped at
+ * SANA2LOOP_CONFIG_MAX_DELAY (3000), so `window` always fits a UWORD --
+ * required for the inline mulu.w operand. */
+static ULONG compute_delay_ticks(ULONG *state, ULONG delay, ULONG deviation)
+{
+    ULONG window, roll, idx, below;
+
+    if (deviation == 0)
+        return delay;
+
+    window = deviation * 2 + 1;
+    roll = xorshift32(state) >> 16;              /* 16-bit draw */
+    __asm__("mulu.w %1,%0" : "+d"(roll) : "d"((UWORD)window));
+    idx = roll >> 16;                             /* uniform in [0, window) */
+
+    if (idx >= deviation)
+        return delay + (idx - deviation);
+    below = deviation - idx;
+    if (below > delay)
+        return 0; /* would go negative -- clamp, don't wrap */
+    return delay - below;
+}
+
 /* Buffers `pkt` into `writer`'s fixed-size reorder window; once the
  * window is full, PRNG-evicts ONE of the currently-buffered packets
  * (which may be the one just inserted, all equally likely) for actual
@@ -2030,8 +2141,12 @@ static void reorder_push(struct Sana2LoopDevice *sld, struct Sana2LoopUnit *writ
     }
     Enable();
 
+    /* M17: a naturally-evicted packet is still ordinary pipeline flow
+     * (not a flush event), so it's still subject to delay= -- see
+     * deliver_with_delay()'s own comment for why reorder_flush() below,
+     * unlike this, deliberately bypasses it. */
     if (evicted)
-        deliver_packet(delivery_target(sld, writer), evicted);
+        deliver_with_delay(sld, writer, evicted);
 }
 
 /* Delivers everything still sitting in `writer`'s reorder buffer, in
@@ -2067,20 +2182,124 @@ static void reorder_flush(struct Sana2LoopDevice *sld, struct Sana2LoopUnit *wri
         deliver_packet(target, snapshot[i]);
 }
 
+/* M17: the pipeline's final stage, after reorder -- either hands `pkt`
+ * straight to deliver_packet() (no delay configured, the common case,
+ * unchanged pre-M17 behavior) or parks it on `writer`'s su_DelayQueue
+ * with a resolved due tick for vblank_server()'s delay_queue_tick() to
+ * release later. `writer`, not the delivery target: delay models the
+ * WRITER's own link latency, same convention every other fault knob here
+ * already uses (droppct/duppct/truncate/reorder are all keyed off the
+ * writing unit's config, not the peer's).
+ *
+ * Deliberately the ONLY caller that can enqueue onto su_DelayQueue --
+ * reorder_flush() and delay_queue_flush() itself both call
+ * deliver_packet() DIRECTLY, bypassing this, because a flush's whole
+ * point is "push everything out NOW" (see delay_queue_flush()'s own
+ * comment): re-queuing an already-flushed packet through a fresh delay
+ * would defeat that. */
+static void deliver_with_delay(struct Sana2LoopDevice *sld, struct Sana2LoopUnit *writer, struct EchoPacket *pkt)
+{
+    ULONG delay;
+
+    if (writer->su_DelayTicks == 0 && writer->su_Deviation == 0) {
+        deliver_packet(delivery_target(sld, writer), pkt);
+        return;
+    }
+
+    delay = compute_delay_ticks(&writer->su_PrngState, writer->su_DelayTicks, writer->su_Deviation);
+    if (delay == 0) {
+        /* Jitter clamped an already-small delay to 0, or deviation alone
+         * (no base delay) happened to draw 0 this time -- immediate
+         * delivery, same as the disabled case above. */
+        deliver_packet(delivery_target(sld, writer), pkt);
+        return;
+    }
+
+    pkt->ep_DueTick = writer->su_Tick + delay;
+    Disable();
+    AddTail(&writer->su_DelayQueue, (struct Node *)pkt);
+    Enable();
+}
+
+/* Called once per VBlank (vblank_server()) for any unit whose
+ * su_DelayQueue might have something in it. Walks the WHOLE queue every
+ * tick rather than assuming due-tick order -- jitter means a packet
+ * enqueued LATER can have an EARLIER due tick than one already waiting
+ * (that's the whole point of jitter: it's allowed to reorder delivery),
+ * so there's no sorted-prefix shortcut to take. Collects due packets
+ * under Disable() (this can race a concurrent do_write() -> AddTail on
+ * the same queue, or a concurrent CMD_FLUSH/S2_OFFLINE ->
+ * delay_queue_flush() draining the whole thing), then delivers them
+ * OUTSIDE Disable() -- same "pop under Disable, act outside" discipline
+ * fire_event() and reorder_push() both already use, and required here
+ * for the identical reason: deliver_packet() calls consumer hooks and
+ * ReplyMsg(), neither legal with interrupts disabled. */
+static void delay_queue_tick(struct Sana2LoopDevice *sld, struct Sana2LoopUnit *unit)
+{
+    struct EchoPacket *pkt, *next;
+    struct List due;
+    struct Node *n;
+
+    list_init(&due);
+
+    Disable();
+    for (pkt = (struct EchoPacket *)unit->su_DelayQueue.lh_Head;
+         pkt->ep_Node.ln_Succ;
+         pkt = next) {
+        next = (struct EchoPacket *)pkt->ep_Node.ln_Succ;
+        if (pkt->ep_DueTick <= unit->su_Tick) {
+            Remove((struct Node *)pkt);
+            AddTail(&due, (struct Node *)pkt);
+        }
+    }
+    Enable();
+
+    while ((n = RemHead(&due)) != NULL)
+        deliver_packet(delivery_target(sld, unit), (struct EchoPacket *)n);
+}
+
+/* Delivers EVERYTHING still sitting in `writer`'s delay queue immediately,
+ * ignoring each packet's own remaining wait -- the delay-queue analogue
+ * of reorder_flush() (same trigger set: S2_OFFLINE, CMD_FLUSH,
+ * last-close), and for the same reason: vblank_server() only ticks a
+ * unit while it's online (see su_Tick's own field comment), so anything
+ * still parked here when a unit goes offline would otherwise wait
+ * forever for a tick that never comes. Preserves original write
+ * (insertion) order, not due-tick order -- same choice reorder_flush()
+ * makes for its own buffer. */
+static void delay_queue_flush(struct Sana2LoopDevice *sld, struct Sana2LoopUnit *writer)
+{
+    struct Sana2LoopUnit *target = delivery_target(sld, writer);
+    struct List drained;
+    struct Node *n;
+
+    list_init(&drained);
+
+    Disable();
+    while ((n = RemHead(&writer->su_DelayQueue)) != NULL)
+        AddTail(&drained, n);
+    Enable();
+
+    while ((n = RemHead(&drained)) != NULL)
+        deliver_packet(target, (struct EchoPacket *)n);
+}
+
 /* The last step of the fault pipeline: either buffer `pkt` for later,
- * PRNG-permuted release (su_ReorderWindow > 0), or hand it straight to
- * deliver_packet() at its resolved target (no reordering configured --
- * the common case, unchanged behavior). Used for both the original
- * packet and duppct's duplicate, if any -- the plan's pipeline order
- * (droppct -> truncate -> duppct -> reorder) puts reorder AFTER
- * duplication, so a dup is just as subject to reordering as the
- * original. */
+ * PRNG-permuted release (su_ReorderWindow > 0), or hand it to
+ * deliver_with_delay() (M17: applies delay=/deviation= if configured,
+ * else identical to a direct deliver_packet() call -- see that
+ * function's own comment). Used for both the original packet and
+ * duppct's duplicate, if any -- the plan's pipeline order (droppct ->
+ * truncate -> duppct -> reorder -> delay) puts reorder AFTER
+ * duplication (so a dup is just as subject to reordering as the
+ * original) and delay LAST (so a packet's simulated transit latency is
+ * whatever's left after every other fault decision already ran). */
 static void deliver_or_reorder(struct Sana2LoopDevice *sld, struct Sana2LoopUnit *unit, struct EchoPacket *pkt)
 {
     if (unit->su_ReorderWindow > 0)
         reorder_push(sld, unit, pkt);
     else
-        deliver_packet(delivery_target(sld, unit), pkt);
+        deliver_with_delay(sld, unit, pkt);
 }
 
 /* Shared by S2_ONLINE and M7's su_OnlineAfter auto-recovery -- exactly
@@ -2095,13 +2314,19 @@ static void force_online(struct Sana2LoopUnit *unit)
 /* Shared by S2_OFFLINE and M7's su_OfflineAfter auto-trigger. Flushes the
  * reorder buffer as part of going offline -- a unit that's about to stop
  * accepting writes shouldn't leave whatever it already accepted stuck
- * in a buffer with no future write ever arriving to push it back out. */
+ * in a buffer with no future write ever arriving to push it back out.
+ * M17: also flushes the delay queue, for a stronger reason than the
+ * reorder buffer's own -- vblank_server() only ticks a unit while
+ * su_Online is TRUE (just cleared above), so without this, anything
+ * still parked in su_DelayQueue at this exact moment would simply never
+ * become due again; there is no future tick left to release it. */
 static void force_offline(struct Sana2LoopDevice *sld, struct Sana2LoopUnit *unit)
 {
     unit->su_Online = FALSE;
     unit->su_WriteCounter = 0;
     fire_event(unit, S2EVENT_OFFLINE);
     reorder_flush(sld, unit);
+    delay_queue_flush(sld, unit);
 }
 
 /* Ticks su_OfflineAfter's write counter; once it reaches the configured
@@ -2193,6 +2418,17 @@ static void reset_unit(struct Sana2LoopUnit *unit)
             FreeMem(pn, sizeof(struct EchoPacket));
     }
     unit->su_PendingDataCount = 0;
+    /* M17: same defensive free (not deliver) for anything still parked in
+     * su_DelayQueue -- close()'s own delay_queue_flush() call (mirroring
+     * reorder_flush()'s exact placement) should already have emptied this
+     * before drain_unit() ran, so this is normally a no-op; kept anyway
+     * for the same "costs nothing, keeps this function trustworthy on its
+     * own" reasoning as su_PendingData's block above. */
+    {
+        struct Node *pn;
+        while ((pn = safe_rem_head(&unit->su_DelayQueue)) != NULL)
+            FreeMem(pn, sizeof(struct EchoPacket));
+    }
     unit->su_Configured  = FALSE;
     unit->su_BuffHooks   = 8; /* M13: always the base hook by default --
                                   identical behavior to every milestone
@@ -2261,6 +2497,8 @@ static void reset_unit(struct Sana2LoopUnit *unit)
     unit->su_Oversilent   = FALSE;
     unit->su_ReorderWindow = 0;
     unit->su_ReorderCount  = 0;
+    unit->su_DelayTicks    = 0;                        /* M17 */
+    unit->su_Deviation     = 0;                        /* M17 */
     unit->su_ErrorsOneIn   = 0;                        /* M16 */
     unit->su_LossOneIn     = 0;                        /* M16 */
     unit->su_OfflineAfter  = 0;
@@ -2775,8 +3013,16 @@ static ULONG __attribute__((used)) vblank_server(struct Sana2LoopDevice *sld asm
         struct Sana2LoopUnit *unit = &sld->sld_Units[i];
         BOOL scheduled = (unit->su_Mode == SANA2LOOP_MODE_REPLAY &&
                           unit->su_ReplayMode == SANA2LOOP_REPLAYMODE_SCHEDULED);
+        /* M17: delay=/deviation= is the third reason (besides scheduled
+         * replay and recording) a unit needs su_Tick advancing -- a
+         * config-derived flag, not queue-depth-derived: delay is either
+         * on for this whole open session or off for all of it (config is
+         * only ever read at the unit's own 0->1 open), so this never
+         * misses a drain the way gating on "is the queue empty right
+         * now" could. */
+        BOOL delaying = (unit->su_DelayTicks > 0 || unit->su_Deviation > 0);
 
-        if (!unit->su_Online || !(scheduled || unit->su_Recording))
+        if (!unit->su_Online || !(scheduled || unit->su_Recording || delaying))
             continue;
 
         unit->su_Tick++;
@@ -2806,6 +3052,18 @@ static ULONG __attribute__((used)) vblank_server(struct Sana2LoopDevice *sld asm
                 unit->su_ReplayPos++;
             }
         }
+
+        /* M17: release anything in this unit's delay queue that's come
+         * due. Safe to call unconditionally here too (an empty list is a
+         * cheap no-op), but gating on `delaying` avoids even that check
+         * for the two-thirds of units that never enqueue anything --
+         * consistent with this loop's existing pay-only-if-configured
+         * shape. Uses deliver_packet() (via delay_queue_tick(), see its
+         * own comment) -- the SAME real-interrupt-context invocation path
+         * M9 already proved legal for scheduled replay above, not a new
+         * risk this milestone introduces. */
+        if (delaying)
+            delay_queue_tick(sld, unit);
     }
     return 0;
 }
@@ -2847,6 +3105,7 @@ init_device(BPTR seg_list asm("a0"), struct Library *dev asm("d0"))
         list_init(&u->su_OrphanReads);
         list_init(&u->su_PendingData);
         list_init(&u->su_EventReqs);
+        list_init(&u->su_DelayQueue); /* M17 */
 
         reset_unit(u);
     }
@@ -2968,6 +3227,8 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
             cfg.truncate     = unit->su_Truncate;
             cfg.oversilent   = unit->su_Oversilent;
             cfg.reorder      = unit->su_ReorderWindow;
+            cfg.delay        = unit->su_DelayTicks;   /* M17 */
+            cfg.deviation    = unit->su_Deviation;    /* M17 */
             cfg.offlineafter = unit->su_OfflineAfter;
             cfg.onlineafter  = unit->su_OnlineAfter;
             cfg.replay_path[0] = 0; /* M8: not persisted on the unit --
@@ -3045,6 +3306,8 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
             unit->su_Truncate     = cfg.truncate;
             unit->su_Oversilent   = cfg.oversilent ? TRUE : FALSE;
             unit->su_ReorderWindow = cfg.reorder;
+            unit->su_DelayTicks    = cfg.delay;       /* M17 */
+            unit->su_Deviation     = cfg.deviation;   /* M17 */
             unit->su_OfflineAfter = cfg.offlineafter;
             unit->su_OnlineAfter  = cfg.onlineafter;
             unit->su_BuffHooks    = cfg.buffhooks;
@@ -3221,6 +3484,12 @@ close(struct Library *dev asm("a6"), struct IORequest *io asm("a1"))
          * genuine crossover peer delivery is a DIFFERENT unit's queue
          * either way, so the order doesn't affect that case at all. */
         reorder_flush((struct Sana2LoopDevice *)dev, unit);
+        /* M17: same reasoning and same BEFORE-drain_unit() ordering as
+         * reorder_flush() just above -- delay_queue_flush() can also
+         * deliver straight back into this same unit's own su_PendingData
+         * (echo mode, or a self-peered crossover), and drain_unit() must
+         * run last so it sweeps up whatever either flush just queued. */
+        delay_queue_flush((struct Sana2LoopDevice *)dev, unit);
         drain_unit(unit);
         /* M9: same last-close boundary flushes any RAM-recorded traffic
          * to its named output file. */
@@ -3881,8 +4150,10 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
             ReplyMsg(&pending->ios2_Req.io_Message);
         }
         /* M7: also flush anything this unit has buffered as a WRITER in
-         * its own reorder window, per docs/PLAN.md's M7 entry. */
+         * its own reorder window, per docs/PLAN.md's M7 entry. M17: same
+         * for anything sitting in its delay queue awaiting a due tick. */
         reorder_flush(sld, unit);
+        delay_queue_flush(sld, unit);
         break;
     }
 

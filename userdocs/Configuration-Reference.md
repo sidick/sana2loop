@@ -110,6 +110,8 @@ if that matters for your setup.
 | `duppct` | 0–100 | 0 | Percent chance a written packet is delivered **twice** (a genuine second copy, independently subject to reordering). |
 | `truncate` | 0–1500 | 0 (disabled) | Caps delivered packet length to this many bytes. `0` disables truncation. |
 | `reorder` | 0–8 | 0 (disabled) | Reorder window size. `0` disables reordering; delivery order matches write order. |
+| `delay` | 0–3000 | 0 (disabled, synchronous delivery) | Fixed delivery latency in VBlank ticks (50/sec). Runs last in the pipeline, after `reorder`. |
+| `deviation` | 0–3000 | 0 (no jitter) | Symmetric jitter around `delay`, in ticks — actual latency per write is drawn from `[delay-deviation, delay+deviation]`, clamped at 0. Legal with `delay=0` (pure scatter, no floor). Can reorder delivery on its own, independent of `reorder=`. |
 | `oversilent` | 0 or 1 | 0 | Crossover only. When a written packet exceeds the **peer's** MTU (not the writer's own, which is checked unconditionally), `1` accepts the write and silently vanishes the packet — simulating a PMTUD black hole — instead of failing the write with `S2ERR_MTU_EXCEEDED`. |
 | `offlineafter` | any count | 0 (disabled) | Auto-forces the unit offline after this many successful writes, as if `S2_OFFLINE` had been issued. |
 | `onlineafter` | any count | 0 (disabled) | Auto-forces the unit back online after this many **failed** write attempts while offline, as if `S2_ONLINE` had been issued — simulates a flaky link recovering on its own. |

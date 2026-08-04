@@ -31,13 +31,15 @@ Features
     S2_ONEVENT, global/type/special stats, and per-unit config files
     (ENV:/S: sana2loop/unitN.config).
   - Fault injection pipeline, all off by default: packet drop (percent
-    or 1-in-N), duplicate, truncate, reorder, forced online/offline
-    flapping, visible TX-error injection (1-in-N writes fail with
-    S2ERR_TX_FAILURE and fire S2EVENT_TX|ERROR - the loud failure class
-    the silent knobs can't produce), and an "oversilent" PMTUD black
-    hole - an overlong crossover write vanishes silently instead of
-    erroring, so a stack's actual PMTUD black-hole detection/recovery
-    can be tested, not just assumed - all seeded and reproducible.
+    or 1-in-N), duplicate, truncate, reorder, simulated link latency and
+    jitter (delay=/deviation=, VBlank-tick delivery delay with optional
+    symmetric scatter), forced online/offline flapping, visible TX-error
+    injection (1-in-N writes fail with S2ERR_TX_FAILURE and fire
+    S2EVENT_TX|ERROR - the loud failure class the silent knobs can't
+    produce), and an "oversilent" PMTUD black hole - an overlong
+    crossover write vanishes silently instead of erroring, so a stack's
+    actual PMTUD black-hole detection/recovery can be tested, not just
+    assumed - all seeded and reproducible.
   - Operator-pinned station addresses (addr=) for reproducible captures
     and topology-mimicking crossover pairs.
   - pcap replay (on-demand or real-time VBlank-scheduled) and pcap

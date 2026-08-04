@@ -924,6 +924,84 @@ The second nullsana-inspired batch (GitHub #27/#29):
   literals. The whole future-milestone hazard class ("did this struct
   edit break the link?") is retired.
 
+## `delay=`/`deviation=` -- simulated transit latency and jitter (M17)
+
+The third and final nullsana-inspired batch item (GitHub #24), completing
+the config knobs first sketched when nullsana (comm/tcp/nullsana, 2000)
+was reviewed as prior art -- its own config template carried
+`DELAY/N/K,DEV=DEVIATION/N/K` under the identical names.
+
+- **Queue shape, deliberately NOT `su_ReorderBuf`'s fixed-array
+  pattern**: `su_DelayQueue` is a plain `struct List`, packets linked via
+  their own existing `ep_Node` (no wrapper allocation, unlike a naive
+  "queue node wraps a packet pointer" design). Reorder's fixed 8-slot
+  array works because a bounded WINDOW is the whole point of reordering;
+  delay has no such natural bound -- an arbitrarily large number of
+  packets can be genuinely in flight at once under a long `delay=` and a
+  fast write rate. Left unbounded on purpose, backed by the same
+  `AllocMem()` failure path (`S2ERR_NO_RESOURCES`) every other packet
+  allocation in this file already has -- no NEW resource-exhaustion
+  surface, just the existing one applying here too.
+- **Not due-tick sorted**: jitter means a packet enqueued LATER can have
+  an EARLIER due tick than one already waiting (that's the mechanism by
+  which `deviation` reorders delivery on its own, independent of the
+  `reorder=` knob) -- so `delay_queue_tick()` scans the whole list every
+  VBlank rather than assuming a sorted prefix, the same shape
+  `vblank_server()`'s existing scheduled-replay branch does NOT need
+  (that one IS strictly ordered, by construction of the loaded pcap).
+- **Pipeline position: LAST, after reorder.** `deliver_or_reorder()`'s
+  non-reorder branch and `reorder_push()`'s own natural-eviction branch
+  both now call `deliver_with_delay()` instead of `deliver_packet()`
+  directly -- a packet's simulated wire latency is whatever's left once
+  every other fault decision (errors/droppct/loss/truncate/duppct/
+  reorder) already ran. `reorder_flush()` and `delay_queue_flush()`
+  themselves deliberately do NOT route through `deliver_with_delay()` --
+  see the next point.
+- **Flush bypasses delay entirely, on purpose.** `CMD_FLUSH`,
+  `S2_OFFLINE` (manual or auto via `offlineafter`), and last-close all
+  call `delay_queue_flush()` (mirroring `reorder_flush()`'s own
+  placement in all three call sites exactly), which drains the WHOLE
+  queue immediately via a direct `deliver_packet()` call -- never
+  `deliver_with_delay()`. Re-queuing an already-flushed packet into a
+  fresh wait would defeat the entire point of "flush" (push everything
+  out NOW). This also matters for correctness, not just intent:
+  `vblank_server()` only advances `su_Tick` while a unit is
+  `su_Online` (see that field's own comment), so a unit going offline
+  with anything still parked in `su_DelayQueue` would otherwise strand
+  it forever -- no future tick would ever come to release it. Same
+  underlying reasoning `reorder_flush()`'s own doc comment already gives
+  for why IT exists; delay's version of the hazard is just more acute
+  (reorder's buffer is bounded to 8 slots and stops accepting once full;
+  delay's queue has no such natural ceiling to eventually force a
+  flush by itself).
+- **Jitter draw, and why it's NOT `%`:** `compute_delay_ticks()` draws
+  uniformly in `[0, window)` via `(roll16 * window) >> 16` -- the exact
+  top-bits-of-a-16x16-multiply technique `prng_hits_pct()`/
+  `prng_hits_one_in()` already established, not a general modulo. M16
+  added this build's own `__mulsi3` (32x32->32 multiply), but NOT
+  `__umodsi3` (division/modulo by a runtime divisor) -- that gap is
+  still open, so a `% window` here would still fail to link. `window =
+  2*deviation+1`, capped by `SANA2LOOP_CONFIG_MAX_DELAY` (3000) well
+  under the 65535 a UWORD operand needs.
+- **Proving "genuinely deferred" on-target needed a technique the
+  existing `scheduled` sub-test never had to use.** `scheduled` only
+  ever proves EVENTUAL correct delivery via `reap_interrupt_io()` (a
+  side-effect wait, sidestepping the documented bundled-AROS
+  `CheckIO()`/`WaitIO()` false-completion bug from the M9 investigation
+  -- see that risk note). That alone can't distinguish "delivered later,
+  via the delay queue" from "delivered synchronously, and
+  `reap_interrupt_io()`'s spin just happened to already see the
+  evidence" -- a bug where `delay=` silently did nothing would pass a
+  `scheduled`-shaped test undetected. The `delay` sub-test adds a SECOND
+  check the `scheduled` test doesn't need: immediately after the
+  write's own `do_io()` returns (which is unconditionally synchronous --
+  only the READ's delivery is ever deferred, never the WRITE's own
+  completion), a plain read of `g_HookToCount` (an ordinary side-effect
+  global, not an IORequest completion check, so none of the
+  CheckIO()/WaitIO() bug applies) must show it hasn't incremented yet.
+  Only then does `reap_interrupt_io()` prove the eventual, correct
+  arrival -- exactly like `scheduled` does.
+
 ## `S2_DEVICEQUERY` convention (easy to get backwards)
 
 The caller pre-sets `ios2_StatData->SizeAvailable` to the size of *its own*

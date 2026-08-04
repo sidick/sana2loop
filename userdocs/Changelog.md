@@ -146,6 +146,18 @@ Two more units are pre-allocated (unit numbers now run 0–17). See
 [Fault Injection](Fault-Injection.md) for where the new knobs sit in the
 pipeline.
 
+## M17 — Simulated link latency and jitter
+
+`delay=N`/`deviation=N` — the last of the nullsana-inspired batch: a
+written packet's delivery can now be deferred by a fixed number of
+VBlank ticks, with optional symmetric jitter, instead of always
+happening synchronously. Runs last in the fault-injection pipeline,
+after `reorder`. `CMD_FLUSH`, `S2_OFFLINE`, and last-close all
+immediately deliver anything still waiting, same as they already do for
+the reorder buffer. See [Fault Injection](Fault-Injection.md#simulating-latency-and-jitter-delay-and-deviation).
+
+One more unit is pre-allocated (unit numbers now run 0–18).
+
 ## What's next
 
 - A proper first tagged release (the M12 packaging pipeline is built and

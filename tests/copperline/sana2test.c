@@ -141,6 +141,7 @@ static char NAME_WIRE[]            = "wire";
 static char NAME_ADDR[]            = "addr";
 static char NAME_FAULTERRORS[]     = "faulterrors";
 static char NAME_FAULTLOSS[]       = "faultloss";
+static char NAME_DELAY[]           = "delay";
 static char DBG_CHECKIO_NULL[]    = "DBG_CHECKIO_NULL=";
 
 /* M13: this toolchain's <devices/sana2.h> lacks Rev 4's RawMTU field --
@@ -2715,6 +2716,112 @@ static int test_main(void)
         }
 
         report(NAME_FAULTLOSS, ok, &fails);
+    }
+
+    /* --- delay: M17's `delay=`/`deviation=` -- unit 18 (delay=10,
+     * deviation=0: a fixed, PRNG-free 10-VBlank latency, chosen so the
+     * on-target assertion is exact rather than a range -- deviation's
+     * own jitter is exercised only informally, see
+     * docs/sana2-notes.md's M17 section and unit18.config's own
+     * comment). Two claims, each needing its own proof technique:
+     *
+     * (a) NOT delivered synchronously despite the write itself
+     *     completing immediately -- checked via a plain read of
+     *     g_HookToCount (an ordinary side-effect global, NOT
+     *     CheckIO()/WaitIO() on the read's own IORequest) taken right
+     *     after the write's own do_io() returns. This deliberately
+     *     avoids the documented bundled-AROS CheckIO()/WaitIO()
+     *     false-completion bug reap_interrupt_io() itself exists to
+     *     route around (see that function's own comment) -- reading an
+     *     unrelated counter variable isn't subject to that bug at all,
+     *     so this is safe on both AROS and real hardware. do_io(write)
+     *     is genuinely synchronous (CMD_WRITE completes inside the
+     *     writer's own BeginIO(), unaffected by delay= -- only the
+     *     READ's delivery is deferred), so zero VBlanks can have
+     *     elapsed between the write returning and this check running.
+     * (b) DOES eventually arrive, correctly, once real VBlanks tick --
+     *     reap_interrupt_io() + a real S2_CopyToBuff hook, the exact
+     *     same interrupt-context-delivery proof the "scheduled"
+     *     sub-test above already established, just via delay='s own
+     *     code path (delay_queue_tick()) instead of scheduled replay's. --- */
+    {
+        BOOL ok = TRUE;
+        struct MsgPort *portda = make_port();
+        struct IOSana2Req *ioda = portda ? make_io(portda) : NULL; /* reader, with hook */
+        struct MsgPort *portdw = make_port();
+        struct IOSana2Req *iodw = portdw ? make_io(portdw) : NULL; /* writer */
+        struct TagItem tagsd[2];
+
+        if (ioda) {
+            tagsd[0].ti_Tag  = S2_CopyToBuff;
+            tagsd[0].ti_Data = (ULONG)counting_copy_to;
+            tagsd[1].ti_Tag  = TAG_DONE;
+            tagsd[1].ti_Data = 0;
+            ioda->ios2_BufferManagement = tagsd;
+        }
+
+        if (ioda && iodw &&
+            OpenDevice((STRPTR)DEVICE_NAME, 18, (struct IORequest *)ioda, 0) == 0 &&
+            OpenDevice((STRPTR)DEVICE_NAME, 18, (struct IORequest *)iodw, 0) == 0) {
+            int k;
+            g_HookToCount = 0;
+
+            ioda->ios2_Req.io_Command = S2_ONLINE;
+            do_io(ioda);
+            ok = (ioda->ios2_Req.io_Error == 0);
+
+            ioda->ios2_Req.io_Command = CMD_READ;
+            ioda->ios2_Data = readbuf;
+            ioda->ios2_PacketType = 0x1B00;
+            ioda->ios2_Req.io_Flags = 0;
+            send_io(ioda);
+
+            iodw->ios2_Req.io_Command = CMD_WRITE;
+            iodw->ios2_PacketType = 0x1B00;
+            iodw->ios2_DataLength = sizeof(PAYLOAD) - 1;
+            iodw->ios2_Data = (APTR)PAYLOAD;
+            for (k = 0; k < SANA2_MAX_ADDR_BYTES; k++)
+                iodw->ios2_DstAddr[k] = (k < 6) ? (UBYTE)(0x1B + k) : 0;
+            do_io(iodw);
+            ok = ok && (iodw->ios2_Req.io_Error == 0);
+
+            /* (a) above: the write already fully completed (do_io()
+             * returned), yet the reader's hook must not have fired
+             * yet -- proves delay= actually deferred delivery instead
+             * of silently delivering synchronously. */
+            ok = ok && (g_HookToCount == 0);
+
+            /* (b) above: see reap_interrupt_io()'s own comment for why
+             * this, not WaitIO(), is the correct way to wait out a
+             * genuinely interrupt-driven completion. */
+            reap_interrupt_io(ioda, &g_HookToCount, 1);
+            ok = ok && (ioda->ios2_Req.io_Error == 0) &&
+                 (ioda->ios2_DataLength == sizeof(PAYLOAD) - 1) &&
+                 g_HookToCount >= 1;
+            if (ok)
+                for (k = 0; k < (int)(sizeof(PAYLOAD) - 1); k++)
+                    if (readbuf[k] != (UBYTE)PAYLOAD[k])
+                        ok = FALSE;
+
+            CloseDevice((struct IORequest *)ioda);
+            CloseDevice((struct IORequest *)iodw);
+        } else {
+            ok = FALSE;
+        }
+        if (ioda)
+            FreeMem(ioda, sizeof(struct IOSana2Req));
+        if (portda) {
+            FreeSignal(portda->mp_SigBit);
+            FreeMem(portda, sizeof(struct MsgPort));
+        }
+        if (iodw)
+            FreeMem(iodw, sizeof(struct IOSana2Req));
+        if (portdw) {
+            FreeSignal(portdw->mp_SigBit);
+            FreeMem(portdw, sizeof(struct MsgPort));
+        }
+
+        report(NAME_DELAY, ok, &fails);
     }
 
     /* --- record: unit 11 (`record=S:sana2loop/recorded.pcap`,
