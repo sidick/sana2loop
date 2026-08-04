@@ -308,7 +308,7 @@ copperline-smoke` (bundled AROS) and `run-tools.sh`, both still green.
     replies, fixed in the test harness (`reap_interrupt_io()`), not the
     device -- see `docs/PLAN.md`'s M9 risk note and
     `docs/sana2-notes.md`'s M9 section for the full investigation.
-  - 16 units pre-allocated in the device base as of M15 (unit 0 wired for
+  - 18 units pre-allocated in the device base as of M16 (unit 0 wired for
     echo by default; units 2-3 default-paired for crossover; every other
     unit spare/echo, each claimed by exactly one on-target test's own
     config fixture so no two tests' expectations ever collide on the same
@@ -694,12 +694,35 @@ bundled AROS + real Kickstart 1.3 + real 3.1, and `run-tools.sh` on
 bundled AROS. See `docs/sana2-notes.md`'s M15 section for the design
 notes.
 
+**M16** (`addr=`/`errors=`/`loss=` config keys -- GitHub issues #27/#29,
+the second nullsana-inspired batch): `addr=` pins the FACTORY station
+address from config (colon-separated hex; byte count validated against
+the wire's address width after `wire=` resolution; Ethernet group bit
+rejected; M3's `S2_CONFIGINTERFACE` one-shot override works on top
+unchanged). `errors=N` is the only VISIBLE fault knob -- 1-in-N writes
+fail `S2ERR_TX_FAILURE`/`S2WERR_TOO_MANY_RETRIES` and fire
+`S2EVENT_TX|S2EVENT_ERROR` (first real exercise of the momentary event
+bits). `loss=N` is 1-in-N silent loss beside `droppct` (rates finer than
+1%); both use `prng_hits_one_in()` with exact draw-free 0/1 boundaries
+so enabling one knob never perturbs another's seeded PRNG sequence.
+**The build now carries its own `__mulsi3`** (three mulu.w partial
+products, inline asm, placed deliberately AFTER `_start()`/romtag --
+emitted at text offset 0 otherwise, observed): M16's per-unit struct
+growth broke the link at PRE-EXISTING `sld_Units[]` index sites, proving
+the M8/M14 __mulsi3-avoidance strategy (noinline, nm checks) no longer
+scales -- that whole hazard class is retired; the CopyMem-not-memcpy
+discipline for copies still stands. `SANA2LOOP_NUM_UNITS` is now 18
+(units 16/17: `errors=1`/`loss=1` fixtures). Verified: bundled AROS +
+real Kickstart 1.3 + real 3.1 (39 sub-tests) + `run-tools.sh`. See
+`docs/sana2-notes.md`'s M16 section.
+
 No further milestones remain unscheduled except Aminet packaging's own
 "cut and publish a first tagged release" step (the M12 pipeline itself
 is built and tested, but no tag has been pushed) -- see docs/PLAN.md.
 Remaining nullsana-inspired feature ideas stay filed as GitHub issues
-#24 (delay/jitter), #25 (multi-open fan-out + real `S2_PacketFilter`
-dispatch), and #29 (visible error injection / 1-in-N loss).
+#24 (delay/jitter) and #25 (multi-open fan-out + real `S2_PacketFilter`
+dispatch); a review of vlink (Aminet `comm/tcp/vlink`) for further
+adaptable features is queued.
 
 ## Architecture
 

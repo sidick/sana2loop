@@ -49,10 +49,13 @@ config knob (`replaycap=1`..`256`). M15 added wire-type emulation
 (`wire=ethernet|slip|cslip|ppp` -- point-to-point serial wires with
 4-byte IP-style addressing, so a stack's SLIP/PPP paths are testable
 too), a configurable reported link speed (`bps=`), and a minimum-write-
-size floor (`mintu=`) -- see
-[`userdocs/Changelog.md`](userdocs/Changelog.md). **No release tag has
-been pushed yet** -- see [`docs/PLAN.md`](docs/PLAN.md)'s milestone table
-for what's left.
+size floor (`mintu=`). M16 added operator-pinned station addresses
+(`addr=`), visible TX-error injection (`errors=`, the loud counterpart
+to silent drops -- fails writes with `S2ERR_TX_FAILURE` and fires
+`S2EVENT_TX|ERROR`), and finer-than-percent silent loss (`loss=N`,
+1-in-N) -- see [`userdocs/Changelog.md`](userdocs/Changelog.md). **No
+release tag has been pushed yet** -- see
+[`docs/PLAN.md`](docs/PLAN.md)'s milestone table for what's left.
 
 Not yet done: cutting and publishing a first tagged release.
 

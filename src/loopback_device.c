@@ -211,8 +211,11 @@ struct Sana2LoopDeviceQuery {
  * memory floor from 1 MB to 2 MB (the documented minimum since), which
  * is exactly the headroom the reuse-don't-grow workarounds above were
  * compensating for the absence of. Verified against bundled AROS after
- * the growth, same as every struct-size change here must be. */
-#define SANA2LOOP_NUM_UNITS   16
+ * the growth, same as every struct-size change here must be.
+ * M16: 18 (units 16/17 -- the errors=1 and loss=1 fixtures; each needs
+ * its own unit because both knobs change what a plain write observably
+ * does, which every other unit's own sub-test depends on). */
+#define SANA2LOOP_NUM_UNITS   18
 #define SANA2LOOP_DEFAULT_MTU 1500
 /* Reported by S2_DEVICEQUERY (BPS field) unless `bps=` (M15) overrides it
  * per unit -- was a bare hardcoded 10000000 at the query site before
@@ -233,6 +236,11 @@ struct Sana2LoopDeviceQuery {
 #define SANA2LOOP_PPP_BPS       115200
 #define SANA2LOOP_ADDR_ETHERNET 6
 #define SANA2LOOP_ADDR_P2P      4
+/* M16 `errors=`/`loss=` ceiling: both are 1-in-N rates and the draw is a
+ * 16x16->32 multiply (native mulu.w on plain 68000 -- see
+ * prng_hits_one_in()), so N must fit a UWORD. 1-in-65535 is already far
+ * rarer than any realistic test needs. */
+#define SANA2LOOP_CONFIG_MAX_ONEIN 65535
 /* Ethernet dst[6]+src[6]+type[2] -- the allowance SANA2IOF_RAW adds on top
  * of su_MTU (docs/PLAN.md's M4 entry: "SANA2IOF_RAW (buffer -> MTU+14)").
  * Scoped deliberately narrow: this device only relaxes the MTU-exceeded
@@ -504,6 +512,20 @@ struct UnitConfig {
                             default only applies in its absence,
                             regardless of key order in the file. */
     BOOL  bps_explicit; /* M15: same contract for `bps=`. */
+    UBYTE addr[6];      /* M16: `addr=` -- operator-pinned station address
+                            (becomes BOTH factory and current at open).
+                            Byte count must match the wire's address width
+                            -- validated in read_unit_config() after
+                            `wire=` resolution, since either key may come
+                            first. */
+    ULONG addr_len;     /* M16: how many bytes `addr=` actually supplied;
+                            0 = key absent, keep the derived factory
+                            address (pre-M16 behavior). */
+    ULONG errors;       /* M16: `errors=N` -- 1-in-N writes fail VISIBLY
+                            (S2ERR_TX_FAILURE), 0 = disabled. */
+    ULONG loss;         /* M16: `loss=N` -- 1-in-N writes silently lost,
+                            0 = disabled. The finer-than-percent
+                            counterpart to droppct. */
     ULONG replaycap;    /* M14: `replaycap=N` -- how many pcap records a
                             mode=replay unit may load, default
                             SANA2LOOP_MAX_REPLAY_PACKETS (4) */
@@ -656,6 +678,75 @@ static BOOL parse_config_line(struct UnitConfig *cfg, const char *line, const ch
         if (value > SANA2LOOP_CONFIG_MAX_MTU)
             return FALSE;
         cfg->mintu = value;
+        return TRUE;
+    }
+    if (key_matches(line, eq, "addr")) {
+        /* M16: colon-separated hex bytes, 1-2 digits per component
+         * (nullsana's own configs use single digits: `0:80:10:0:10:20`),
+         * case-insensitive, hand-rolled like every other parse here (no
+         * sscanf in a freestanding build). Only the byte COUNT ceiling is
+         * enforced per-line; whether the count matches this unit's wire
+         * address width is a cross-field question answered in
+         * read_unit_config() after `wire=` resolution. */
+        const char *p2 = eq + 1;
+        ULONG count = 0;
+
+        while (p2 < line_end) {
+            ULONG byte = 0, digits = 0;
+            while (p2 < line_end && *p2 != ':') {
+                ULONG d;
+                char c = *p2;
+                if (c >= '0' && c <= '9')
+                    d = (ULONG)(c - '0');
+                else if (c >= 'a' && c <= 'f')
+                    d = (ULONG)(c - 'a') + 10;
+                else if (c >= 'A' && c <= 'F')
+                    d = (ULONG)(c - 'A') + 10;
+                else
+                    return FALSE;
+                byte = (byte << 4) | d;
+                digits++;
+                if (digits > 2)
+                    return FALSE;
+                p2++;
+            }
+            if (digits == 0 || count >= sizeof(cfg->addr))
+                return FALSE; /* empty component (`::`, trailing `:`) or
+                                 more bytes than any wire's address holds */
+            cfg->addr[count++] = (UBYTE)byte;
+            if (p2 < line_end)
+                p2++; /* step over the ':' */
+        }
+        if (count == 0)
+            return FALSE;
+        cfg->addr_len = count;
+        return TRUE;
+    }
+    if (key_matches(line, eq, "errors")) {
+        /* M16: 1-in-N VISIBLE write failure (S2ERR_TX_FAILURE) -- the
+         * loud counterpart to droppct/loss's silent vanishing, exercising
+         * a stack's error-handling/retry path rather than its timeout
+         * path. 0 disables; 1 fails every write (a deterministic
+         * everything-fails mode, no PRNG involved). */
+        if (!parse_ulong(eq + 1, line_end, &value))
+            return FALSE;
+        if (value > SANA2LOOP_CONFIG_MAX_ONEIN)
+            return FALSE;
+        cfg->errors = value;
+        return TRUE;
+    }
+    if (key_matches(line, eq, "loss")) {
+        /* M16: 1-in-N silent loss -- same observable behavior as droppct
+         * (write succeeds, packet never arrives) at rates a whole percent
+         * can't express (droppct's rarest is 1-in-100; real-world loss
+         * worth simulating is often 1-in-1000 or rarer -- nullsana's own
+         * example is exactly `loss 1000`). Composes with droppct: both
+         * draw independently, in pipeline order. */
+        if (!parse_ulong(eq + 1, line_end, &value))
+            return FALSE;
+        if (value > SANA2LOOP_CONFIG_MAX_ONEIN)
+            return FALSE;
+        cfg->loss = value;
         return TRUE;
     }
     if (key_matches(line, eq, "wire")) {
@@ -987,6 +1078,24 @@ static BOOL read_unit_config(struct UnitConfig *cfg, UBYTE unit_index)
     if (cfg->mintu > cfg->mtu)
         return FALSE;
 
+    /* M16 `addr=` cross-field checks, AFTER wire resolution (either key
+     * may come first in the file): the supplied byte count must match the
+     * wire's own address width exactly -- a 4-byte address on an Ethernet
+     * unit (or 6 on a slip one) is a config mistake, not something to
+     * zero-pad into plausibility. On Ethernet, the group (multicast) bit
+     * in the first octet is additionally rejected: a STATION address with
+     * the group bit set is not a station address, and a test tool
+     * accepting one would just relocate the confusion into the consumer
+     * under test. */
+    if (cfg->addr_len != 0) {
+        ULONG want = (cfg->wire == S2WireType_Ethernet)
+                   ? SANA2LOOP_ADDR_ETHERNET : SANA2LOOP_ADDR_P2P;
+        if (cfg->addr_len != want)
+            return FALSE;
+        if (cfg->wire == S2WireType_Ethernet && (cfg->addr[0] & 0x01))
+            return FALSE;
+    }
+
     /* M15: replay/record are Ethernet-only -- the pcap side of this
      * device (load_replay_file()'s linktype check, record_append()'s
      * dst[6]+src[6]+type[2] frame synthesis) is built around
@@ -1113,6 +1222,12 @@ struct Sana2LoopUnit {
                                           ordered while buffered -- see
                                           reorder_push()/reorder_flush() */
     ULONG       su_ReorderCount;      /* current fill level, <= su_ReorderWindow */
+    ULONG       su_ErrorsOneIn;       /* M16: `errors=N` -- 1-in-N writes
+                                          fail visibly (S2ERR_TX_FAILURE +
+                                          S2EVENT_TX|ERROR fired), 0 =
+                                          disabled */
+    ULONG       su_LossOneIn;         /* M16: `loss=N` -- 1-in-N writes
+                                          silently lost, 0 = disabled */
     ULONG       su_OfflineAfter;      /* 0 = disabled, else auto-S2_OFFLINE
                                           after this many successful writes */
     ULONG       su_OnlineAfter;       /* 0 = disabled, else auto-S2_ONLINE
@@ -1348,6 +1463,52 @@ asm("romtag:                                \n"
 
 char device_name[]      = DEVICE_NAME;
 char device_id_string[] = DEVICE_ID_STRING;
+
+/* Our own __mulsi3 -- the libgcc 32x32->32 multiply helper this
+ * -nostdlib build has never been able to link. Until M16 the strategy
+ * was avoidance: keep every 32-bit multiply either constant-by-constant
+ * (folded), constant-by-variable with a cheap shift/add decomposition
+ * (synthesized inline), or restructured away entirely
+ * (load_replay_file()'s load-bearing noinline at M8; prng_hits_pct()'s
+ * pct*655 trick at M7; nm/objdump verification at M14). That strategy
+ * broke down at M16: growing struct Sana2LoopUnit by two ULONGs pushed
+ * its sizeof past the backend's shift/add budget at PRE-EXISTING
+ * sld_Units[] index sites -- i.e. new code being careful no longer
+ * guarantees the build links. Providing the real symbol retires the
+ * entire hazard class instead: GCC may now emit __mulsi3 freely and it
+ * simply links, here and for every future milestone.
+ *
+ * Standard schoolbook decomposition, lowest 32 bits only (which is all
+ * __mulsi3 contracts to return): a*b = al*bl + ((al*bh + ah*bl) << 16),
+ * each partial product a native 16x16->32 mulu.w -- written as inline
+ * asm because expressing them as C `*` inside the very function that
+ * IMPLEMENTS `*` invites the compiler to close the loop with a
+ * recursive libcall (and GCC 6.5's m68k backend was already seen NOT
+ * recognizing the (UWORD)a*(UWORD)b idiom as mulu.w here). A plain C
+ * function definition matches the libcall ABI on this target (stack
+ * args, result in d0 -- the default C convention, which m68k libcalls
+ * use). Named __mulsi3 in C = ___mulsi3 at the assembler level, exactly
+ * the undefined symbol the linker reports when it's missing.
+ *
+ * POSITION IS LOAD-BEARING: this definition must stay textually AFTER
+ * _start()/romtag above. As the file's only other extern function it
+ * otherwise gets emitted at text offset 0 (observed, not theoretical --
+ * the first build placed it there), displacing _start's moveq #-1 safety
+ * return from the front of the hunk: the same
+ * whatever-is-first-gets-executed hazard sana2test.c's own top-of-file
+ * comment documents for AmigaDOS commands. */
+ULONG __mulsi3(ULONG a, ULONG b)
+{
+    ULONG low    = a & 0xFFFF;         /* al */
+    ULONG cross1 = a & 0xFFFF;         /* al (second copy, for al*bh) */
+    ULONG cross2 = a >> 16;            /* ah */
+
+    __asm__("mulu.w %1,%0" : "+d"(low)    : "d"((UWORD)b));         /* al*bl */
+    __asm__("mulu.w %1,%0" : "+d"(cross1) : "d"((UWORD)(b >> 16))); /* al*bh */
+    __asm__("mulu.w %1,%0" : "+d"(cross2) : "d"((UWORD)b));         /* ah*bl */
+
+    return low + ((cross1 + cross2) << 16);
+}
 
 /* ---- small list helpers (Disable()/Enable() critical sections: BeginIO
  * and AbortIO can run on any calling task, and our lists are shared across
@@ -1803,6 +1964,33 @@ static BOOL prng_hits_pct(ULONG *state, ULONG pct)
     return roll < pct * 655;
 }
 
+/* M16: "roughly 1-in-n chance" for `errors=`/`loss=` -- the
+ * finer-than-percent counterpart to prng_hits_pct() above, same
+ * no-division discipline: hit iff a 16-bit draw lands below 65536/n,
+ * decided as `roll * n < 65536` -- and written as the plain C multiply
+ * it is, because M16 finally provided this build's own __mulsi3 (see
+ * its definition near the top of the file): the backend may compile
+ * this however it likes now, libcall included. (This function is in
+ * fact what forced that decision -- its first version tried the
+ * (UWORD)a*(UWORD)b native-mulu idiom, GCC 6.5 emitted __mulsi3
+ * anyway, and the same rebuild surfaced __mulsi3 at pre-existing
+ * struct-index sites too, proving avoidance no longer scaled.)
+ * 0 and 1 are exact no-draw boundaries like prng_hits_pct()'s own
+ * 0/100: a disabled knob must never perturb the PRNG sequence of the
+ * OTHER knobs sharing this unit's stream (existing seeded tests depend
+ * on their sequences), and n=1 has to mean EVERY write, not a
+ * 65535-in-65536 approximation. */
+static BOOL prng_hits_one_in(ULONG *state, ULONG n)
+{
+    ULONG roll;
+    if (n == 0)
+        return FALSE;
+    if (n == 1)
+        return TRUE;
+    roll = xorshift32(state) >> 16;
+    return roll * n < 65536UL;
+}
+
 /* Buffers `pkt` into `writer`'s fixed-size reorder window; once the
  * window is full, PRNG-evicts ONE of the currently-buffered packets
  * (which may be the one just inserted, all equally likely) for actual
@@ -2073,6 +2261,8 @@ static void reset_unit(struct Sana2LoopUnit *unit)
     unit->su_Oversilent   = FALSE;
     unit->su_ReorderWindow = 0;
     unit->su_ReorderCount  = 0;
+    unit->su_ErrorsOneIn   = 0;                        /* M16 */
+    unit->su_LossOneIn     = 0;                        /* M16 */
     unit->su_OfflineAfter  = 0;
     unit->su_OnlineAfter   = 0;
     unit->su_WriteCounter  = 0;
@@ -2186,10 +2376,13 @@ static void reset_unit(struct Sana2LoopUnit *unit)
  * sizeof(struct Sana2LoopUnit) (an awkward, non-power-of-2, many-bit
  * constant) apparently exceeded whatever shift/add budget this backend
  * allows before falling back to a __mulsi3 call, which this -nostdlib
- * build has no libgcc to satisfy. Any future milestone that grows this
- * struct further should re-check for the same failure (rebuild, look for
- * `undefined reference to '__mulsi3'`) -- the exact byte count that tips
- * this over isn't something to reason about in advance, just verify. */
+ * build had no libgcc to satisfy -- at the time. M16 retired that
+ * hazard: exactly this failure fired again at pre-existing index sites
+ * when the struct grew two more ULONGs, and the fix chosen was to
+ * provide our own __mulsi3 (see its definition near the romtag) rather
+ * than keep re-shaping innocent code around its absence. The noinline
+ * here stays -- it still documents (and avoids re-litigating) a real
+ * register-allocator behavior, it just no longer guards the link. */
 /* `out_ioerr` is only meaningful when this returns FALSE: set to
  * S2ERR_NO_RESOURCES for a genuine AllocMem() failure (the capture itself
  * was fine; there just wasn't enough free memory to hold `cap` records --
@@ -2759,6 +2952,13 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
             cfg.mtu_explicit = FALSE;                 /* M15: per-parse state,
                                                           never persisted */
             cfg.bps_explicit = FALSE;
+            cfg.addr_len     = 0;                     /* M16: transient like
+                                                          replay_path -- the
+                                                          applied address
+                                                          lives in
+                                                          su_FactoryStation */
+            cfg.errors       = unit->su_ErrorsOneIn;  /* M16 */
+            cfg.loss         = unit->su_LossOneIn;    /* M16 */
             cfg.rxqueue      = unit->su_RxQueueMax;
             cfg.mode         = unit->su_Mode;
             cfg.peer         = unit->su_Peer;
@@ -2814,6 +3014,23 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
                 unit->su_Station[2] = unit->su_FactoryStation[2];
                 unit->su_Station[3] = unit->su_FactoryStation[3];
             }
+            /* M16 `addr=`: an operator-pinned address replaces the derived
+             * factory address entirely -- BOTH factory and current, so
+             * S2_GETSTATIONADDRESS reports it in both slots and
+             * S2_CONFIGINTERFACE's one-shot override semantics (M3) work
+             * on top of it unchanged. Deliberately AFTER the wire block
+             * above, which would otherwise clobber it for a
+             * point-to-point unit. read_unit_config() already guaranteed
+             * addr_len matches this wire's su_AddrSize exactly. CopyMem
+             * (an Exec LVO), not a variable-count copy loop -- the same
+             * memcpy-miscompile hazard replay_path's own parse comment
+             * documents. */
+            if (cfg.addr_len != 0) {
+                CopyMem(cfg.addr, unit->su_FactoryStation, cfg.addr_len);
+                CopyMem(cfg.addr, unit->su_Station, cfg.addr_len);
+            }
+            unit->su_ErrorsOneIn  = cfg.errors;       /* M16 */
+            unit->su_LossOneIn    = cfg.loss;         /* M16 */
             unit->su_RxQueueMax   = cfg.rxqueue;
             unit->su_Mode         = cfg.mode;
             unit->su_Peer         = cfg.peer;
@@ -3307,6 +3524,25 @@ static void do_write(struct Sana2LoopDevice *sld, struct Sana2LoopUnit *unit,
         return;
     }
 
+    /* M16 `errors=`: 1-in-N writes fail VISIBLY -- S2ERR_TX_FAILURE with
+     * S2WERR_TOO_MANY_RETRIES (the classic "transmitter gave up" wire
+     * error real Ethernet drivers report), plus S2EVENT_TX|S2EVENT_ERROR
+     * fired to any queued S2_ONEVENT -- the error-path counterpart to
+     * droppct/loss's silent vanishing, exercising a stack's
+     * error-handling/retry code rather than its timeout recovery. Checked
+     * before the packet buffer is even allocated: a failed transmit has
+     * no delivery side to clean up, and everything after this point
+     * (stats, fault pipeline) is about packets that were at least
+     * accepted. Deliberately does NOT bump PacketsSent (nothing was) or
+     * the su_OfflineAfter/su_OnlineAfter counters (those model link
+     * flapping, a different failure class). */
+    if (prng_hits_one_in(&unit->su_PrngState, unit->su_ErrorsOneIn)) {
+        io0->io_Error = S2ERR_TX_FAILURE;
+        io->ios2_WireError = S2WERR_TOO_MANY_RETRIES;
+        fire_event(unit, S2EVENT_ERROR | S2EVENT_TX);
+        return;
+    }
+
     pkt = AllocMem(sizeof(struct EchoPacket), MEMF_CLEAR);
     if (!pkt) {
         io0->io_Error = S2ERR_NO_RESOURCES;
@@ -3381,6 +3617,16 @@ static void do_write(struct Sana2LoopDevice *sld, struct Sana2LoopUnit *unit,
         FreeMem(pkt, sizeof(struct EchoPacket));
         note_write_success(sld, unit); /* still "sent" -- silently lost,
                                            same as real best-effort Ethernet */
+        return;
+    }
+
+    /* M16 `loss=`: 1-in-N silent loss, immediately after droppct and with
+     * identical observable behavior (write succeeded, packet vanished) --
+     * just expressible at rates a whole percent can't reach. The two
+     * compose: each draws independently when enabled. */
+    if (prng_hits_one_in(&unit->su_PrngState, unit->su_LossOneIn)) {
+        FreeMem(pkt, sizeof(struct EchoPacket));
+        note_write_success(sld, unit);
         return;
     }
 

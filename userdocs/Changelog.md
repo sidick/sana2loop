@@ -126,6 +126,26 @@ virtual SANA-II device found as prior art):
 One more unit is pre-allocated (unit numbers now run 0–15). See
 [Configuration Reference](Configuration-Reference.md) for all three keys.
 
+## M16 — Pinned addresses, visible error injection, finer loss rates
+
+The second batch of nullsana-inspired config keys:
+
+- `addr=02:11:22:33:44:55` — pin a unit's factory station address from
+  config, so recorded fixtures are reproducible and crossover pairs can
+  mimic a specific real topology. Works with 4-byte addresses on
+  non-Ethernet `wire=` units too.
+- `errors=N` — 1 in N writes fails **visibly** (`S2ERR_TX_FAILURE`,
+  with `S2EVENT_TX|S2EVENT_ERROR` fired) — the loud counterpart to the
+  existing silent-loss knobs, for exercising a stack's error-handling
+  and retry paths rather than its timeout recovery.
+- `loss=N` — 1-in-N silent packet loss, for rates a whole percent can't
+  express (`loss=1000` ≈ 0.1%) — real-world loss is usually much rarer
+  than `droppct`'s 1-in-100 floor.
+
+Two more units are pre-allocated (unit numbers now run 0–17). See
+[Fault Injection](Fault-Injection.md) for where the new knobs sit in the
+pipeline.
+
 ## What's next
 
 - A proper first tagged release (the M12 packaging pipeline is built and

@@ -16,13 +16,24 @@ Every `CMD_WRITE` (and `S2_BROADCAST`/`S2_MULTICAST`) that reaches a live
 (echo or crossover) unit runs through this fixed order:
 
 1. **MTU check** — the writer's own MTU, always; for crossover, *also* the
-   peer's MTU (see "PMTUD black hole" below).
-2. `droppct` — a percent chance the packet is accepted (the write
+   peer's MTU (see "PMTUD black hole" below). (`mintu=`, if set, is
+   checked here too — but that's a plain validity floor, not a fault
+   knob.)
+2. `errors` — a 1-in-N chance the write **fails visibly** with
+   `S2ERR_TX_FAILURE`/`S2WERR_TOO_MANY_RETRIES`, firing
+   `S2EVENT_TX|S2EVENT_ERROR` to any queued `S2_ONEVENT`. The only knob
+   that produces a *loud* failure — everything below succeeds the write
+   and misbehaves silently. Exercises a stack's error-handling/retry
+   path rather than its timeout recovery.
+3. `droppct` — a percent chance the packet is accepted (the write
    succeeds, `io_Error` stays 0) but never delivered anywhere.
-3. `truncate` — caps the packet's length before delivery.
-4. `duppct` — a percent chance the packet is delivered a **second**,
+4. `loss` — the same silent vanishing as `droppct`, expressed as 1-in-N
+   instead of a whole percent, for rates rarer than 1-in-100 (e.g.
+   `loss=1000`). The two compose; each draws independently.
+5. `truncate` — caps the packet's length before delivery.
+6. `duppct` — a percent chance the packet is delivered a **second**,
    genuinely independent time.
-5. `reorder` — if enabled, delivery is buffered and released out of
+7. `reorder` — if enabled, delivery is buffered and released out of
    strict arrival order.
 
 This fixed order matters when combining knobs: a duplicate (from
@@ -38,8 +49,9 @@ they're side effects ticked once per write attempt, covered
 
 ## Randomness
 
-All PRNG-driven decisions (`droppct`, `duppct`, `reorder`'s eviction
-choice) use a per-unit xorshift32 generator, seeded from `seed=` (`0` is
+All PRNG-driven decisions (`errors`, `droppct`, `loss`, `duppct`,
+`reorder`'s eviction choice) use a per-unit xorshift32 generator, seeded
+from `seed=` (`0` is
 accepted but coerced to `1` — an all-zero xorshift32 state never changes).
 **Re-seeded fresh every time the unit's open count transitions 0→1** —
 same timing as everything else configuration-related — so a fixed `seed=`
@@ -50,7 +62,10 @@ reorders.
 `0` and `100` for `droppct`/`duppct` are exact boundaries (guaranteed never
 or always), not just "very likely" — a naive percentage approximation
 would let a sliver of writes through even at `droppct=100`, which isn't
-what "100%" should mean for a test tool.
+what "100%" should mean for a test tool. `errors`/`loss` get the same
+treatment at *their* boundaries: `0` is exactly disabled (and doesn't
+even draw from the PRNG, so adding it to a config never perturbs the
+other knobs' seeded sequences), and `1` is exactly every write.
 
 ## Simulating a lossy link
 

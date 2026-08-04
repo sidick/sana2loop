@@ -876,6 +876,54 @@ the direct ancestor of these knobs' names.
   `reset_unit()` -- the wire type isn't known until the config is read,
   which happens after reset.
 
+## `addr=`/`errors=`/`loss=`, and our own `__mulsi3` (M16)
+
+The second nullsana-inspired batch (GitHub #27/#29):
+
+- **`addr=`** pins the **factory** address (current starts equal to it;
+  `S2_CONFIGINTERFACE`'s M3 one-shot override works on top unchanged) --
+  the less surprising of the two semantics the issue weighed. Parsed as
+  colon-separated hex bytes (1-2 digits per component, nullsana's own
+  single-digit style accepted); byte count must equal the wire's address
+  width, validated in `read_unit_config()` AFTER `wire=` resolution
+  (either key may come first); an Ethernet address with the group bit is
+  rejected (a station address with the multicast bit set isn't one).
+  Applied in `open()` after the wire block (which would otherwise
+  clobber it for point-to-point units), via CopyMem (the
+  variable-length-copy-becomes-memcpy hazard).
+- **`errors=N`** is the only *visible* fault knob: 1-in-N writes fail
+  `S2ERR_TX_FAILURE`/`S2WERR_TOO_MANY_RETRIES` (the classic
+  "transmitter gave up" wire error) and fire `S2EVENT_TX|S2EVENT_ERROR`
+  through the existing `fire_event()` -- so queued `S2_ONEVENT`
+  consumers finally have something that exercises the momentary event
+  bits, not just ONLINE/OFFLINE. Checked before the packet buffer is
+  allocated (a failed transmit has nothing to deliver or free);
+  deliberately does NOT count PacketsSent or touch the
+  offlineafter/onlineafter counters (different failure class).
+- **`loss=N`** sits immediately after `droppct` with identical
+  observable semantics (write succeeds, packet vanishes,
+  `note_write_success()`), just 1-in-N instead of percent. Both compose.
+- **1-in-N draw without division**: hit iff `roll * n < 65536` where
+  roll is a 16-bit draw -- `prng_hits_one_in()`, mirroring
+  `prng_hits_pct()`'s exact-boundary discipline (0 = disabled with NO
+  draw, so enabling one knob never perturbs another's seeded sequence;
+  1 = always, also draw-free). `n` capped at 65535.
+- **`__mulsi3` is now provided by the device itself** -- the M16 struct
+  growth (two ULONGs per unit) pushed `sizeof(struct Sana2LoopUnit)`
+  past GCC's shift/add synthesis budget at PRE-EXISTING `sld_Units[]`
+  index sites, i.e. the long-standing avoidance strategy (M8's
+  noinline, M14's nm-verification) stopped scaling: careful new code
+  could no longer guarantee a linkable build. The definition (three
+  native mulu.w partial products via inline asm -- C `*` inside the
+  function that implements `*` risks a recursive libcall, and GCC 6.5
+  was observed NOT folding `(UWORD)a*(UWORD)b` to mulu.w anyway) lives
+  textually after `_start()`/romtag ON PURPOSE: as the file's only other
+  extern function it otherwise gets emitted at text offset 0
+  (observed), displacing the moveq #-1 safety return -- the same
+  front-of-hunk hazard `sana2test.c` documents for pooled string
+  literals. The whole future-milestone hazard class ("did this struct
+  edit break the link?") is retired.
+
 ## `S2_DEVICEQUERY` convention (easy to get backwards)
 
 The caller pre-sets `ios2_StatData->SizeAvailable` to the size of *its own*

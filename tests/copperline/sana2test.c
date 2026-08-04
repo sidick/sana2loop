@@ -138,6 +138,9 @@ static char NAME_FAULTTRUNCATE[]   = "faulttruncate";
 static char NAME_FAULTRXQUEUE[]    = "faultrxqueue";
 static char NAME_MINTU[]           = "mintu";
 static char NAME_WIRE[]            = "wire";
+static char NAME_ADDR[]            = "addr";
+static char NAME_FAULTERRORS[]     = "faulterrors";
+static char NAME_FAULTLOSS[]       = "faultloss";
 static char DBG_CHECKIO_NULL[]    = "DBG_CHECKIO_NULL=";
 
 /* M13: this toolchain's <devices/sana2.h> lacks Rev 4's RawMTU field --
@@ -2522,6 +2525,196 @@ static int test_main(void)
         }
 
         report(NAME_WIRE, ok, &fails);
+    }
+
+    /* --- addr: M16's `addr=` -- unit 1's fixture pins
+     * addr=02:AA:BB:CC:DD:01, which must come back from
+     * S2_GETSTATIONADDRESS as BOTH the current (SrcAddr) and factory
+     * (DstAddr) address: `addr=` replaces the derived factory address,
+     * it doesn't merely pre-configure the current one. Then a normal
+     * S2_CONFIGINTERFACE must still work on top exactly as M3 defined
+     * it: current changes to the caller's address, factory stays the
+     * pinned value. --- */
+    {
+        BOOL ok = TRUE;
+        struct MsgPort *porta = make_port();
+        struct IOSana2Req *ioa = porta ? make_io(porta) : NULL;
+        /* Non-const on purpose: this build pools const-qualified data into
+         * the front of .text (the displaced-_start hazard this file's own
+         * top-of-file comment documents for string literals -- same
+         * mechanism); plain initialized data lands in the .data hunk. */
+        static UBYTE PINNED[6] = { 0x02, 0xAA, 0xBB, 0xCC, 0xDD, 0x01 };
+
+        if (ioa && OpenDevice((STRPTR)DEVICE_NAME, 1, (struct IORequest *)ioa, 0) == 0) {
+            int k;
+
+            ioa->ios2_Req.io_Command = S2_GETSTATIONADDRESS;
+            do_io(ioa);
+            ok = (ioa->ios2_Req.io_Error == 0);
+            for (k = 0; k < 6; k++)
+                if (ioa->ios2_SrcAddr[k] != PINNED[k] ||
+                    ioa->ios2_DstAddr[k] != PINNED[k])
+                    ok = FALSE;
+
+            for (k = 0; k < SANA2_MAX_ADDR_BYTES; k++)
+                ioa->ios2_SrcAddr[k] = (k < 6) ? (UBYTE)(0x40 + k) : 0;
+            ioa->ios2_Req.io_Command = S2_CONFIGINTERFACE;
+            do_io(ioa);
+            ok = ok && (ioa->ios2_Req.io_Error == 0);
+
+            ioa->ios2_Req.io_Command = S2_GETSTATIONADDRESS;
+            do_io(ioa);
+            ok = ok && (ioa->ios2_Req.io_Error == 0);
+            for (k = 0; k < 6; k++)
+                if (ioa->ios2_SrcAddr[k] != (UBYTE)(0x40 + k) ||
+                    ioa->ios2_DstAddr[k] != PINNED[k])
+                    ok = FALSE;
+
+            CloseDevice((struct IORequest *)ioa);
+        } else {
+            ok = FALSE;
+        }
+        if (ioa)
+            FreeMem(ioa, sizeof(struct IOSana2Req));
+        if (porta) {
+            FreeSignal(porta->mp_SigBit);
+            FreeMem(porta, sizeof(struct MsgPort));
+        }
+
+        report(NAME_ADDR, ok, &fails);
+    }
+
+    /* --- faulterrors: M16's `errors=` -- unit 16 (errors=1, the exact
+     * every-write boundary, PRNG-free). A queued S2_ONEVENT for
+     * S2EVENT_TX|S2EVENT_ERROR must complete when the write fails, and
+     * the write itself must fail S2ERR_TX_FAILURE with
+     * S2WERR_TOO_MANY_RETRIES -- the VISIBLE failure class no other
+     * fault knob produces (droppct/loss/oversilent all succeed the
+     * write). --- */
+    {
+        BOOL ok = TRUE;
+        struct MsgPort *porte = make_port();
+        struct IOSana2Req *ioe = porte ? make_io(porte) : NULL;
+        struct MsgPort *portev = make_port();
+        struct IOSana2Req *ioev = portev ? make_io(portev) : NULL;
+
+        if (ioe && ioev && OpenDevice((STRPTR)DEVICE_NAME, 16, (struct IORequest *)ioe, 0) == 0) {
+            if (OpenDevice((STRPTR)DEVICE_NAME, 16, (struct IORequest *)ioev, 0) == 0) {
+                int k;
+
+                ioe->ios2_Req.io_Command = S2_ONLINE;
+                do_io(ioe);
+                ok = (ioe->ios2_Req.io_Error == 0);
+
+                /* Queue the event wait BEFORE the failing write --
+                 * TX/ERROR are momentary conditions with no current
+                 * state, so this always queues (never completes
+                 * immediately the way ONLINE/OFFLINE can). */
+                ioev->ios2_Req.io_Command = S2_ONEVENT;
+                ioev->ios2_WireError = S2EVENT_TX | S2EVENT_ERROR;
+                send_io(ioev);
+
+                ioe->ios2_Req.io_Command = CMD_WRITE;
+                ioe->ios2_PacketType = 0x1900;
+                ioe->ios2_DataLength = sizeof(PAYLOAD) - 1;
+                ioe->ios2_Data = (APTR)PAYLOAD;
+                for (k = 0; k < SANA2_MAX_ADDR_BYTES; k++)
+                    ioe->ios2_DstAddr[k] = (k < 6) ? (UBYTE)(0x19 + k) : 0;
+                do_io(ioe);
+                ok = ok && (ioe->ios2_Req.io_Error == S2ERR_TX_FAILURE) &&
+                     (ioe->ios2_WireError == S2WERR_TOO_MANY_RETRIES);
+
+                WaitIO((struct IORequest *)ioev);
+                ok = ok && (ioev->ios2_Req.io_Error == 0) &&
+                     (ioev->ios2_WireError & (S2EVENT_TX | S2EVENT_ERROR));
+
+                CloseDevice((struct IORequest *)ioev);
+            } else {
+                ok = FALSE;
+            }
+            CloseDevice((struct IORequest *)ioe);
+        } else {
+            ok = FALSE;
+        }
+        if (ioe)
+            FreeMem(ioe, sizeof(struct IOSana2Req));
+        if (porte) {
+            FreeSignal(porte->mp_SigBit);
+            FreeMem(porte, sizeof(struct MsgPort));
+        }
+        if (ioev)
+            FreeMem(ioev, sizeof(struct IOSana2Req));
+        if (portev) {
+            FreeSignal(portev->mp_SigBit);
+            FreeMem(portev, sizeof(struct MsgPort));
+        }
+
+        report(NAME_FAULTERRORS, ok, &fails);
+    }
+
+    /* --- faultloss: M16's `loss=` -- unit 17 (loss=1, every write
+     * silently lost). The write must SUCCEED from the writer's point of
+     * view (unlike faulterrors above -- that's the whole distinction
+     * between the two knobs), while a pre-queued typed CMD_READ for that
+     * exact packet type must still be sitting unanswered afterward,
+     * proven via AbortIO/IOERR_ABORTED, the same
+     * nothing-was-delivered probe faultrxqueue already uses. --- */
+    {
+        BOOL ok = TRUE;
+        struct MsgPort *portl = make_port();
+        struct IOSana2Req *iol = portl ? make_io(portl) : NULL;
+        struct MsgPort *portlr = make_port();
+        struct IOSana2Req *iolr = portlr ? make_io(portlr) : NULL;
+
+        if (iol && iolr && OpenDevice((STRPTR)DEVICE_NAME, 17, (struct IORequest *)iol, 0) == 0) {
+            if (OpenDevice((STRPTR)DEVICE_NAME, 17, (struct IORequest *)iolr, 0) == 0) {
+                int k;
+
+                iol->ios2_Req.io_Command = S2_ONLINE;
+                do_io(iol);
+                ok = (iol->ios2_Req.io_Error == 0);
+
+                iolr->ios2_Req.io_Command = CMD_READ;
+                iolr->ios2_Data = readbuf;
+                iolr->ios2_PacketType = 0x1A00;
+                iolr->ios2_Req.io_Flags = 0;
+                send_io(iolr);
+
+                iol->ios2_Req.io_Command = CMD_WRITE;
+                iol->ios2_PacketType = 0x1A00;
+                iol->ios2_DataLength = sizeof(PAYLOAD) - 1;
+                iol->ios2_Data = (APTR)PAYLOAD;
+                for (k = 0; k < SANA2_MAX_ADDR_BYTES; k++)
+                    iol->ios2_DstAddr[k] = (k < 6) ? (UBYTE)(0x1A + k) : 0;
+                do_io(iol);
+                ok = ok && (iol->ios2_Req.io_Error == 0);
+
+                AbortIO((struct IORequest *)iolr);
+                WaitIO((struct IORequest *)iolr);
+                ok = ok && (iolr->ios2_Req.io_Error == IOERR_ABORTED);
+
+                CloseDevice((struct IORequest *)iolr);
+            } else {
+                ok = FALSE;
+            }
+            CloseDevice((struct IORequest *)iol);
+        } else {
+            ok = FALSE;
+        }
+        if (iol)
+            FreeMem(iol, sizeof(struct IOSana2Req));
+        if (portl) {
+            FreeSignal(portl->mp_SigBit);
+            FreeMem(portl, sizeof(struct MsgPort));
+        }
+        if (iolr)
+            FreeMem(iolr, sizeof(struct IOSana2Req));
+        if (portlr) {
+            FreeSignal(portlr->mp_SigBit);
+            FreeMem(portlr, sizeof(struct MsgPort));
+        }
+
+        report(NAME_FAULTLOSS, ok, &fails);
     }
 
     /* --- record: unit 11 (`record=S:sana2loop/recorded.pcap`,
