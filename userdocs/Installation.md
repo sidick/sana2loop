@@ -58,7 +58,7 @@ hand-written test program (which all open it by the plain name) need the
 copy in `DEVS:`; a real stack's config wizard needs the copy in
 `DEVS:Networks/`. Keep both if you're doing both kinds of testing.
 
-Unit numbers **0 through 14** are available (15 units are pre-allocated).
+Unit numbers **0 through 15** are available (16 units are pre-allocated).
 Unit 0 defaults to standalone **echo** mode; units 2 and 3 default to a
 **crossover** pair; every other unit defaults to standalone echo unless you
 give it its own config file. See

@@ -823,6 +823,59 @@ debug-marker methodology (same technique M9's own investigation
 established) and the second, independently-failing attempt to relocate
 the positive case into `run-tools.sh`'s more generous session.
 
+## `wire=`/`bps=`/`mintu=` -- non-Ethernet wire types and the write-size floor (M15)
+
+All three keys came from reviewing **nullsana** (Aminet
+`comm/tcp/nullsana`, 2000 -- the prior-art virtual SANA-II device whose
+existence also retired this project's "no null device has ever existed"
+claim); its config template (`WIRE/K,MTU/N/K,MINTU/N/K,BPS/N/K,...`) is
+the direct ancestor of these knobs' names.
+
+- **`bps=`** is *reported only* (`S2_DEVICEQUERY`'s `BPS` field, was a
+  hardcoded 10000000). Deliberately not a throughput shaper -- latency
+  belongs to the separate `delay=`/`deviation=` proposal (GitHub #24); a
+  reporting knob quietly becoming a shaper would be a trap.
+- **`mintu=`** rejects short writes with `S2ERR_BAD_ARGUMENT` --
+  deliberately NOT `S2ERR_MTU_EXCEEDED` (that error names the too-LARGE
+  failure specifically) and deliberately NOT silent padding (padding
+  would mutate the bytes a reader sees, against the byte-exact delivery
+  contract). The cross-field `mintu <= mtu` check runs in
+  `read_unit_config()` *after* `wire=`'s own mtu-default resolution,
+  since the keys may arrive in either order.
+- **`wire=slip|cslip|ppp`** narrows the station address to 4 bytes (an
+  IP standing in for a hardware address -- nullsana's own convention,
+  and the established one for serial-wire SANA-II drivers; SANA-II
+  itself gives these wires no addressing at all). Everything
+  Ethernet-conceptual declines loudly: `S2_BROADCAST`/`S2_MULTICAST`/
+  `S2_ADD/DELMULTICASTADDRESS` and `SANA2IOF_RAW` writes all fail
+  `S2ERR_NOT_SUPPORTED` (same shape as replay mode's own write
+  rejection), `RawMTU` reports 0, and `fill_read_from_packet()` never
+  sets `SANA2IOF_BCAST/MCAST` (both are 802.3 addressing conventions).
+  `dest_matches_unit()` compares exactly `su_AddrSize` bytes and skips
+  the broadcast/group checks entirely off-Ethernet.
+- **Wire defaults vs explicit keys**: a non-Ethernet `wire=` brings its
+  own mtu/bps defaults (1006/19200; ppp 115200), but an explicit
+  `mtu=`/`bps=` line wins regardless of key order -- implemented as
+  `mtu_explicit`/`bps_explicit` parse-state flags resolved in
+  `read_unit_config()`, not parse-order overwriting.
+- **Crossover across mismatched wire types fails `S2ERR_BAD_STATE` at
+  write time** -- the alternative was `dest_matches_unit()` silently
+  never matching a differently-sized peer address, a blackhole nobody
+  configured on purpose (unlike `oversilent`'s). Write-time, not
+  open-time, because the peer's wire type isn't knowable at this unit's
+  open: config is only read at each unit's OWN 0->1 open, so the peer
+  may still carry the Ethernet default until its own first open.
+- **Replay/record are Ethernet-only** (rejected at config validation):
+  `load_replay_file()` checks `LINKTYPE_ETHERNET` and parses 14-byte
+  headers; `record_append()` synthesizes dst[6]+src[6]+type[2] frames.
+  A slip-wire capture would lie about its own linktype.
+- The 4-byte factory address is `0A:53:32:<unit>` (10.83.50.<unit> --
+  same recognisable "S2" middle bytes as the Ethernet factory address,
+  led by a private-range IP octet instead of the locally-administered
+  MAC bit). Rebuilt in `open()` at config-apply time, NOT in
+  `reset_unit()` -- the wire type isn't known until the config is read,
+  which happens after reset.
+
 ## `S2_DEVICEQUERY` convention (easy to get backwards)
 
 The caller pre-sets `ios2_StatData->SizeAvailable` to the size of *its own*

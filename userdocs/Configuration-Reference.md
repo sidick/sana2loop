@@ -53,9 +53,33 @@ mtu=1400
 
 | Key | Values | Default | Meaning |
 |-----|--------|---------|---------|
-| `mtu` | 1–1500 | 1500 | Maximum Transmit Unit reported by `S2_DEVICEQUERY` and enforced on `CMD_WRITE`/`S2_BROADCAST`/`S2_MULTICAST`. `SANA2IOF_RAW` writes get 14 extra bytes of headroom (Ethernet header size) — see the SANA-II spec's raw-frame convention. This same number (MTU+14) is also reported as `RawMTU` (SANA-II Rev 4) via `S2_DEVICEQUERY` — except on a `mode=replay` unit, which always reports `RawMTU=0` (no raw writes supported there). |
+| `mtu` | 1–1500 | 1500 (1006 for a non-Ethernet `wire=`) | Maximum Transmit Unit reported by `S2_DEVICEQUERY` and enforced on `CMD_WRITE`/`S2_BROADCAST`/`S2_MULTICAST`. `SANA2IOF_RAW` writes get 14 extra bytes of headroom (Ethernet header size) — see the SANA-II spec's raw-frame convention. This same number (MTU+14) is also reported as `RawMTU` (SANA-II Rev 4) via `S2_DEVICEQUERY` — except on a `mode=replay` unit or a non-Ethernet `wire=` unit, which always report `RawMTU=0` (no raw writes supported there). |
+| `mintu` | 0–1500 | 0 (no minimum) | Minimum accepted write size. A `CMD_WRITE`/`S2_BROADCAST`/`S2_MULTICAST` shorter than this fails with `S2ERR_BAD_ARGUMENT` — **rejected, never silently padded** (padding would change the bytes a reader sees, against this device's byte-exact delivery contract). Useful for catching a stack that forgets real Ethernet's 60-byte minimum-frame padding, which works fine on a loopback but fails on real hardware. A `mintu` above the unit's (resolved) `mtu` fails the whole config. `0` (the default) disables the check entirely. |
+| `bps` | any nonzero number | 10000000 (see `wire=` for its per-wire defaults) | The link speed `S2_DEVICEQUERY` reports in its `BPS` field. **Reported only** — nothing in this device throttles or delays traffic based on it. |
+| `wire` | `ethernet`, `slip`, `cslip`, `ppp` | `ethernet` | What kind of wire this unit pretends to be — see [Wire types](#wire-types) below. |
 | `rxqueue` | 0–64 | 0 | Bounded convenience receive queue. **0 means strict drop**: a packet with no queued `CMD_READ`/`S2_READORPHAN` waiting for it is dropped immediately (and counted in `Sana2DeviceStats.UnknownTypesReceived`) — real SANA-II drivers hold no internal buffers, and this default matches that. A nonzero value lets up to that many undelivered packets sit in a per-unit queue instead. |
 | `buffhooks` | `8`, `16`, `32` | `8` | Which SANA-II Rev 2/3 buffer-management hook width this unit actually **invokes**, for whichever opener negotiated it (offered the matching `S2_CopyToBuff16/32`/`S2_CopyFromBuff16/32` tag at `OpenDevice()`). An opener that didn't negotiate the configured width falls back to its own base hook transparently — this is never a hard requirement, only a preference. `8` (the default) always uses the base hook, matching every version of this device before this knob existed. |
+
+### Wire types
+
+`wire=` selects the hardware type `S2_DEVICEQUERY` reports and, with it,
+how addressing works on the unit:
+
+| | `ethernet` (default) | `slip` / `cslip` / `ppp` |
+|---|---|---|
+| `HardwareType` | `S2WireType_Ethernet` | `S2WireType_SLIP` / `_CSLIP` / `_PPP` |
+| Address size | 6 bytes (48 bits) | 4 bytes (32 bits) — an IP address stands in for a hardware address, the established convention for serial-wire SANA-II drivers |
+| Factory address | `02:53:32:4C:00:<unit>` | `0A:53:32:<unit>` (i.e. `10.83.50.<unit>`) |
+| Default `mtu` / `bps` | 1500 / 10000000 | 1006 / 19200 (`ppp`: 1006 / 115200) — an explicit `mtu=`/`bps=` always wins, wherever it sits in the file |
+| Broadcast / multicast | supported | `S2_BROADCAST`, `S2_MULTICAST`, and `S2_ADD/DELMULTICASTADDRESS` all fail `S2ERR_NOT_SUPPORTED` — a point-to-point wire has no such addressing |
+| `SANA2IOF_RAW` writes | allowed (MTU+14) | fail `S2ERR_NOT_SUPPORTED`; `RawMTU` reports 0 |
+| `mode=replay` / `record=` | supported | fails the config — the pcap side of this device is built around `LINKTYPE_ETHERNET` framing |
+
+A **crossover pair should configure the same `wire=` on both ends** — a
+write while the two ends' wire types differ fails with `S2ERR_BAD_STATE`
+(loudly, rather than silently never matching the peer's differently-sized
+address). Since config is only read at a unit's own first open, that also
+means opening both ends of a non-Ethernet pair before writing.
 
 ### Mode and pairing (see [Echo and Crossover Modes](Echo-and-Crossover.md), [Replay and Record](Replay-and-Record.md))
 

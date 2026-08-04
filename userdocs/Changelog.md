@@ -107,6 +107,25 @@ fixed limit — see [Replay and Record](Replay-and-Record.md#replay). The
 default itself hasn't changed; this only adds an escape hatch for
 captures bigger than 4 records on targets with the memory to spare.
 
+## M15 — Wire types, reported BPS, minimum write size
+
+Three new config keys, all inspired by reviewing
+[nullsana](https://aminet.net/package/comm/tcp/nullsana) (the 2000-era
+virtual SANA-II device found as prior art):
+
+- `wire=ethernet|slip|cslip|ppp` — a unit can now pretend to be a
+  point-to-point serial wire: 4-byte IP-style addressing, per-wire
+  MTU/BPS defaults, no broadcast/multicast/raw. Lets you exercise a
+  stack's SLIP/PPP code paths with zero hardware.
+- `bps=N` — the link speed `S2_DEVICEQUERY` reports (previously always
+  10000000). Reported only, never a throttle.
+- `mintu=N` — a minimum write size; shorter writes fail
+  `S2ERR_BAD_ARGUMENT` instead of being accepted. Catches stacks that
+  forget real Ethernet's minimum-frame padding.
+
+One more unit is pre-allocated (unit numbers now run 0–15). See
+[Configuration Reference](Configuration-Reference.md) for all three keys.
+
 ## What's next
 
 - A proper first tagged release (the M12 packaging pipeline is built and

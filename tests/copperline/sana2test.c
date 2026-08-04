@@ -136,6 +136,8 @@ static char NAME_DMAHOOKS[]        = "dmahooks";
 static char NAME_REPLAYCAP[]       = "replaycap";
 static char NAME_FAULTTRUNCATE[]   = "faulttruncate";
 static char NAME_FAULTRXQUEUE[]    = "faultrxqueue";
+static char NAME_MINTU[]           = "mintu";
+static char NAME_WIRE[]            = "wire";
 static char DBG_CHECKIO_NULL[]    = "DBG_CHECKIO_NULL=";
 
 /* M13: this toolchain's <devices/sana2.h> lacks Rev 4's RawMTU field --
@@ -994,7 +996,10 @@ static int test_main(void)
             io3->ios2_Req.io_Command = S2_DEVICEQUERY;
             io3->ios2_StatData = &dq3;
             do_io(io3);
-            ok = (io3->ios2_Req.io_Error == 0) && (dq3.MTU == 1400);
+            /* M15: bps=57600 rides the same fixture -- BPS was hardcoded
+             * 10000000 at the query site before the `bps=` key existed. */
+            ok = (io3->ios2_Req.io_Error == 0) && (dq3.MTU == 1400) &&
+                 (dq3.BPS == 57600);
             CloseDevice((struct IORequest *)io3);
         } else {
             ok = FALSE;
@@ -2329,6 +2334,194 @@ static int test_main(void)
         }
 
         report(NAME_FAULTRXQUEUE, ok, &fails);
+    }
+
+    /* --- mintu: M15's `mintu=` floor -- unit 1's fixture adds mintu=16
+     * (additive to its existing keys, see unit1.config's own comment).
+     * An 8-byte write must be REJECTED with S2ERR_BAD_ARGUMENT (not
+     * silently padded, and deliberately not S2ERR_MTU_EXCEEDED -- that
+     * error names the too-LARGE failure); a full 19-byte PAYLOAD write
+     * on the very same open must still succeed and drain back out via
+     * S2_READORPHAN, proving the floor check gates entry to the write
+     * path without disturbing delivery itself. Placed before the record
+     * sub-test like everything else that reopens a configured unit --
+     * config reads are DOS I/O, and "record is the last DOS I/O in the
+     * session" is a load-bearing invariant (see the record sub-test's
+     * own comment / docs/PLAN.md's M13 risk note). --- */
+    {
+        BOOL ok = TRUE;
+        struct MsgPort *port1m = make_port();
+        struct IOSana2Req *io1m = port1m ? make_io(port1m) : NULL;
+
+        if (io1m && OpenDevice((STRPTR)DEVICE_NAME, 1, (struct IORequest *)io1m, 0) == 0) {
+            int k;
+
+            io1m->ios2_Req.io_Command = S2_ONLINE;
+            do_io(io1m);
+            ok = (io1m->ios2_Req.io_Error == 0);
+
+            io1m->ios2_Req.io_Command = CMD_WRITE;
+            io1m->ios2_PacketType = 0x1700;
+            io1m->ios2_DataLength = 8;
+            io1m->ios2_Data = (APTR)PAYLOAD;
+            for (k = 0; k < SANA2_MAX_ADDR_BYTES; k++)
+                io1m->ios2_DstAddr[k] = (k < 6) ? (UBYTE)(0x17 + k) : 0;
+            do_io(io1m);
+            ok = ok && (io1m->ios2_Req.io_Error == S2ERR_BAD_ARGUMENT);
+
+            io1m->ios2_Req.io_Command = CMD_WRITE;
+            io1m->ios2_DataLength = sizeof(PAYLOAD) - 1;
+            do_io(io1m);
+            ok = ok && (io1m->ios2_Req.io_Error == 0);
+
+            io1m->ios2_Req.io_Command = S2_READORPHAN;
+            io1m->ios2_Data = readbuf;
+            io1m->ios2_Req.io_Flags = 0;
+            do_io(io1m);
+            ok = ok && (io1m->ios2_Req.io_Error == 0) &&
+                 (io1m->ios2_PacketType == 0x1700) &&
+                 (io1m->ios2_DataLength == sizeof(PAYLOAD) - 1);
+
+            CloseDevice((struct IORequest *)io1m);
+        } else {
+            ok = FALSE;
+        }
+        if (io1m)
+            FreeMem(io1m, sizeof(struct IOSana2Req));
+        if (port1m) {
+            FreeSignal(port1m->mp_SigBit);
+            FreeMem(port1m, sizeof(struct MsgPort));
+        }
+
+        report(NAME_MINTU, ok, &fails);
+    }
+
+    /* --- wire: M15's `wire=` -- unit 15 (wire=slip, nothing else, so the
+     * per-wire mtu/bps DEFAULTS are what's under test too). Asserts the
+     * whole non-Ethernet surface:
+     * (a) S2_DEVICEQUERY: HardwareType=S2WireType_SLIP, AddrFieldSize=32
+     *     (bits), MTU=1006/BPS=19200 (the wire's own defaults, no
+     *     explicit mtu=/bps= in the fixture), RawMTU=0.
+     * (b) S2_GETSTATIONADDRESS: the 4-byte 0A:53:32:<unit> factory
+     *     address, current == factory, zero past byte 3.
+     * (c) S2_BROADCAST and a SANA2IOF_RAW write both fail
+     *     S2ERR_NOT_SUPPORTED -- Ethernet addressing/framing concepts
+     *     that don't exist on a point-to-point wire.
+     * (d) a plain echo round-trip still works, with 4-byte swapped
+     *     addressing (reader's src = the dst written to, reader's dst =
+     *     the unit's own 4-byte station) and neither
+     *     SANA2IOF_BCAST/MCAST set (Ethernet-only recomputation). --- */
+    {
+        BOOL ok = TRUE;
+        struct MsgPort *portw = make_port();
+        struct IOSana2Req *iow = portw ? make_io(portw) : NULL;
+        struct MsgPort *portw2 = make_port();
+        struct IOSana2Req *iow2 = portw2 ? make_io(portw2) : NULL;
+
+        if (iow && iow2 && OpenDevice((STRPTR)DEVICE_NAME, 15, (struct IORequest *)iow, 0) == 0) {
+            if (OpenDevice((STRPTR)DEVICE_NAME, 15, (struct IORequest *)iow2, 0) == 0) {
+                struct Sana2LoopDeviceQuery dqw;
+                int k;
+
+                dqw.SizeAvailable = sizeof(dqw);
+                iow->ios2_Req.io_Command = S2_DEVICEQUERY;
+                iow->ios2_StatData = &dqw;
+                do_io(iow);
+                ok = (iow->ios2_Req.io_Error == 0) &&
+                     (dqw.HardwareType == S2WireType_SLIP) &&
+                     (dqw.AddrFieldSize == 32) &&
+                     (dqw.MTU == 1006) && (dqw.BPS == 19200) &&
+                     (dqw.RawMTU == 0);
+
+                iow->ios2_Req.io_Command = S2_GETSTATIONADDRESS;
+                do_io(iow);
+                ok = ok && (iow->ios2_Req.io_Error == 0) &&
+                     (iow->ios2_SrcAddr[0] == 0x0A) &&
+                     (iow->ios2_SrcAddr[1] == 0x53) &&
+                     (iow->ios2_SrcAddr[2] == 0x32) &&
+                     (iow->ios2_SrcAddr[3] == 15) &&
+                     (iow->ios2_SrcAddr[4] == 0) &&
+                     (iow->ios2_SrcAddr[5] == 0) &&
+                     (iow->ios2_DstAddr[0] == 0x0A) &&
+                     (iow->ios2_DstAddr[3] == 15);
+
+                iow->ios2_Req.io_Command = S2_ONLINE;
+                do_io(iow);
+                ok = ok && (iow->ios2_Req.io_Error == 0);
+
+                iow->ios2_Req.io_Command = S2_BROADCAST;
+                iow->ios2_PacketType = 0x1800;
+                iow->ios2_DataLength = sizeof(PAYLOAD) - 1;
+                iow->ios2_Data = (APTR)PAYLOAD;
+                do_io(iow);
+                ok = ok && (iow->ios2_Req.io_Error == S2ERR_NOT_SUPPORTED);
+
+                /* flagged_begin_io(), not do_io(): SendIO/DoIO clear
+                 * io_Flags before dispatch, discarding SANA2IOF_RAW --
+                 * same M4 lesson the "raw" sub-test documents. */
+                iow->ios2_Req.io_Command = CMD_WRITE;
+                iow->ios2_Req.io_Flags = SANA2IOF_RAW;
+                iow->ios2_PacketType = 0x1800;
+                iow->ios2_DataLength = sizeof(PAYLOAD) - 1;
+                flagged_begin_io(iow);
+                WaitIO((struct IORequest *)iow);
+                ok = ok && (iow->ios2_Req.io_Error == S2ERR_NOT_SUPPORTED);
+
+                iow2->ios2_Req.io_Command = CMD_READ;
+                iow2->ios2_Data = readbuf;
+                iow2->ios2_PacketType = 0x1801;
+                iow2->ios2_Req.io_Flags = 0;
+                send_io(iow2);
+
+                iow->ios2_Req.io_Command = CMD_WRITE;
+                iow->ios2_Req.io_Flags = 0;
+                iow->ios2_PacketType = 0x1801;
+                iow->ios2_DataLength = sizeof(PAYLOAD) - 1;
+                iow->ios2_Data = (APTR)PAYLOAD;
+                for (k = 0; k < SANA2_MAX_ADDR_BYTES; k++)
+                    iow->ios2_DstAddr[k] = (k < 4) ? (UBYTE)(0xC0 + k) : 0;
+                do_io(iow);
+                ok = ok && (iow->ios2_Req.io_Error == 0);
+
+                WaitIO((struct IORequest *)iow2);
+                ok = ok && (iow2->ios2_Req.io_Error == 0) &&
+                     (iow2->ios2_DataLength == sizeof(PAYLOAD) - 1) &&
+                     (iow2->ios2_SrcAddr[0] == 0xC0) &&
+                     (iow2->ios2_SrcAddr[3] == 0xC3) &&
+                     (iow2->ios2_SrcAddr[4] == 0) &&
+                     (iow2->ios2_DstAddr[0] == 0x0A) &&
+                     (iow2->ios2_DstAddr[1] == 0x53) &&
+                     (iow2->ios2_DstAddr[2] == 0x32) &&
+                     (iow2->ios2_DstAddr[3] == 15) &&
+                     (iow2->ios2_DstAddr[4] == 0) &&
+                     !(iow2->ios2_Req.io_Flags & (SANA2IOF_BCAST | SANA2IOF_MCAST));
+                if (ok)
+                    for (k = 0; k < (int)(sizeof(PAYLOAD) - 1); k++)
+                        if (readbuf[k] != (UBYTE)PAYLOAD[k])
+                            ok = FALSE;
+
+                CloseDevice((struct IORequest *)iow2);
+            } else {
+                ok = FALSE;
+            }
+            CloseDevice((struct IORequest *)iow);
+        } else {
+            ok = FALSE;
+        }
+        if (iow)
+            FreeMem(iow, sizeof(struct IOSana2Req));
+        if (portw) {
+            FreeSignal(portw->mp_SigBit);
+            FreeMem(portw, sizeof(struct MsgPort));
+        }
+        if (iow2)
+            FreeMem(iow2, sizeof(struct IOSana2Req));
+        if (portw2) {
+            FreeSignal(portw2->mp_SigBit);
+            FreeMem(portw2, sizeof(struct MsgPort));
+        }
+
+        report(NAME_WIRE, ok, &fails);
     }
 
     /* --- record: unit 11 (`record=S:sana2loop/recorded.pcap`,

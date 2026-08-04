@@ -14,7 +14,7 @@ Requires AmigaOS 2.04 (V37) or later — see
 SanaInfo [unit] [ONLINE|OFFLINE]
 ```
 
-- `unit` — a unit number (0–14). Defaults to `0` if omitted.
+- `unit` — a unit number (0–15). Defaults to `0` if omitted.
 - `ONLINE` / `OFFLINE` — if given, issues `S2_ONLINE` or
   `S2_OFFLINE` before querying, and reports the result.
 

@@ -39,6 +39,11 @@ Features
   - pcap replay (on-demand or real-time VBlank-scheduled) and pcap
     recording, both driven off a hand-rolled classic pcap reader/writer
     with no host dependency.
+  - Wire-type emulation (wire=ethernet|slip|cslip|ppp): a unit can report
+    a point-to-point serial wire with 4-byte IP-style addressing, so a
+    stack's SLIP/PPP paths are testable too; plus per-unit reported link
+    speed (bps=) and a minimum-write-size floor (mintu=) for catching
+    missing minimum-frame padding.
   - SANA-II Rev 2/3/4/7 conformance: wider buffer-management hooks
     (S2_CopyToBuff16/32, genuinely invoked, not just accepted),
     S2_GETPEERADDRESS/S2_GETDNSADDRESS, Sana2DeviceQuery.RawMTU, and Rev 7

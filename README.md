@@ -45,8 +45,12 @@ GitHub Environment has its required-reviewer gate in place. M13 added
 SANA-II Rev 2/3/4/7 conformance (wider buffer-management hooks, peer/DNS
 address queries, `RawMTU`, Rev 7 DMA hook negotiation) plus a new
 `SanaConform` probe tool. M14 made the replay-record ceiling a per-unit
-config knob (`replaycap=1`..`256`, see
-[`userdocs/Changelog.md`](userdocs/Changelog.md)). **No release tag has
+config knob (`replaycap=1`..`256`). M15 added wire-type emulation
+(`wire=ethernet|slip|cslip|ppp` -- point-to-point serial wires with
+4-byte IP-style addressing, so a stack's SLIP/PPP paths are testable
+too), a configurable reported link speed (`bps=`), and a minimum-write-
+size floor (`mintu=`) -- see
+[`userdocs/Changelog.md`](userdocs/Changelog.md). **No release tag has
 been pushed yet** -- see [`docs/PLAN.md`](docs/PLAN.md)'s milestone table
 for what's left.
 

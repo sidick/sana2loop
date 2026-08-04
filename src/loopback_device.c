@@ -204,9 +204,35 @@ struct Sana2LoopDeviceQuery {
  * was tried and reliably broke the unrelated "scheduled" sub-test's own
  * replay-buffer allocation on bundled AROS specifically -- the same
  * class of AROS memory-pressure regression M9/M14 already hit, this
- * time avoided by not growing this constant at all). */
-#define SANA2LOOP_NUM_UNITS   15
+ * time avoided by not growing this constant at all).
+ *
+ * M15 grew this to 16 anyway (unit 15: the wire=slip fixture) -- the
+ * calculus changed when the same pre-launch pass moved machine.toml's
+ * memory floor from 1 MB to 2 MB (the documented minimum since), which
+ * is exactly the headroom the reuse-don't-grow workarounds above were
+ * compensating for the absence of. Verified against bundled AROS after
+ * the growth, same as every struct-size change here must be. */
+#define SANA2LOOP_NUM_UNITS   16
 #define SANA2LOOP_DEFAULT_MTU 1500
+/* Reported by S2_DEVICEQUERY (BPS field) unless `bps=` (M15) overrides it
+ * per unit -- was a bare hardcoded 10000000 at the query site before
+ * that. Purely a reported value: nothing in this device throttles. */
+#define SANA2LOOP_DEFAULT_BPS 10000000
+/* M15 `wire=` per-wire-type defaults, applied only when the config names
+ * a non-Ethernet wire and doesn't explicitly override mtu=/bps=. SLIP's
+ * 1006 is the classic RFC 1055 default (296 is the interactive-use
+ * convention; 1006 the historical BSD maximum) and matches nullsana's own
+ * example configs; the BPS values are honest serial-line-era defaults,
+ * reported-only like SANA2LOOP_DEFAULT_BPS. Address size 4 for the
+ * point-to-point wires follows nullsana's "an IP number as hardware
+ * address" convention -- SANA-II itself gives SLIP/PPP no hardware
+ * addressing, and a 4-byte IP is the established stand-in real stacks
+ * expect from such drivers. */
+#define SANA2LOOP_SLIP_MTU      1006
+#define SANA2LOOP_SLIP_BPS      19200
+#define SANA2LOOP_PPP_BPS       115200
+#define SANA2LOOP_ADDR_ETHERNET 6
+#define SANA2LOOP_ADDR_P2P      4
 /* Ethernet dst[6]+src[6]+type[2] -- the allowance SANA2IOF_RAW adds on top
  * of su_MTU (docs/PLAN.md's M4 entry: "SANA2IOF_RAW (buffer -> MTU+14)").
  * Scoped deliberately narrow: this device only relaxes the MTU-exceeded
@@ -461,6 +487,23 @@ struct UnitConfig {
                             actually INVOKES (see pick_copy_to_buff()/
                             pick_copy_from_buff()), not just accepts at
                             open() time */
+    ULONG bps;          /* M15: `bps=N` -- S2_DEVICEQUERY's reported BPS,
+                            default SANA2LOOP_DEFAULT_BPS. Reported only,
+                            never a throttle. */
+    ULONG mintu;        /* M15: `mintu=N` -- minimum accepted write size;
+                            0 (default) = no lower bound, preserving every
+                            pre-M15 unit's behavior byte-for-byte. */
+    ULONG wire;         /* M15: `wire=` -- an S2WireType_* value, default
+                            S2WireType_Ethernet. Selects DEVICEQUERY's
+                            HardwareType, the station-address width, and
+                            (unless overridden explicitly) mtu/bps
+                            defaults -- see read_unit_config()'s
+                            resolution step. */
+    BOOL  mtu_explicit; /* M15: TRUE only if this parse actually saw an
+                            `mtu=` line -- so `wire=`'s own per-wire mtu
+                            default only applies in its absence,
+                            regardless of key order in the file. */
+    BOOL  bps_explicit; /* M15: same contract for `bps=`. */
     ULONG replaycap;    /* M14: `replaycap=N` -- how many pcap records a
                             mode=replay unit may load, default
                             SANA2LOOP_MAX_REPLAY_PACKETS (4) */
@@ -582,7 +625,63 @@ static BOOL parse_config_line(struct UnitConfig *cfg, const char *line, const ch
         if (value < 1 || value > SANA2LOOP_CONFIG_MAX_MTU)
             return FALSE;
         cfg->mtu = value;
+        cfg->mtu_explicit = TRUE; /* M15: blocks `wire=`'s own mtu default */
         return TRUE;
+    }
+    if (key_matches(line, eq, "bps")) {
+        /* M15: reported link speed (S2_DEVICEQUERY's BPS field), nothing
+         * more -- deliberately NOT a throughput shaper; latency belongs
+         * to the (separate) delay=/deviation= proposal, not a reporting
+         * knob quietly becoming one. Any nonzero 32-bit value goes:
+         * there's no wrong answer for a wire that doesn't exist. */
+        if (!parse_ulong(eq + 1, line_end, &value))
+            return FALSE;
+        if (value < 1)
+            return FALSE;
+        cfg->bps = value;
+        cfg->bps_explicit = TRUE;
+        return TRUE;
+    }
+    if (key_matches(line, eq, "mintu")) {
+        /* M15: minimum accepted write size. Same ceiling as mtu= (a
+         * minimum above the largest legal mtu could never be satisfied);
+         * the cross-field mintu<=mtu check itself lives in
+         * read_unit_config(), after wire='s own mtu default resolution,
+         * since the two keys may arrive in either order. Writes below
+         * the minimum are REJECTED (S2ERR_BAD_ARGUMENT), never silently
+         * padded -- padding would mutate the payload a reader sees,
+         * against this device's byte-exact-delivery contract. */
+        if (!parse_ulong(eq + 1, line_end, &value))
+            return FALSE;
+        if (value > SANA2LOOP_CONFIG_MAX_MTU)
+            return FALSE;
+        cfg->mintu = value;
+        return TRUE;
+    }
+    if (key_matches(line, eq, "wire")) {
+        /* M15: which wire this unit pretends to be. Only the types with a
+         * real testing story are accepted: ethernet (the default,
+         * byte-for-byte pre-M15 behavior) and the three point-to-point
+         * serial wires (4-byte IP-as-address, no broadcast/multicast, no
+         * RAW framing). arcnet/localtalk etc. stay unrecognized-key
+         * failures until something actually needs them. */
+        if (key_matches(eq + 1, line_end, "ethernet")) {
+            cfg->wire = S2WireType_Ethernet;
+            return TRUE;
+        }
+        if (key_matches(eq + 1, line_end, "slip")) {
+            cfg->wire = S2WireType_SLIP;
+            return TRUE;
+        }
+        if (key_matches(eq + 1, line_end, "cslip")) {
+            cfg->wire = S2WireType_CSLIP;
+            return TRUE;
+        }
+        if (key_matches(eq + 1, line_end, "ppp")) {
+            cfg->wire = S2WireType_PPP;
+            return TRUE;
+        }
+        return FALSE;
     }
     if (key_matches(line, eq, "rxqueue")) {
         if (!parse_ulong(eq + 1, line_end, &value))
@@ -868,6 +967,36 @@ static BOOL read_unit_config(struct UnitConfig *cfg, UBYTE unit_index)
     if (!parse_config_buffer(cfg, cfgbuf, len))
         return FALSE;
 
+    /* M15 `wire=` default resolution, BEFORE any cross-field validation
+     * below: a non-Ethernet wire brings its own mtu/bps defaults, but an
+     * explicit mtu=/bps= line always wins regardless of where it sat
+     * relative to the wire= line -- hence the _explicit flags rather than
+     * simple parse-order overwriting. Ethernet (the default) resolves to
+     * the unit's own seeded defaults, i.e. exactly pre-M15 behavior. */
+    if (cfg->wire != S2WireType_Ethernet) {
+        if (!cfg->mtu_explicit)
+            cfg->mtu = SANA2LOOP_SLIP_MTU;
+        if (!cfg->bps_explicit)
+            cfg->bps = (cfg->wire == S2WireType_PPP) ? SANA2LOOP_PPP_BPS
+                                                     : SANA2LOOP_SLIP_BPS;
+    }
+
+    /* M15: a minimum no legal write could ever satisfy alongside this
+     * unit's (resolved) mtu is a config mistake, same fail-fast contract
+     * as every per-line range check. */
+    if (cfg->mintu > cfg->mtu)
+        return FALSE;
+
+    /* M15: replay/record are Ethernet-only -- the pcap side of this
+     * device (load_replay_file()'s linktype check, record_append()'s
+     * dst[6]+src[6]+type[2] frame synthesis) is built around
+     * LINKTYPE_ETHERNET framing that a point-to-point wire simply doesn't
+     * have. Declining loudly at open beats writing captures that lie
+     * about their own linktype. */
+    if (cfg->wire != S2WireType_Ethernet &&
+        (cfg->mode == SANA2LOOP_MODE_REPLAY || cfg->record_path[0] != 0))
+        return FALSE;
+
     /* Cross-field check, not expressible per-line: crossover mode needs a
      * real, distinct peer. Catches both an explicit bad `peer=` value and
      * `mode=crossover` given with no `peer=` at all -- units 0/1's
@@ -921,6 +1050,18 @@ struct Sana2LoopUnit {
                                           fails S2ERR_BAD_STATE/
                                           S2WERR_IS_CONFIGURED */
     ULONG       su_MTU;
+    ULONG       su_BPS;               /* M15: S2_DEVICEQUERY's reported BPS
+                                          (`bps=`, default
+                                          SANA2LOOP_DEFAULT_BPS) */
+    ULONG       su_MinTU;             /* M15: minimum accepted write size
+                                          (`mintu=`, 0 = no lower bound) */
+    ULONG       su_WireType;          /* M15: S2WireType_* (`wire=`, default
+                                          S2WireType_Ethernet) */
+    ULONG       su_AddrSize;          /* M15: station-address width in BYTES
+                                          (6 for Ethernet, 4 for the
+                                          point-to-point wires) -- every
+                                          address compare/copy on this unit
+                                          spans exactly this many bytes */
     BOOL        su_Online;
     ULONG       su_RxQueueMax;        /* bounded pending-data depth; 0 = strict
                                           SANA-II drop semantics (the default --
@@ -1524,7 +1665,11 @@ static BOOL fill_read_from_packet(struct IOSana2Req *io, struct EchoPacket *pkt)
      * commands without resetting io_Flags itself (this harness does
      * exactly that -- see sana2test.c's send_io()/do_io() comment). */
     io->ios2_Req.io_Flags &= ~(SANA2IOF_BCAST | SANA2IOF_MCAST);
-    {
+    /* M15: both conventions read here (all-1s = broadcast, low bit of the
+     * first octet = group) are 802.3 Ethernet addressing specifically --
+     * on a point-to-point wire (4-byte IP-as-address) neither concept
+     * exists, so the flags just stay cleared there. */
+    if (slo->slo_Unit->su_WireType == S2WireType_Ethernet) {
         int k;
         BOOL all_ff = TRUE;
         for (k = 0; k < 6; k++) {
@@ -1837,6 +1982,10 @@ static void reset_unit(struct Sana2LoopUnit *unit)
     int i;
 
     unit->su_MTU         = SANA2LOOP_DEFAULT_MTU;
+    unit->su_BPS         = SANA2LOOP_DEFAULT_BPS;      /* M15 */
+    unit->su_MinTU       = 0;                          /* M15: no lower bound */
+    unit->su_WireType    = S2WireType_Ethernet;        /* M15 */
+    unit->su_AddrSize    = SANA2LOOP_ADDR_ETHERNET;    /* M15 */
     unit->su_Online      = FALSE;
     unit->su_RxQueueMax  = 0; /* strict drop by default -- see docs/PLAN.md M2 */
     /* Free anything still sitting in su_PendingData before zeroing its
@@ -2604,6 +2753,12 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
         if (FindTask(NULL)->tc_Node.ln_Type == NT_PROCESS) {
             struct UnitConfig cfg;
             cfg.mtu          = unit->su_MTU;
+            cfg.bps          = unit->su_BPS;          /* M15 */
+            cfg.mintu        = unit->su_MinTU;        /* M15 */
+            cfg.wire         = unit->su_WireType;     /* M15 */
+            cfg.mtu_explicit = FALSE;                 /* M15: per-parse state,
+                                                          never persisted */
+            cfg.bps_explicit = FALSE;
             cfg.rxqueue      = unit->su_RxQueueMax;
             cfg.mode         = unit->su_Mode;
             cfg.peer         = unit->su_Peer;
@@ -2634,6 +2789,31 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
                 return;
             }
             unit->su_MTU          = cfg.mtu;
+            unit->su_BPS          = cfg.bps;          /* M15 */
+            unit->su_MinTU        = cfg.mintu;        /* M15 */
+            unit->su_WireType     = cfg.wire;         /* M15 */
+            /* M15: a point-to-point wire narrows the station address to 4
+             * bytes and re-derives the factory address in the same
+             * recognisable 0x?? 'S' '2' <unit> shape reset_unit() uses for
+             * Ethernet -- but led by 0x0A (a private 10.x.x.x IP octet)
+             * instead of the locally-administered-MAC 0x02, since for
+             * these wires the "hardware address" is an IP by the same
+             * convention nullsana established. Field-by-field, no loop --
+             * see reset_unit()'s memmove-miscompile comment. Bytes past
+             * su_AddrSize stay whatever reset_unit() put there; nothing on
+             * this unit reads past su_AddrSize again until the next
+             * reset. */
+            if (cfg.wire != S2WireType_Ethernet) {
+                unit->su_AddrSize = SANA2LOOP_ADDR_P2P;
+                unit->su_FactoryStation[0] = 0x0A;
+                unit->su_FactoryStation[1] = 0x53;
+                unit->su_FactoryStation[2] = 0x32;
+                unit->su_FactoryStation[3] = unit->su_Index;
+                unit->su_Station[0] = unit->su_FactoryStation[0];
+                unit->su_Station[1] = unit->su_FactoryStation[1];
+                unit->su_Station[2] = unit->su_FactoryStation[2];
+                unit->su_Station[3] = unit->su_FactoryStation[3];
+            }
             unit->su_RxQueueMax   = cfg.rxqueue;
             unit->su_Mode         = cfg.mode;
             unit->su_Peer         = cfg.peer;
@@ -2860,13 +3040,21 @@ static BOOL dest_matches_unit(struct Sana2LoopUnit *unit, const UBYTE *dst, BOOL
     if (prom)
         return TRUE;
 
-    for (k = 0; k < 6; k++) {
+    /* M15: the station compare spans exactly this unit's own address
+     * width; broadcast/multicast are Ethernet-only concepts, so a
+     * point-to-point unit accepts only its own address (or a promiscuous
+     * reader, above). */
+    for (k = 0; k < (int)unit->su_AddrSize; k++) {
         if (dst[k] != unit->su_Station[k])
             station_match = FALSE;
         if (dst[k] != 0xFF)
             all_ff = FALSE;
     }
-    if (station_match || all_ff)
+    if (station_match)
+        return TRUE;
+    if (unit->su_WireType != S2WireType_Ethernet)
+        return FALSE;
+    if (all_ff)
         return TRUE;
 
     if ((dst[0] & 0x01) && find_mcast_locked(unit, dst) >= 0)
@@ -3072,8 +3260,20 @@ static void do_write(struct Sana2LoopDevice *sld, struct Sana2LoopUnit *unit,
         return;
     }
 
-    if (io->ios2_Req.io_Flags & SANA2IOF_RAW)
+    if (io->ios2_Req.io_Flags & SANA2IOF_RAW) {
+        /* M15: the +14 relaxation is the Ethernet dst/src/type header's
+         * size -- meaningless on a point-to-point wire, whose
+         * S2_DEVICEQUERY already reports RawMTU=0 ("those without set it
+         * to zero"). Declined loudly, matching the replay-mode precedent
+         * below for "not a supported operation on this unit's mode/wire",
+         * rather than silently accepting a frame shape that doesn't
+         * exist on this wire. */
+        if (unit->su_WireType != S2WireType_Ethernet) {
+            io0->io_Error = S2ERR_NOT_SUPPORTED;
+            return;
+        }
         max_len += SANA2LOOP_RAW_HDR_SIZE;
+    }
 
     /* M8: a replay-mode unit plays back a canned trace -- there is no
      * meaningful destination for anything written to it to go. Checked
@@ -3096,6 +3296,16 @@ static void do_write(struct Sana2LoopDevice *sld, struct Sana2LoopUnit *unit,
         io0->io_Error = S2ERR_MTU_EXCEEDED;
         return;
     }
+    /* M15 `mintu=`: a write below the configured minimum is rejected, not
+     * padded -- S2ERR_BAD_ARGUMENT, deliberately NOT S2ERR_MTU_EXCEEDED
+     * (which names the too-LARGE failure specifically): the caller's
+     * arguments don't satisfy this interface's floor, which is an
+     * argument problem, not an MTU one. Default su_MinTU=0 makes this
+     * unreachable on any unit that never configured it. */
+    if (io->ios2_DataLength < unit->su_MinTU) {
+        io0->io_Error = S2ERR_BAD_ARGUMENT;
+        return;
+    }
 
     pkt = AllocMem(sizeof(struct EchoPacket), MEMF_CLEAR);
     if (!pkt) {
@@ -3109,10 +3319,10 @@ static void do_write(struct Sana2LoopDevice *sld, struct Sana2LoopUnit *unit,
     if (swap_to_self) {
         CopyMem(io->ios2_DstAddr, pkt->ep_SrcAddr, SANA2_MAX_ADDR_BYTES);
         for (k = 0; k < SANA2_MAX_ADDR_BYTES; k++)
-            pkt->ep_DstAddr[k] = (k < 6) ? unit->su_Station[k] : 0;
+            pkt->ep_DstAddr[k] = (k < (int)unit->su_AddrSize) ? unit->su_Station[k] : 0;
     } else {
         for (k = 0; k < SANA2_MAX_ADDR_BYTES; k++)
-            pkt->ep_SrcAddr[k] = (k < 6) ? unit->su_Station[k] : 0;
+            pkt->ep_SrcAddr[k] = (k < (int)unit->su_AddrSize) ? unit->su_Station[k] : 0;
         CopyMem(io->ios2_DstAddr, pkt->ep_DstAddr, SANA2_MAX_ADDR_BYTES);
     }
     if (!pick_copy_from_buff(unit, writer_slo)(pkt->ep_Data, io->ios2_Data, pkt->ep_Length)) {
@@ -3141,6 +3351,22 @@ static void do_write(struct Sana2LoopDevice *sld, struct Sana2LoopUnit *unit,
      * black hole: the caller's own MTU check passed, but the frame is
      * still too big for what's actually on the other end of the link,
      * and (with oversilent=1) nothing ever tells the caller that. */
+    /* M15: crossover across MISMATCHED wire types fails loudly
+     * (S2ERR_BAD_STATE) rather than silently never matching the peer's
+     * differently-sized station address in dest_matches_unit() -- a
+     * confusing blackhole that, unlike oversilent's, nobody asked for.
+     * Note the peer's wire type is whatever ITS last 0->1 open applied
+     * (or the Ethernet default if it has never opened) -- config is only
+     * ever read at a unit's own first open, so bringing up a non-Ethernet
+     * crossover pair means opening both ends before writing, which the
+     * pair's consumers necessarily do anyway. */
+    if (unit->su_Mode == SANA2LOOP_MODE_CROSSOVER &&
+        target->su_WireType != unit->su_WireType) {
+        FreeMem(pkt, sizeof(struct EchoPacket));
+        io0->io_Error = S2ERR_BAD_STATE;
+        return;
+    }
+
     if (unit->su_Mode == SANA2LOOP_MODE_CROSSOVER && pkt->ep_Length > target->su_MTU) {
         FreeMem(pkt, sizeof(struct EchoPacket));
         if (unit->su_Oversilent) {
@@ -3208,6 +3434,15 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
          * (plipbox), which implements S2_BROADCAST as exactly this
          * "stomp ios2_DstAddr, then fall into the normal write path"
          * pattern. */
+        /* M15: broadcast is an Ethernet addressing concept -- a
+         * point-to-point wire has exactly one place a frame can go and
+         * no all-1s convention to name it with. Same S2ERR_NOT_SUPPORTED
+         * shape as every other "this command has no meaning on this
+         * unit's mode/wire" rejection here. */
+        if (unit->su_WireType != S2WireType_Ethernet) {
+            io0->io_Error = S2ERR_NOT_SUPPORTED;
+            break;
+        }
         {
             int k;
             for (k = 0; k < 6; k++)
@@ -3227,6 +3462,11 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
          * plipbox doesn't implement S2_MULTICAST at all, so this
          * validation is this device's own choice, not something it
          * confirms. */
+        if (unit->su_WireType != S2WireType_Ethernet) {
+            /* M15: same reasoning as S2_BROADCAST above. */
+            io0->io_Error = S2ERR_NOT_SUPPORTED;
+            break;
+        }
         if (!(io->ios2_DstAddr[0] & 0x01)) {
             io0->io_Error = S2ERR_BAD_ARGUMENT;
             io->ios2_WireError = S2WERR_BAD_MULTICAST;
@@ -3444,13 +3684,13 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
         if (SANA2LOOP_DQ_FITS(DeviceLevel))
             dq->DeviceLevel = 0;
         if (SANA2LOOP_DQ_FITS(AddrFieldSize))
-            dq->AddrFieldSize = 48;
+            dq->AddrFieldSize = unit->su_AddrSize * 8; /* M15: in BITS */
         if (SANA2LOOP_DQ_FITS(MTU))
             dq->MTU = unit->su_MTU;
         if (SANA2LOOP_DQ_FITS(BPS))
-            dq->BPS = 10000000;
+            dq->BPS = unit->su_BPS;                    /* M15: `bps=` */
         if (SANA2LOOP_DQ_FITS(HardwareType))
-            dq->HardwareType = S2WireType_Ethernet;
+            dq->HardwareType = unit->su_WireType;      /* M15: `wire=` */
 
 #undef SANA2LOOP_DQ_FITS
 
@@ -3464,7 +3704,12 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
              * crossover's real MTU+SANA2LOOP_RAW_HDR_SIZE allowance
              * (exactly M4's own existing "buffer -> MTU+14" raw-write
              * relaxation -- RawMTU is that same number given a name). */
-            dq->RawMTU = (unit->su_Mode == SANA2LOOP_MODE_REPLAY)
+            /* M15: also 0 for a point-to-point wire -- the +14 allowance
+             * IS the Ethernet header's size; there is no raw framing to
+             * allow for on slip/cslip/ppp (do_write() declines
+             * SANA2IOF_RAW there outright, same as replay mode). */
+            dq->RawMTU = (unit->su_Mode == SANA2LOOP_MODE_REPLAY ||
+                          unit->su_WireType != S2WireType_Ethernet)
                        ? 0 : unit->su_MTU + SANA2LOOP_RAW_HDR_SIZE;
         }
         break;
@@ -3478,8 +3723,8 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
          * anything without a separate query. */
         int k;
         for (k = 0; k < SANA2_MAX_ADDR_BYTES; k++) {
-            io->ios2_SrcAddr[k] = (k < 6) ? unit->su_Station[k] : 0;
-            io->ios2_DstAddr[k] = (k < 6) ? unit->su_FactoryStation[k] : 0;
+            io->ios2_SrcAddr[k] = (k < (int)unit->su_AddrSize) ? unit->su_Station[k] : 0;
+            io->ios2_DstAddr[k] = (k < (int)unit->su_AddrSize) ? unit->su_FactoryStation[k] : 0;
         }
         break;
     }
@@ -3515,8 +3760,15 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
             unit->su_Station[1] = io->ios2_SrcAddr[1];
             unit->su_Station[2] = io->ios2_SrcAddr[2];
             unit->su_Station[3] = io->ios2_SrcAddr[3];
-            unit->su_Station[4] = io->ios2_SrcAddr[4];
-            unit->su_Station[5] = io->ios2_SrcAddr[5];
+            /* M15: bytes 4/5 only exist on a 6-byte (Ethernet) wire --
+             * adopting the caller's bytes there on a 4-byte unit would
+             * scribble past this wire's own address width for nothing
+             * (harmless today since nothing reads past su_AddrSize, but
+             * "harmless scribble" is how latent bugs start). */
+            if (unit->su_AddrSize > 4) {
+                unit->su_Station[4] = io->ios2_SrcAddr[4];
+                unit->su_Station[5] = io->ios2_SrcAddr[5];
+            }
             unit->su_Configured = TRUE;
             unit->su_Stats.Reconfigurations++;
         }
@@ -3647,6 +3899,12 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
         int slot = -1;
         BOOL already;
 
+        if (unit->su_WireType != S2WireType_Ethernet) {
+            /* M15: group membership is Ethernet-only, like the group bit
+             * check right below it. */
+            io0->io_Error = S2ERR_NOT_SUPPORTED;
+            break;
+        }
         if (!(addr[0] & 0x01)) {
             io0->io_Error = S2ERR_BAD_ARGUMENT;
             io->ios2_WireError = S2WERR_BAD_MULTICAST;
@@ -3692,6 +3950,11 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
         UBYTE *addr = io->ios2_SrcAddr;
         int existing;
 
+        if (unit->su_WireType != S2WireType_Ethernet) {
+            /* M15: same as S2_ADDMULTICASTADDRESS above. */
+            io0->io_Error = S2ERR_NOT_SUPPORTED;
+            break;
+        }
         Disable();
         existing = find_mcast_locked(unit, addr);
         if (existing >= 0 && --unit->su_McastRefCount[existing] == 0)
@@ -3812,8 +4075,8 @@ begin_io(struct Library *dev asm("a6"), struct IORequest *io0 asm("a1"))
         }
         peer = delivery_target(sld, unit);
         for (k = 0; k < SANA2_MAX_ADDR_BYTES; k++) {
-            io->ios2_SrcAddr[k] = (k < 6) ? unit->su_Station[k] : 0;
-            io->ios2_DstAddr[k] = (k < 6) ? peer->su_Station[k] : 0;
+            io->ios2_SrcAddr[k] = (k < (int)unit->su_AddrSize) ? unit->su_Station[k] : 0;
+            io->ios2_DstAddr[k] = (k < (int)peer->su_AddrSize) ? peer->su_Station[k] : 0;
         }
         break;
     }

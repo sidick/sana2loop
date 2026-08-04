@@ -308,12 +308,11 @@ copperline-smoke` (bundled AROS) and `run-tools.sh`, both still green.
     replies, fixed in the test harness (`reap_interrupt_io()`), not the
     device -- see `docs/PLAN.md`'s M9 risk note and
     `docs/sana2-notes.md`'s M9 section for the full investigation.
-  - 12 units pre-allocated in the device base (unit 0 wired for echo by
-    default; units 2-3 default-paired for crossover; units 4-11
-    spare/echo, each claimed by exactly one on-target test's own config
-    fixture so no two tests' expectations ever collide on the same unit
-    -- see `tests/copperline/run.sh`'s fixture layout for the current
-    allocation). A unit fully resets (`reset_unit()`: offline, factory
+  - 16 units pre-allocated in the device base as of M15 (unit 0 wired for
+    echo by default; units 2-3 default-paired for crossover; every other
+    unit spare/echo, each claimed by exactly one on-target test's own
+    config fixture so no two tests' expectations ever collide on the same
+    unit -- see `tests/copperline/fixtures/` for the current allocation). A unit fully resets (`reset_unit()`: offline, factory
     address, stats zeroed, `rxqueue` back to 0, mode/peer/fault-injection
     knobs all to their compiled-in defaults) the moment its open count
     goes 0->1, then (M5) has its config file read -- "config re-read on
@@ -666,9 +665,41 @@ has applied consistently since M9: confirm real hardware is unaffected,
 then treat the AROS-specific symptom as an environment artifact to work
 around, not a device bug to chase further.
 
+**M15** (`wire=`/`bps=`/`mintu=` config keys -- GitHub issues #26/#28/#30,
+all prompted by reviewing **nullsana**, Aminet's 2000-era virtual SANA-II
+device discovered as prior art on 2026-08-04; the same review retracted
+the docs' "no null device has ever existed" claim and filed issues
+#24-#30): `bps=` makes `S2_DEVICEQUERY`'s BPS per-unit (was hardcoded
+10000000; reported only, never a throttle); `mintu=` adds a
+minimum-write-size floor (short writes fail `S2ERR_BAD_ARGUMENT` --
+rejected, never padded, and deliberately not `S2ERR_MTU_EXCEEDED`);
+`wire=ethernet|slip|cslip|ppp` makes a unit report a point-to-point
+serial wire -- 4-byte IP-style station address (`0A:53:32:<unit>`,
+rebuilt in `open()` at config-apply time since `reset_unit()` runs
+before the wire type is known), per-wire mtu/bps defaults overridable by
+explicit keys regardless of key order (`mtu_explicit`/`bps_explicit`
+flags resolved in `read_unit_config()`), broadcast/multicast/RAW all
+`S2ERR_NOT_SUPPORTED`, `RawMTU=0`, addr-size-aware `dest_matches_unit()`,
+crossover across mismatched wire types failing `S2ERR_BAD_STATE` at
+write time (peer's wire is unknowable at open -- config reads happen at
+each unit's OWN first open), and replay/record rejected at config time
+(the pcap side is LINKTYPE_ETHERNET-framed). `SANA2LOOP_NUM_UNITS` is
+now 16 (was 15): unit 15 is the `wire=slip` fixture -- the first unit
+growth since the 2 MB memory-floor bump made it affordable again
+(bundled AROS's `scheduled` canary verified still green);
+`bps=57600`/`mintu=16` ride unit 1's existing fixture additively. New
+`mintu`/`wire` sub-tests sit before `record` (M13's "record is the last
+DOS I/O in the session" invariant). Verified: `make copperline-smoke` on
+bundled AROS + real Kickstart 1.3 + real 3.1, and `run-tools.sh` on
+bundled AROS. See `docs/sana2-notes.md`'s M15 section for the design
+notes.
+
 No further milestones remain unscheduled except Aminet packaging's own
 "cut and publish a first tagged release" step (the M12 pipeline itself
 is built and tested, but no tag has been pushed) -- see docs/PLAN.md.
+Remaining nullsana-inspired feature ideas stay filed as GitHub issues
+#24 (delay/jitter), #25 (multi-open fan-out + real `S2_PacketFilter`
+dispatch), and #29 (visible error injection / 1-in-N loss).
 
 ## Architecture
 
