@@ -1277,8 +1277,10 @@ landed in each, in user-facing terms — see the repository's
 <a href="https://github.com/sidick/sana2loop/blob/main/docs/PLAN.md"><code>docs/PLAN.md</code></a>
 for the full engineering detail behind each one.</p>
 <p><strong>v1.0</strong> shipped 2026-07-31 (M0–M13, up through SANA-II Rev 2/3/4/7
-conformance). Everything from <strong>M14</strong> onward lands in the next tagged
-release.</p>
+conformance). <strong>v1.1</strong> shipped 2026-08-04 (M14–M19: the configurable
+replay capacity, the nullsana-inspired config keys, multi-open fan-out,
+and the general-purpose companion tools — all additive and
+backward-compatible).</p>
 <h2 id="foundational-milestones-m0m4">Foundational milestones (M0–M4)<a class="headerlink" href="#foundational-milestones-m0m4" title="Permanent link">&para;</a></h2>
 <ul>
 <li>Echo mode (unit 0's default): <code>S2_DEVICEQUERY</code>, <code>S2_ONLINE</code>/<code>S2_OFFLINE</code>,
@@ -1340,9 +1342,9 @@ standard AmigaDOS <code>$VER:</code> version cookie was also added to the device
 without writing your own program against the device — see
 <a href="../SanaDump-and-SanaSend/">SanaDump and SanaSend</a>.</p>
 <h2 id="m12-aminet-packaging-and-release-flow">M12 — Aminet packaging and release flow<a class="headerlink" href="#m12-aminet-packaging-and-release-flow" title="Permanent link">&para;</a></h2>
-<p>The infrastructure (not yet a shipped release) for packaging and
-publishing tagged versions to Aminet, with a human-approval gate before
-any actual upload.</p>
+<p>The infrastructure for packaging and publishing tagged versions to
+Aminet, with a human-approval gate before any actual upload — first
+exercised for real by the v1.0 release.</p>
 <h2 id="m13-sana-ii-rev-2347-conformance">M13 — SANA-II Rev 2/3/4/7 conformance<a class="headerlink" href="#m13-sana-ii-rev-2347-conformance" title="Permanent link">&para;</a></h2>
 <p>Support for the post-Commodore SANA-II extensions real-world stacks
 probe for: wider buffer-management hooks (<code>S2_CopyToBuff16/32</code>),
@@ -1442,9 +1444,19 @@ previously only ever opened sana2loop's own <code>loopback.device</code>. Now:</
 <a href="../SanaInfo-Reference/">SanaInfo Reference</a>, and
 <a href="../SANA-II-Conformance/">SANA-II Conformance</a> for the full details.</p>
 <h2 id="whats-next">What's next<a class="headerlink" href="#whats-next" title="Permanent link">&para;</a></h2>
+<p>Two feature ideas from reviewing <a href="https://aminet.net/package/comm/tcp/vlink">vlink</a>
+(Chris Brenner's 2000-era virtual SANA-II device, a second piece of
+prior art alongside nullsana) are queued but not yet scheduled:</p>
 <ul>
-<li>A proper first tagged release (the M12 packaging pipeline is built and
-  tested, but no version has been tagged/published yet).</li>
+<li>A second device name (e.g. <code>loopmirror.device</code>) whose unit N
+  crossover-pairs with <code>loopback.device</code>'s unit N — vlink's own
+  <code>vlink.device</code>/<code>vlinkmirror.device</code> pattern, for consumers such as
+  ShapeShifter/Fusion that can only open unit 0 of a named device
+  (<a href="https://github.com/sidick/sana2loop/issues/31">#31</a>).</li>
+<li>Step-by-step walkthroughs for wiring the device into real network
+  stacks (Miami, AmiTCP, Roadshow), modeled on vlink.guide's own
+  numbered setup instructions
+  (<a href="https://github.com/sidick/sana2loop/issues/32">#32</a>).</li>
 </ul>
 
 
