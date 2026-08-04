@@ -76,9 +76,13 @@ unit 4, not a self-echo.
 Whichever unit a packet resolves to (itself for echo, the peer for
 crossover), delivery follows the same precedence, strictly:
 
-1. A queued, **typed** `CMD_READ` whose `ios2_PacketType` matches — first
-   priority, per SANA-II's own typing convention.
-2. Else a queued **untyped** `S2_READORPHAN` ("give me whatever's next").
+1. Every **typed** `CMD_READ` whose `ios2_PacketType` matches, **fanned out
+   to every distinct open that has one queued** — see
+   ["Multiple opens and monitoring"](#multiple-opens-and-monitoring) below.
+   First priority, per SANA-II's own typing convention.
+2. Else (no typed reader anywhere claimed it) a queued **untyped**
+   `S2_READORPHAN` ("give me whatever's next") — single delivery, to
+   whichever orphan reader wants it.
 3. Else, only if `rxqueue` is nonzero, a bounded convenience queue.
 4. Else the packet is **dropped** and `Sana2DeviceStats.UnknownTypesReceived`
    is incremented.
@@ -87,3 +91,45 @@ crossover), delivery follows the same precedence, strictly:
 teaching point that real SANA-II drivers hold no internal buffers of their
 own. See [Configuration Reference](Configuration-Reference.md) if you want
 a convenience queue instead.
+
+## Multiple opens and monitoring
+
+Open the same unit more than once (a stack plus a passive monitor, for
+example — the same pattern Aminet's `sanamon` uses against a real driver)
+and every open with a matching typed read gets its **own independent
+copy** of each packet, not just whichever opened first. Concretely:
+
+- A packet is delivered once **per distinct open** with a matching typed
+  `CMD_READ` — at most one fill per open per packet, even if that open has
+  several reads of the same type pipelined (queue more to catch the *next*
+  ones, not duplicates of this one).
+- `S2_READORPHAN` deliberately stays **single-delivery and global**: it's
+  the unclaimed-type catch-all SANA-II itself defines it as, not a general
+  sniffing tool — if any open anywhere has a matching typed read queued,
+  every orphan read is skipped entirely for that packet, exactly as if
+  only one reader existed.
+- An `S2_PacketFilter` hook (see
+  [SANA-II Conformance](SANA-II-Conformance.md#s2_packetfilter)), if an
+  open negotiated one, runs **per candidate, before the copy hook** — a
+  candidate whose filter rejects a packet simply stays queued for a future
+  one; delivery continues to the next candidate exactly as if that reader
+  hadn't matched at all.
+- Crossover's own destination filtering (station address, broadcast, a
+  joined multicast group, or `SANA2OPF_PROM`) still applies per candidate,
+  unchanged — fan-out and crossover filtering compose normally.
+- `rxqueue` is only ever consulted if **nobody** — typed or orphan —
+  received the packet, so a stack-plus-monitor setup should keep
+  `rxqueue=0` regardless: buffering a packet that was already delivered
+  elsewhere would just hand a later reader a stale duplicate.
+- `Sana2DeviceStats`/`S2_GETTYPESTATS` counts describe traffic **arriving
+  at the interface**, once per packet, regardless of how many opens got a
+  copy — not a per-listener multiplier.
+
+### SANA2OPF_MINE (exclusive access)
+
+Opening with `SANA2OPF_MINE` claims the unit exclusively: the open
+succeeds only if the unit has no other opens, and no further opens
+(`MINE` or not) succeed until this one closes — `OpenDevice()` fails
+`IOERR_UNITBUSY` either way. Useful for a consumer that specifically
+needs to rule out the fan-out/monitoring behavior above for its own
+session.

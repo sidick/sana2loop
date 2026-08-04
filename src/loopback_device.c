@@ -77,6 +77,10 @@
 #include <exec/tasks.h>
 #include <devices/sana2.h>
 #include <utility/tagitem.h>
+#include <utility/hooks.h> /* M18: struct Hook (h_Entry) for S2_PacketFilter
+                               dispatch -- header-only, no utility.library
+                               call anywhere in this file; the KS1.3
+                               constraint is unaffected. */
 #include <exec/interrupts.h>
 #include <hardware/intbits.h>
 #include <proto/exec.h>
@@ -1203,6 +1207,13 @@ struct Sana2LoopUnit {
                                           succeeded once -- a second attempt
                                           fails S2ERR_BAD_STATE/
                                           S2WERR_IS_CONFIGURED */
+    BOOL        su_Exclusive;         /* M18: TRUE while a SANA2OPF_MINE
+                                          opener holds this unit -- gates
+                                          open()'s own busy check; cleared
+                                          by reset_unit() (the exclusive
+                                          holder is necessarily gone by
+                                          the time open count reaches 0
+                                          again) */
     ULONG       su_MTU;
     ULONG       su_BPS;               /* M15: S2_DEVICEQUERY's reported BPS
                                           (`bps=`, default
@@ -1452,9 +1463,26 @@ struct Sana2LoopDevice {
  * these annotations. */
 typedef BOOL (*Sana2CopyFunc)(APTR to asm("a0"), APTR from asm("a1"), ULONG size asm("d0"));
 
-#define SANA2LOOP_OPEN_MAGIC 0x53324C4F /* 'S2LO' */
+/* M18: S2_PacketFilter's calling convention -- ALSO spec-fixed, but a
+ * DIFFERENT register assignment from Sana2CopyFunc above (this file's
+ * third distinct hook ABI, after the copy-hook convention and the VBlank
+ * interrupt-server's own a1-plus-Z-flag convention): per the AmigaOS
+ * wiki's Autodocs (Revision 2+3 page, sourced the same way M13 sourced
+ * the other Rev 2/3/7 gaps this toolchain's own <devices/sana2.h> never
+ * had),
+ *
+ *   keep = PacketFilter(hook, ios2, data)
+ *   d0                   a0    a2    a1
+ *   BOOL PacketFilter(struct Hook *, struct IOSana2Req *, APTR);
+ *
+ * -- note the register order (a0, a2, a1) does NOT match C parameter
+ * order (hook, ios2, data); this is the standard Amiga "Hook" calling
+ * convention's own documented natural-register-order quirk, not a typo.
+ * Verified via objdump the same way M1 verified Sana2CopyFunc's a0/a1/d0
+ * assignment -- see call_packet_filter()'s own comment. */
+typedef BOOL (*Sana2FilterFunc)(struct Hook *h asm("a0"), struct IOSana2Req *io asm("a2"), APTR data asm("a1"));
 
-struct Hook; /* forward decl only -- recorded, not yet dispatched (later phase) */
+#define SANA2LOOP_OPEN_MAGIC 0x53324C4F /* 'S2LO' */
 
 /* Per-OpenDevice() state. SANA-II's OpenDevice contract: the caller may
  * point ios2_BufferManagement at a tag list (S2_CopyToBuff/S2_CopyFromBuff/
@@ -1469,7 +1497,9 @@ struct Sana2LoopOpen {
     ULONG                  slo_Magic;
     Sana2CopyFunc          slo_CopyToBuff;
     Sana2CopyFunc          slo_CopyFromBuff;
-    struct Hook           *slo_PacketFilter;  /* recorded; not yet dispatched */
+    struct Hook           *slo_PacketFilter;  /* M18: dispatched per candidate
+                                                  read, before the copy hook --
+                                                  see call_packet_filter() */
     BOOL                   slo_Promiscuous;   /* SANA2OPF_PROM at open time --
                                                   ignored in echo mode (every
                                                   opener already sees
@@ -1744,6 +1774,28 @@ static Sana2CopyFunc pick_copy_from_buff(struct Sana2LoopUnit *unit, struct Sana
     return slo->slo_CopyFromBuff;
 }
 
+/* M18: dispatches `slo`'s S2_PacketFilter hook (if negotiated) for one
+ * candidate read against `pkt` -- TRUE means deliver, FALSE means reject
+ * this candidate for this packet (the read stays queued for a future
+ * one). No hook negotiated -> TRUE, matching the spec's own "may be
+ * ignored by the driver" advisory default every other Rev 2/3 hook here
+ * already follows.
+ *
+ * Caller contract: `io` must already have prefill_read_metadata() run on
+ * it (ios2_DataLength/SrcAddr/DstAddr populated) BEFORE this call -- the
+ * wiki Autodocs describe the filter seeing the request "as it would
+ * appear if the packet were successfully returned", not the bare
+ * pre-read request. `data` is `pkt->ep_Data` directly: this device never
+ * prepends a hardware header of its own to strip, matching the spec's
+ * "excluding hardware-specific headers" carve-out trivially (there are
+ * none here to exclude). */
+static BOOL call_packet_filter(struct Sana2LoopOpen *slo, struct IOSana2Req *io, struct EchoPacket *pkt)
+{
+    if (!slo->slo_PacketFilter)
+        return TRUE;
+    return ((Sana2FilterFunc)slo->slo_PacketFilter->h_Entry)(slo->slo_PacketFilter, io, pkt->ep_Data);
+}
+
 /* Looks up a tracked S2_TRACKTYPE entry by packet type; returns NULL if
  * `type` isn't currently tracked. The table is shared unit-wide state (any
  * open can S2_TRACKTYPE/S2_UNTRACKTYPE/S2_GETTYPESTATS it, and CMD_WRITE/
@@ -1849,12 +1901,20 @@ static void abort_requests_for_open(struct Sana2LoopUnit *unit, struct Sana2Loop
     }
 }
 
-/* Copies address/type/length directly (driver-owned fields, never subject
- * to buffer-management hooks) and the packet payload through the
- * completing reader's own CopyToBuff hook. Returns FALSE on hook failure
- * so the caller can fail the read with S2ERR_NO_RESOURCES/S2WERR_BUFF_ERROR
- * instead of claiming success over data that was never actually copied. */
-static BOOL fill_read_from_packet(struct IOSana2Req *io, struct EchoPacket *pkt)
+/* M18: the metadata half of fill_read_from_packet() below, split out so
+ * deliver_packet()'s per-candidate fan-out walk can prefill a read --
+ * making its ios2_DataLength/SrcAddr/DstAddr/SANA2IOF_BCAST|MCAST flags
+ * exactly what the wiki Autodocs say S2_PacketFilter is entitled to see
+ * ("as it would appear if the packet were successfully returned") -- and
+ * consult that candidate's filter hook (call_packet_filter()) BEFORE
+ * committing to the copy step. Returns the resolved struct
+ * Sana2LoopOpen* on success, NULL on the same SANA2LOOP_OPEN_MAGIC
+ * failure fill_read_from_packet() itself used to detect inline --
+ * callers must treat NULL exactly like that function's own FALSE return
+ * (S2ERR_NO_RESOURCES/S2WERR_BUFF_ERROR); the contract is unchanged,
+ * just surfaced one function earlier now that a real decision (the
+ * filter call) has to happen in between prefill and copy. */
+static struct Sana2LoopOpen *prefill_read_metadata(struct IOSana2Req *io, struct EchoPacket *pkt)
 {
     struct Sana2LoopOpen *slo = (struct Sana2LoopOpen *)io->ios2_BufferManagement;
 
@@ -1872,7 +1932,7 @@ static BOOL fill_read_from_packet(struct IOSana2Req *io, struct EchoPacket *pkt)
      * page faults, just a read of whatever ordinary RAM happens to be at
      * that address (0 itself is SysBase, always mapped). */
     if (!slo || slo->slo_Magic != SANA2LOOP_OPEN_MAGIC)
-        return FALSE;
+        return NULL;
 
     CopyMem(pkt->ep_SrcAddr, io->ios2_SrcAddr, SANA2_MAX_ADDR_BYTES);
     CopyMem(pkt->ep_DstAddr, io->ios2_DstAddr, SANA2_MAX_ADDR_BYTES);
@@ -1910,6 +1970,29 @@ static BOOL fill_read_from_packet(struct IOSana2Req *io, struct EchoPacket *pkt)
         else if (pkt->ep_DstAddr[0] & 0x01)
             io->ios2_Req.io_Flags |= SANA2IOF_MCAST;
     }
+
+    return slo;
+}
+
+/* Copies the packet payload through the completing reader's own
+ * CopyToBuff hook, after prefill_read_metadata() (above) has already set
+ * every driver-owned field. Returns FALSE on hook failure (or the same
+ * magic-check failure prefill_read_metadata() detects) so the caller can
+ * fail the read with S2ERR_NO_RESOURCES/S2WERR_BUFF_ERROR instead of
+ * claiming success over data that was never actually copied.
+ *
+ * M18: now a thin composition of prefill_read_metadata() + the copy step
+ * -- kept as its own function for the two call sites (consume-mode
+ * replay, rxqueue-satisfied reads) that complete a read with no
+ * per-candidate filter decision to make in between. deliver_packet()'s
+ * own fan-out walk calls the two halves separately instead, running
+ * call_packet_filter() in the gap between them. */
+static BOOL fill_read_from_packet(struct IOSana2Req *io, struct EchoPacket *pkt)
+{
+    struct Sana2LoopOpen *slo = prefill_read_metadata(io, pkt);
+
+    if (!slo)
+        return FALSE;
 
     return pick_copy_to_buff(slo->slo_Unit, slo)(io->ios2_Data, pkt->ep_Data, pkt->ep_Length);
 }
@@ -2430,6 +2513,7 @@ static void reset_unit(struct Sana2LoopUnit *unit)
             FreeMem(pn, sizeof(struct EchoPacket));
     }
     unit->su_Configured  = FALSE;
+    unit->su_Exclusive   = FALSE; /* M18 */
     unit->su_BuffHooks   = 8; /* M13: always the base hook by default --
                                   identical behavior to every milestone
                                   before this one until `buffhooks=` opts
@@ -3176,6 +3260,27 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
 
     unit = &sld->sld_Units[unitnum];
 
+    /* M18: SANA2OPF_MINE -- exclusive access. Checked against the unit's
+     * CURRENT state (before any reset_unit() below, which only runs on
+     * a genuine 0->1 transition anyway): a MINE open fails if the unit
+     * already has ANY opens (exclusive or not), and ANY open (MINE or
+     * not) fails while an existing MINE holder is open. Neither case
+     * ever becomes a real open, so this runs before dev->lib_OpenCnt is
+     * even bumped below -- no matching decrement needed, unlike every
+     * later failure path in this function. IOERR_UNITBUSY is the
+     * standard Exec code for exactly this ("device opens ok, but
+     * requested unit is busy") -- not an S2ERR_*, since this rejection
+     * happens at the Exec OpenDevice() level, before SANA-II's own error
+     * space is even reachable (io->io_Error is genuinely an ioerr here,
+     * not an S2ERR_ -- see how every OTHER early-return in this function
+     * already sets it before the S2ERR_BAD_ARGUMENT default would
+     * otherwise apply). */
+    if (unit->su_Unit.unit_OpenCnt > 0 &&
+        (unit->su_Exclusive || (flags & SANA2OPF_MINE))) {
+        io->io_Error = IOERR_UNITBUSY;
+        return;
+    }
+
     /* dev->lib_OpenCnt bumped here, BEFORE any dos.library I/O below
      * (read_unit_config()/load_replay_file() can each legitimately
      * Wait() internally -- see read_unit_config()'s own comment on the
@@ -3397,10 +3502,13 @@ open(struct Library *dev asm("a6"), struct IORequest *io asm("a1"),
     /* SANA2OPF_PROM: irrelevant in echo mode (every opener already sees
      * everything on its unit, unchanged since Phase 1), but in crossover
      * mode (M6) lets THIS open's queued reads accept a packet regardless
-     * of destination address -- see dest_matches_unit(). SANA2OPF_MINE
-     * still has no meaning here: this device has no hardware resource to
-     * exclusively reserve. */
+     * of destination address -- see dest_matches_unit(). */
     slo->slo_Promiscuous = (flags & SANA2OPF_PROM) ? TRUE : FALSE;
+    /* M18: SANA2OPF_MINE -- the busy-check above already rejected this
+     * open outright if it couldn't have exclusive access; reaching here
+     * means it genuinely gets it. */
+    if (flags & SANA2OPF_MINE)
+        unit->su_Exclusive = TRUE;
 
     io->io_Device = (struct Device *)dev;
     io->io_Unit   = &unit->su_Unit;
@@ -3617,84 +3725,224 @@ static void record_append(struct Sana2LoopUnit *unit, struct EchoPacket *pkt)
  *
  * Must never be called with a Disable() already held by the caller: it
  * calls consumer hooks and ReplyMsg, neither of which may run disabled. */
+/* M18: TRUE if `list` (a private, not-unit-shared collection being built
+ * by deliver_packet()'s own typed-candidate walk below) already holds a
+ * node whose open matches `slo` -- enforces "at most one candidate per
+ * open per packet": a packet must fan out to every DISTINCT open with a
+ * matching read, not drain one open's own pipelined read queue with N
+ * identical fills. `list` is never touched by anything outside the
+ * current deliver_packet() call, so this needs no Disable() of its own. */
+static BOOL open_already_collected(struct List *list, struct Sana2LoopOpen *slo)
+{
+    struct IOSana2Req *io;
+    for (io = (struct IOSana2Req *)list->lh_Head;
+         io->ios2_Req.io_Message.mn_Node.ln_Succ;
+         io = (struct IOSana2Req *)io->ios2_Req.io_Message.mn_Node.ln_Succ) {
+        if ((struct Sana2LoopOpen *)io->ios2_BufferManagement == slo)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/* M18: attempts to deliver `pkt` to ONE candidate read that's already
+ * been dequeued (Remove()d, by the caller, under Disable()) from
+ * whichever list it came from. Runs that candidate's own S2_PacketFilter
+ * (if negotiated) and, on acceptance, its copy hook; on rejection, puts
+ * the read back onto `requeue_list` (the SAME unit list it was dequeued
+ * from -- su_PendingReads for a typed candidate, su_OrphanReads for an
+ * orphan one) so it's still queued for a FUTURE packet, at the front
+ * (AddHead) so it isn't shuffled behind anything that queued while the
+ * filter ran (exact relative order among several requeued-in-one-call
+ * candidates isn't preserved beyond that -- SANA-II doesn't promise FIFO
+ * ordering across queued reads either, so this doesn't matter). Returns
+ * TRUE if `pkt` was consumed by this candidate: either a real delivery,
+ * or the same bad-SANA2LOOP_OPEN_MAGIC failure fill_read_from_packet()
+ * always treated as "claims the packet, fails its own read" (preserved
+ * unchanged from pre-M18 behavior -- see prefill_read_metadata()'s own
+ * comment).
+ *
+ * Must be called OUTSIDE Disable() -- calls a consumer-supplied filter
+ * hook and ReplyMsg(), neither legal disabled. Interrupt-context callers
+ * (M9 scheduled replay, M17 delay-queue release) inherit the identical
+ * contract S2_CopyToBuff already has there -- see docs/sana2-notes.md's
+ * M18 section. */
+static BOOL try_deliver_candidate(struct IOSana2Req *io, struct EchoPacket *pkt, struct List *requeue_list)
+{
+    struct Sana2LoopOpen *slo = prefill_read_metadata(io, pkt);
+
+    if (!slo) {
+        io->ios2_Req.io_Error = S2ERR_NO_RESOURCES;
+        io->ios2_WireError = S2WERR_BUFF_ERROR;
+        if (!(io->ios2_Req.io_Flags & IOF_QUICK))
+            ReplyMsg(&io->ios2_Req.io_Message);
+        return TRUE;
+    }
+
+    if (!call_packet_filter(slo, io, pkt)) {
+        Disable();
+        AddHead(requeue_list, (struct Node *)io);
+        Enable();
+        return FALSE;
+    }
+
+    if (pick_copy_to_buff(slo->slo_Unit, slo)(io->ios2_Data, pkt->ep_Data, pkt->ep_Length)) {
+        io->ios2_Req.io_Error = 0;
+    } else {
+        io->ios2_Req.io_Error = S2ERR_NO_RESOURCES;
+        io->ios2_WireError = S2WERR_BUFF_ERROR;
+    }
+    if (!(io->ios2_Req.io_Flags & IOF_QUICK))
+        ReplyMsg(&io->ios2_Req.io_Message);
+    return TRUE;
+}
+
+/* M18: multi-open fan-out (GitHub #25, nullsana-inspired -- "open each
+ * unit as many times as you want and monitor all data"). TYPED reads
+ * (CMD_READ) fan out to every DISTINCT open with a matching queued read
+ * (one fill per open, per open_already_collected()'s own contract).
+ * S2_READORPHAN stays a GLOBAL, single-delivery fallback for packet
+ * types no typed reader anywhere claimed -- deliberately NOT fanned out:
+ * the SANA-II spec defines an orphan read as the unclaimed-type
+ * catch-all, not a general sniffing tool, and preserving that is what
+ * lets the pre-M18 "delivery" sub-test's own typed-beats-orphan
+ * assertion keep passing unchanged (see docs/sana2-notes.md's M18
+ * section for the full reasoning -- this was a real design fork, not an
+ * arbitrary choice). rxqueue and drop+stats are consulted only once
+ * NEITHER typed nor orphan claimed the packet, same "else" position in
+ * the precedence chain as before M18.
+ *
+ * AbortIO() race note: a candidate is briefly off every unit-shared list
+ * while try_deliver_candidate() runs its filter/copy outside Disable().
+ * A concurrent AbortIO() landing in that exact window finds nothing on
+ * any list and returns -1 ("already in-flight" -- abort_io()'s own
+ * pre-existing, documented contract, unchanged by M18): the caller's
+ * WaitIO() either sees the real completion (filter accepted) or the
+ * request is back on its queue moments later (filter rejected), where a
+ * retried AbortIO() finds it normally. This is the same class of race
+ * abort_io()'s own "-1: let WaitIO see it naturally" comment already
+ * accepted pre-M18 for a read already Remove()'d and mid-ReplyMsg() --
+ * M18 widens the window (a filter hook can run arbitrarily long) but
+ * doesn't introduce a new FAILURE mode, only a longer instance of an
+ * already-accepted one. Considered and deliberately NOT adding new
+ * per-request transient-state tracking (an io_Flags bit, or a 4th
+ * abort_requests_for_open()-searched list) for this: SANA2IOF_* is
+ * spec-owned and SendIO()/DoIO() already clear it wholesale before every
+ * dispatch (see M4's own finding), making it an unsafe place to stash
+ * device-private state; a transit list would add exactly the kind of
+ * extra list-walk surface the pre-launch review's own concurrency fixes
+ * were about REDUCING, for a race window this device's own delivery
+ * model (synchronous, task-context, not deferred past the write's own
+ * do_io()) makes unreachable from any test that follows this file's
+ * existing write-then-check sequencing. */
 static void deliver_packet(struct Sana2LoopUnit *unit, struct EchoPacket *pkt)
 {
-    struct IOSana2Req *waiting = NULL;
-    BOOL queued = FALSE;
     BOOL crossover = (unit->su_Mode == SANA2LOOP_MODE_CROSSOVER);
+    BOOL delivered = FALSE;
+    BOOL queued = FALSE;
+    struct List typed_candidates;
+    struct IOSana2Req *io, *next;
+
+    list_init(&typed_candidates);
 
     Disable();
     unit->su_Stats.PacketsReceived++;
     record_append(unit, pkt); /* M9: no-op unless record=<path> is active */
+    for (io = (struct IOSana2Req *)unit->su_PendingReads.lh_Head;
+         io->ios2_Req.io_Message.mn_Node.ln_Succ;
+         io = next) {
+        next = (struct IOSana2Req *)io->ios2_Req.io_Message.mn_Node.ln_Succ;
+        if (io->ios2_PacketType == pkt->ep_PacketType &&
+            (!crossover || dest_matches_unit(unit, pkt->ep_DstAddr,
+                ((struct Sana2LoopOpen *)io->ios2_BufferManagement)->slo_Promiscuous)) &&
+            !open_already_collected(&typed_candidates, (struct Sana2LoopOpen *)io->ios2_BufferManagement)) {
+            Remove((struct Node *)io);
+            AddTail(&typed_candidates, (struct Node *)io);
+        }
+    }
+    Enable();
+
     {
-        struct IOSana2Req *io, *next;
-        for (io = (struct IOSana2Req *)unit->su_PendingReads.lh_Head;
+        struct Node *n;
+        while ((n = RemHead(&typed_candidates)) != NULL)
+            if (try_deliver_candidate((struct IOSana2Req *)n, pkt, &unit->su_PendingReads))
+                delivered = TRUE;
+    }
+
+    if (!delivered) {
+        struct List orphan_candidates;
+        struct Node *n;
+
+        list_init(&orphan_candidates);
+
+        Disable();
+        for (io = (struct IOSana2Req *)unit->su_OrphanReads.lh_Head;
              io->ios2_Req.io_Message.mn_Node.ln_Succ;
              io = next) {
             next = (struct IOSana2Req *)io->ios2_Req.io_Message.mn_Node.ln_Succ;
-            if (io->ios2_PacketType == pkt->ep_PacketType &&
-                (!crossover || dest_matches_unit(unit, pkt->ep_DstAddr,
-                    ((struct Sana2LoopOpen *)io->ios2_BufferManagement)->slo_Promiscuous))) {
+            if (!crossover || dest_matches_unit(unit, pkt->ep_DstAddr,
+                    ((struct Sana2LoopOpen *)io->ios2_BufferManagement)->slo_Promiscuous)) {
                 Remove((struct Node *)io);
-                waiting = io;
-                break;
+                AddTail(&orphan_candidates, (struct Node *)io);
             }
         }
-        if (!waiting) {
-            struct IOSana2Req *oio, *onext;
-            for (oio = (struct IOSana2Req *)unit->su_OrphanReads.lh_Head;
-                 oio->ios2_Req.io_Message.mn_Node.ln_Succ;
-                 oio = onext) {
-                onext = (struct IOSana2Req *)oio->ios2_Req.io_Message.mn_Node.ln_Succ;
-                if (!crossover || dest_matches_unit(unit, pkt->ep_DstAddr,
-                        ((struct Sana2LoopOpen *)oio->ios2_BufferManagement)->slo_Promiscuous)) {
-                    Remove((struct Node *)oio);
-                    waiting = oio;
-                    break;
-                }
-            }
-        }
-        if (!waiting && unit->su_PendingDataCount < unit->su_RxQueueMax &&
-            (!crossover || dest_matches_unit(unit, pkt->ep_DstAddr, FALSE))) {
-            AddTail(&unit->su_PendingData, (struct Node *)pkt);
-            unit->su_PendingDataCount++;
-            queued = TRUE;
-        }
-        if (!waiting && !queued)
-            unit->su_Stats.UnknownTypesReceived++;
+        Enable();
 
-        /* S2_TRACKTYPE accounting: PacketsReceived/BytesReceived count the
-         * packet arriving at this interface at all (delivered immediately
-         * OR accepted into the rxqueue for later reading) -- PacketsDropped
-         * is reserved for the one outcome that's genuinely a loss. */
-        {
-            struct Sana2PacketTypeStats *ts = find_tracked_locked(unit, pkt->ep_PacketType);
-            if (ts) {
-                if (waiting || queued) {
-                    ts->PacketsReceived++;
-                    ts->BytesReceived += pkt->ep_Length;
-                } else {
-                    ts->PacketsDropped++;
-                }
+        /* Try each candidate in turn (a rejected one is requeued by
+         * try_deliver_candidate() itself and the search moves on) until
+         * one accepts -- single delivery overall, per this function's
+         * own header comment. */
+        while (!delivered && (n = RemHead(&orphan_candidates)) != NULL)
+            if (try_deliver_candidate((struct IOSana2Req *)n, pkt, &unit->su_OrphanReads))
+                delivered = TRUE;
+
+        /* Anything left in orphan_candidates was never even tried
+         * (we stopped once one candidate accepted) -- put it back
+         * exactly as untouched as a not-yet-considered candidate should
+         * be. */
+        while ((n = RemHead(&orphan_candidates)) != NULL) {
+            Disable();
+            AddHead(&unit->su_OrphanReads, n);
+            Enable();
+        }
+    }
+
+    Disable();
+    if (!delivered && unit->su_PendingDataCount < unit->su_RxQueueMax &&
+        (!crossover || dest_matches_unit(unit, pkt->ep_DstAddr, FALSE))) {
+        AddTail(&unit->su_PendingData, (struct Node *)pkt);
+        unit->su_PendingDataCount++;
+        queued = TRUE;
+    }
+    if (!delivered && !queued)
+        unit->su_Stats.UnknownTypesReceived++;
+
+    /* S2_TRACKTYPE accounting: PacketsReceived/BytesReceived count the
+     * packet arriving at this interface at all (delivered to one or more
+     * opens OR accepted into the rxqueue for later reading) -- exactly
+     * ONCE per wire-packet regardless of how many opens got a fill (M18:
+     * stats describe what arrived at the interface, matching what these
+     * numbers mean on a real driver, not a per-listener multiplier).
+     * PacketsDropped is reserved for the one outcome that's genuinely a
+     * loss: nobody -- typed, orphan, or rxqueue -- wanted it. */
+    {
+        struct Sana2PacketTypeStats *ts = find_tracked_locked(unit, pkt->ep_PacketType);
+        if (ts) {
+            if (delivered || queued) {
+                ts->PacketsReceived++;
+                ts->BytesReceived += pkt->ep_Length;
+            } else {
+                ts->PacketsDropped++;
             }
         }
     }
     Enable();
 
-    if (waiting) {
-        if (fill_read_from_packet(waiting, pkt)) {
-            waiting->ios2_Req.io_Error = 0;
-        } else {
-            waiting->ios2_Req.io_Error = S2ERR_NO_RESOURCES;
-            waiting->ios2_WireError = S2WERR_BUFF_ERROR;
-        }
+    /* M18: every delivered candidate copied OUT of pkt via its own copy
+     * hook (fill_read_from_packet()'s pre-M18 contract, unchanged) --
+     * nothing ever retains pkt itself except the rxqueue path, so one
+     * free covers every outcome except "queued". */
+    if (!queued)
         FreeMem(pkt, sizeof(struct EchoPacket));
-        if (!(waiting->ios2_Req.io_Flags & IOF_QUICK))
-            ReplyMsg(&waiting->ios2_Req.io_Message);
-    } else if (!queued) {
-        FreeMem(pkt, sizeof(struct EchoPacket));
-    }
-    /* else: queued -- pkt now belongs to su_PendingData, nothing more to do */
 }
 
 /* Shared body for CMD_WRITE and its S2_BROADCAST/S2_MULTICAST cousins --

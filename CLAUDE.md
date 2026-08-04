@@ -761,12 +761,49 @@ does correctly. Verified: bundled AROS (clean first try) + real
 Kickstart 1.3 + real 3.1 (40 sub-tests) + `run-tools.sh`. See
 `docs/sana2-notes.md`'s M17 section.
 
+**M18** (multi-open fan-out delivery + real `S2_PacketFilter` dispatch +
+`SANA2OPF_MINE` -- GitHub #25, the last nullsana-inspired item and the
+only one that touched core delivery semantics rather than adding an
+orthogonal config knob; scoped via two investigation comments posted to
+the issue before any code moved): typed `CMD_READ` now fans out to every
+DISTINCT open with a matching queued read (one fill per open per
+packet, `open_already_collected()` dedup), rewriting `deliver_packet()`
+around the existing `abort_requests_for_open()`/`fire_event()`
+collect-under-one-`Disable()`-then-act-outside pattern.
+`S2_READORPHAN` deliberately stays GLOBAL and single-delivery (the
+spec's own unclaimed-type-catch-all definition) -- the design fork this
+resolved is exactly why the pre-existing `delivery` sub-test's own
+typed-beats-orphan assertion passed UNCHANGED, not by luck. `S2_PacketFilter`
+(recorded since M1, never dispatched) now runs per candidate before the
+copy hook -- a third distinct hook register convention in this file
+(`a0`=hook/`a2`=ios2/`a1`=data/`d0`=result, sourced from wiki.amigaos.net's
+Autodocs since this toolchain's own header has no signature for it,
+objdump-verified the compiler honored the non-sequential assignment,
+same M1 discipline). Investigated the AbortIO-during-filter-transit race
+in depth and deliberately added NO new tracking machinery (an io_Flags
+bit is unsafe -- SendIO()/DoIO() already clear io_Flags wholesale per
+M4's own finding -- and a 4th searched list would add exactly the
+list-walk surface the pre-launch review's own fixes were reducing);
+`abort_io()`'s existing "-1: let WaitIO see it naturally" contract
+already covers the widened window, and this device's synchronous
+delivery model makes the race unreachable from any test following the
+file's own write-then-check sequencing. `SANA2OPF_MINE` enforced via a
+new `su_Exclusive` BOOL. Zero new units (fanout/packetfilter run on
+unit 0's config-free default; mine reuses unit 13). Real-1.3 `run.sh`'s
+own `BENCH` default raised 30 -> 45 (the new sub-tests' extra
+OpenDevice/CloseDevice/config-read cycles pushed real 1.3's session past
+its old budget -- found as a clean guest-side END/RESULT=PASS but a
+0-byte `recorded.pcap` extraction, the same class of fix M9's own
+KICK= default increase needed). Verified: bundled AROS (clean first
+try) + real Kickstart 1.3 + real 3.1 (43 sub-tests) + `run-tools.sh`.
+See `docs/sana2-notes.md`'s M18 section for the full design-fork
+reasoning.
+
 No further milestones remain unscheduled except Aminet packaging's own
 "cut and publish a first tagged release" step (the M12 pipeline itself
 is built and tested, but no tag has been pushed) -- see docs/PLAN.md.
-The nullsana/vlink-inspired feature-idea queue is down to #25
-(multi-open fan-out + real `S2_PacketFilter` dispatch), #31 (mirror
-device name), and #32 (stack-wiring walkthrough docs).
+The nullsana/vlink-inspired feature-idea queue is down to #31 (mirror
+device name) and #32 (stack-wiring walkthrough docs).
 
 ## Architecture
 

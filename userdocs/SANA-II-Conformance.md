@@ -28,6 +28,28 @@ meaning "always the base hook" -- opt in with `buffhooks=16` or
 that didn't negotiate the configured width falls back to its own base
 hook transparently.
 
+### S2_PacketFilter
+
+Part of the original SANA-II buffer-management tag family (alongside
+`S2_CopyToBuff`/`S2_CopyFromBuff` above), but genuinely **dispatched**
+only since M18: a caller may offer an `S2_PacketFilter` hook at
+`OpenDevice()` time, and the device now calls it for every candidate
+delivery on that open, immediately before the copy hook — exactly the
+"filter before you pay to copy" efficiency the tag exists for. The
+calling convention (sourced from wiki.amigaos.net's Autodocs, since this
+toolchain's own `<devices/sana2.h>` carries no signature for it, the same
+gap M13 already found for the Rev 2/3/7 tag values) is
+`keep = PacketFilter(hook, ios2, data)` / registers `d0 = a0(hook)
+a2(ios2) a1(data)` — note the register order does **not** match C
+parameter order, a documented quirk of the standard Amiga Hook
+convention, not a typo. `ios2` arrives with `ios2_DataLength`/`SrcAddr`/
+`DstAddr` already populated as they'd appear on a completed read; `data`
+points at the packet payload directly (no hardware header to exclude on
+this device). Returning `FALSE` rejects the packet for that specific
+candidate only — see
+[Echo and Crossover: Multiple opens and monitoring](Echo-and-Crossover.md#multiple-opens-and-monitoring)
+for the full per-candidate fan-out semantics this composes with.
+
 ### Rev 4 -- peer/DNS address queries, `RawMTU`
 
 - `S2_GETPEERADDRESS` -- returns the real peer's station address for a

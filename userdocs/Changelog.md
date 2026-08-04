@@ -158,6 +158,21 @@ the reorder buffer. See [Fault Injection](Fault-Injection.md#simulating-latency-
 
 One more unit is pre-allocated (unit numbers now run 0–18).
 
+## M18 — Multi-open fan-out, real S2_PacketFilter dispatch, SANA2OPF_MINE
+
+Open a unit more than once — a stack plus a passive monitor, the
+`sanamon`-style pattern nullsana's own review surfaced — and every open
+with a matching typed `CMD_READ` now gets its own independent copy of
+each packet, instead of only whichever opened first. `S2_PacketFilter`
+(previously accepted but never actually invoked) is now genuinely
+dispatched per candidate, immediately before the copy hook, so a caller
+can reject packet types it doesn't want without paying for the copy.
+`SANA2OPF_MINE` (exclusive access) is now enforced too. See
+[Echo and Crossover: Multiple opens and monitoring](Echo-and-Crossover.md#multiple-opens-and-monitoring).
+
+No new units needed; no config or wire-level changes for existing
+single-open usage.
+
 ## What's next
 
 - A proper first tagged release (the M12 packaging pipeline is built and

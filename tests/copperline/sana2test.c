@@ -39,6 +39,7 @@
 #include <exec/execbase.h>
 #include <devices/sana2.h>
 #include <utility/tagitem.h>
+#include <utility/hooks.h> /* M18: struct Hook, for the S2_PacketFilter test hook */
 #include <proto/exec.h>
 
 struct ExecBase *SysBase;
@@ -63,6 +64,26 @@ static ULONG g_HookFromCount;
 static ULONG g_Hook32ToCount;
 static ULONG g_Hook32FromCount;
 static ULONG g_DMAHookCalls;
+
+/* M18: invocation counter for the packetfilter sub-test's S2_PacketFilter
+ * hook (reject_filter(), see its own comment) -- volatile for the same
+ * reason g_HookToCount above is: the "delay"-sub-test-style interrupt
+ * coverage this sub-test also exercises writes it from real VBlank
+ * interrupt context. `g_FilterRejectType`: the ONE packet type
+ * reject_filter() refuses (0 = accept everything, the default before any
+ * sub-test sets it) -- lets one hook function serve both the
+ * accept-and-reject halves of the same sub-test. */
+static volatile ULONG g_FilterCallCount;
+static ULONG g_FilterRejectType;
+
+/* M18: the packetfilter sub-test's own struct Hook -- zero-initialized
+ * BSS (never registered on any real Exec list, so h_MinNode's contents
+ * don't matter), with h_Entry set at the sub-test's own start. Static
+ * rather than stack-local: OpenDevice()'s tag list only records the
+ * pointer, and the device keeps it live for the open's entire lifetime
+ * (every subsequent read dispatches through it), well past this
+ * function-local block's own scope. */
+static struct Hook g_FilterHook;
 
 /* Every message as a NAMED array, never a raw string literal passed
  * directly to raw_str(). Root cause of an on-target "task held" Guru that
@@ -142,6 +163,9 @@ static char NAME_ADDR[]            = "addr";
 static char NAME_FAULTERRORS[]     = "faulterrors";
 static char NAME_FAULTLOSS[]       = "faultloss";
 static char NAME_DELAY[]           = "delay";
+static char NAME_FANOUT[]          = "fanout";
+static char NAME_PACKETFILTER[]    = "packetfilter";
+static char NAME_MINE[]            = "mine";
 static char DBG_CHECKIO_NULL[]    = "DBG_CHECKIO_NULL=";
 
 /* M13: this toolchain's <devices/sana2.h> lacks Rev 4's RawMTU field --
@@ -252,6 +276,7 @@ static BOOL counting_copy_from(APTR to asm("a0"), APTR from asm("a1"), ULONG siz
 static BOOL counting_copy_to32(APTR to asm("a0"), APTR from asm("a1"), ULONG size asm("d0"));
 static BOOL counting_copy_from32(APTR to asm("a0"), APTR from asm("a1"), ULONG size asm("d0"));
 static APTR never_call_dma(APTR data asm("a0"));
+static BOOL reject_filter(struct Hook *hook asm("a0"), struct IOSana2Req *io asm("a2"), APTR data asm("a1"));
 static BOOL open_unit0(struct IOSana2Req *io);
 static void send_io(struct IOSana2Req *io);
 static void do_io(struct IOSana2Req *io);
@@ -2824,6 +2849,310 @@ static int test_main(void)
         report(NAME_DELAY, ok, &fails);
     }
 
+    /* --- fanout: M18's multi-open delivery (GitHub #25, nullsana-
+     * inspired -- "open each unit as many times as you want and monitor
+     * all data"). Unit 0, config-free echo default.
+     * (a) TWO SEPARATE opens (io1, io2, this file's own two standing
+     *     unit-0 opens) each with a typed CMD_READ for the SAME type,
+     *     one write from a third, fresh open -> BOTH receive an
+     *     independent, correct copy -- the sanamon-style monitoring
+     *     scenario the issue exists for.
+     * (b) ONE open (io1) with TWO simultaneously queued typed reads for
+     *     the SAME type -- a second IORequest (io1b) manually sharing
+     *     io1's own open cookie (the standard SANA-II pipelining
+     *     pattern: the spec's own contract is "copy ios2_BufferManagement
+     *     into every subsequent request", not "one request per open"),
+     *     one write -> exactly ONE completes (the one-candidate-per-open
+     *     rule); the second must still be genuinely queued, proven via
+     *     AbortIO/IOERR_ABORTED same as every other still-pending
+     *     assertion in this file. --- */
+    {
+        BOOL ok = TRUE;
+        struct MsgPort *portfw = make_port();
+        struct IOSana2Req *iofw = portfw ? make_io(portfw) : NULL;
+        int i;
+
+        if (iofw && open_unit0(iofw)) {
+            io1->ios2_Req.io_Command = CMD_READ;
+            io1->ios2_Data = readbuf;
+            io1->ios2_PacketType = 0x1C00;
+            io1->ios2_Req.io_Flags = 0;
+            send_io(io1);
+
+            io2->ios2_Req.io_Command = CMD_READ;
+            io2->ios2_Data = readbuf2;
+            io2->ios2_PacketType = 0x1C00;
+            io2->ios2_Req.io_Flags = 0;
+            send_io(io2);
+
+            iofw->ios2_Req.io_Command = CMD_WRITE;
+            iofw->ios2_PacketType = 0x1C00;
+            iofw->ios2_DataLength = sizeof(PAYLOAD) - 1;
+            iofw->ios2_Data = (APTR)PAYLOAD;
+            for (i = 0; i < SANA2_MAX_ADDR_BYTES; i++)
+                iofw->ios2_DstAddr[i] = (i < 6) ? (UBYTE)(0x1C + i) : 0;
+            do_io(iofw);
+            ok = ok && (iofw->ios2_Req.io_Error == 0);
+
+            WaitIO((struct IORequest *)io1);
+            WaitIO((struct IORequest *)io2);
+            ok = ok && (io1->ios2_Req.io_Error == 0) &&
+                 (io1->ios2_DataLength == sizeof(PAYLOAD) - 1) &&
+                 (io2->ios2_Req.io_Error == 0) &&
+                 (io2->ios2_DataLength == sizeof(PAYLOAD) - 1);
+            if (ok)
+                for (i = 0; i < (int)(sizeof(PAYLOAD) - 1); i++)
+                    if (readbuf[i] != (UBYTE)PAYLOAD[i] || readbuf2[i] != (UBYTE)PAYLOAD[i])
+                        ok = FALSE;
+
+            CloseDevice((struct IORequest *)iofw);
+        } else {
+            ok = FALSE;
+        }
+        if (iofw)
+            FreeMem(iofw, sizeof(struct IOSana2Req));
+        if (portfw) {
+            FreeSignal(portfw->mp_SigBit);
+            FreeMem(portfw, sizeof(struct MsgPort));
+        }
+
+        if (ok) {
+            struct MsgPort *port1b = make_port();
+            struct IOSana2Req *io1b = port1b ? make_io(port1b) : NULL;
+            struct MsgPort *portfw2 = make_port();
+            struct IOSana2Req *iofw2 = portfw2 ? make_io(portfw2) : NULL;
+
+            if (io1b && iofw2 && open_unit0(iofw2)) {
+                /* Share io1's own open cookie -- NOT a new OpenDevice()
+                 * call, so unit_OpenCnt is unaffected; the device sees
+                 * this as a second request against the SAME open. */
+                io1b->ios2_Req.io_Device = io1->ios2_Req.io_Device;
+                io1b->ios2_Req.io_Unit   = io1->ios2_Req.io_Unit;
+                io1b->ios2_BufferManagement = io1->ios2_BufferManagement;
+
+                io1->ios2_Req.io_Command = CMD_READ;
+                io1->ios2_Data = readbuf;
+                io1->ios2_PacketType = 0x1C01;
+                io1->ios2_Req.io_Flags = 0;
+                send_io(io1);
+
+                io1b->ios2_Req.io_Command = CMD_READ;
+                io1b->ios2_Data = readbuf2;
+                io1b->ios2_PacketType = 0x1C01;
+                io1b->ios2_Req.io_Flags = 0;
+                send_io(io1b);
+
+                iofw2->ios2_Req.io_Command = CMD_WRITE;
+                iofw2->ios2_PacketType = 0x1C01;
+                iofw2->ios2_DataLength = sizeof(PAYLOAD) - 1;
+                iofw2->ios2_Data = (APTR)PAYLOAD;
+                for (i = 0; i < SANA2_MAX_ADDR_BYTES; i++)
+                    iofw2->ios2_DstAddr[i] = (i < 6) ? (UBYTE)(0x1D + i) : 0;
+                do_io(iofw2);
+                ok = ok && (iofw2->ios2_Req.io_Error == 0);
+
+                WaitIO((struct IORequest *)io1);
+                ok = ok && (io1->ios2_Req.io_Error == 0) &&
+                     (io1->ios2_DataLength == sizeof(PAYLOAD) - 1);
+
+                AbortIO((struct IORequest *)io1b);
+                WaitIO((struct IORequest *)io1b);
+                ok = ok && (io1b->ios2_Req.io_Error == IOERR_ABORTED);
+
+                CloseDevice((struct IORequest *)iofw2);
+            } else {
+                ok = FALSE;
+            }
+            if (io1b)
+                FreeMem(io1b, sizeof(struct IOSana2Req));
+            if (port1b) {
+                FreeSignal(port1b->mp_SigBit);
+                FreeMem(port1b, sizeof(struct MsgPort));
+            }
+            if (iofw2)
+                FreeMem(iofw2, sizeof(struct IOSana2Req));
+            if (portfw2) {
+                FreeSignal(portfw2->mp_SigBit);
+                FreeMem(portfw2, sizeof(struct MsgPort));
+            }
+        }
+
+        report(NAME_FANOUT, ok, &fails);
+    }
+
+    /* --- packetfilter: M18's S2_PacketFilter dispatch. Unit 0, a fresh
+     * open with a real S2_PacketFilter tag (reject_filter(), rejecting
+     * exactly one configured type at a time).
+     * (a) a write of the REJECTED type: the filtered open's own queued
+     *     read must stay genuinely pending (AbortIO proof) while
+     *     g_FilterCallCount shows the hook really ran -- AND a second,
+     *     PLAIN (unfiltered) open on the same unit must still receive
+     *     its own copy, proving rejection is per-candidate, not
+     *     "give up on the whole packet".
+     * (b) a write of an ACCEPTED type on the SAME filtered open: must
+     *     complete normally, through the real copy hook. --- */
+    {
+        BOOL ok = TRUE;
+        struct MsgPort *portf = make_port();
+        struct IOSana2Req *iof = portf ? make_io(portf) : NULL; /* filtered reader */
+        struct MsgPort *portpw = make_port();
+        struct IOSana2Req *iopw = portpw ? make_io(portpw) : NULL; /* writer */
+        struct TagItem tagsf[2];
+
+        if (iof) {
+            g_FilterHook.h_Entry = (ULONG (*)())reject_filter;
+            tagsf[0].ti_Tag  = S2_PacketFilter;
+            tagsf[0].ti_Data = (ULONG)&g_FilterHook;
+            tagsf[1].ti_Tag  = TAG_DONE;
+            tagsf[1].ti_Data = 0;
+            iof->ios2_BufferManagement = tagsf;
+        }
+
+        if (iof && iopw &&
+            OpenDevice((STRPTR)DEVICE_NAME, 0, (struct IORequest *)iof, 0) == 0 &&
+            open_unit0(iopw)) {
+            int k;
+
+            g_FilterCallCount = 0;
+            g_FilterRejectType = 0x1E00;
+
+            iof->ios2_Req.io_Command = CMD_READ;
+            iof->ios2_Data = readbuf;
+            iof->ios2_PacketType = 0x1E00;
+            iof->ios2_Req.io_Flags = 0;
+            send_io(iof);
+
+            io1->ios2_Req.io_Command = CMD_READ; /* plain, unfiltered control */
+            io1->ios2_Data = readbuf2;
+            io1->ios2_PacketType = 0x1E00;
+            io1->ios2_Req.io_Flags = 0;
+            send_io(io1);
+
+            iopw->ios2_Req.io_Command = CMD_WRITE;
+            iopw->ios2_PacketType = 0x1E00;
+            iopw->ios2_DataLength = sizeof(PAYLOAD) - 1;
+            iopw->ios2_Data = (APTR)PAYLOAD;
+            for (k = 0; k < SANA2_MAX_ADDR_BYTES; k++)
+                iopw->ios2_DstAddr[k] = (k < 6) ? (UBYTE)(0x1E + k) : 0;
+            do_io(iopw);
+            ok = ok && (iopw->ios2_Req.io_Error == 0);
+
+            WaitIO((struct IORequest *)io1);
+            ok = ok && (io1->ios2_Req.io_Error == 0) &&
+                 (io1->ios2_DataLength == sizeof(PAYLOAD) - 1);
+            if (ok)
+                for (k = 0; k < (int)(sizeof(PAYLOAD) - 1); k++)
+                    if (readbuf2[k] != (UBYTE)PAYLOAD[k])
+                        ok = FALSE;
+
+            AbortIO((struct IORequest *)iof);
+            WaitIO((struct IORequest *)iof);
+            ok = ok && (iof->ios2_Req.io_Error == IOERR_ABORTED) &&
+                 (g_FilterCallCount >= 1);
+
+            g_FilterRejectType = 0; /* accept everything now */
+            iof->ios2_Req.io_Command = CMD_READ;
+            iof->ios2_Data = readbuf;
+            iof->ios2_PacketType = 0x1E01;
+            iof->ios2_Req.io_Flags = 0;
+            send_io(iof);
+
+            iopw->ios2_Req.io_Command = CMD_WRITE;
+            iopw->ios2_PacketType = 0x1E01;
+            iopw->ios2_DataLength = sizeof(PAYLOAD) - 1;
+            iopw->ios2_Data = (APTR)PAYLOAD;
+            for (k = 0; k < SANA2_MAX_ADDR_BYTES; k++)
+                iopw->ios2_DstAddr[k] = (k < 6) ? (UBYTE)(0x1F + k) : 0;
+            do_io(iopw);
+            ok = ok && (iopw->ios2_Req.io_Error == 0);
+
+            WaitIO((struct IORequest *)iof);
+            ok = ok && (iof->ios2_Req.io_Error == 0) &&
+                 (iof->ios2_DataLength == sizeof(PAYLOAD) - 1);
+            if (ok)
+                for (k = 0; k < (int)(sizeof(PAYLOAD) - 1); k++)
+                    if (readbuf[k] != (UBYTE)PAYLOAD[k])
+                        ok = FALSE;
+
+            CloseDevice((struct IORequest *)iof);
+            CloseDevice((struct IORequest *)iopw);
+        } else {
+            ok = FALSE;
+        }
+        if (iof)
+            FreeMem(iof, sizeof(struct IOSana2Req));
+        if (portf) {
+            FreeSignal(portf->mp_SigBit);
+            FreeMem(portf, sizeof(struct MsgPort));
+        }
+        if (iopw)
+            FreeMem(iopw, sizeof(struct IOSana2Req));
+        if (portpw) {
+            FreeSignal(portpw->mp_SigBit);
+            FreeMem(portpw, sizeof(struct MsgPort));
+        }
+
+        report(NAME_PACKETFILTER, ok, &fails);
+    }
+
+    /* --- mine: M18's SANA2OPF_MINE exclusive-open enforcement. Unit 13
+     * (the "buffhooks" sub-test's own buffhooks=32 fixture, already
+     * closed by the time this runs -- reused rather than a new unit,
+     * same don't-grow-SANA2LOOP_NUM_UNITS-for-nothing discipline M15/M16
+     * already established; MINE's own behavior doesn't care what
+     * buffhooks= says).
+     * (a) a fresh SANA2OPF_MINE open, then a plain second open attempt
+     *     -> IOERR_UNITBUSY while the MINE holder stays open.
+     * (b) MINE holder closes (unit idle again) -> a plain open now
+     *     succeeds normally.
+     * (c) with that plain open still live, a NEW SANA2OPF_MINE open
+     *     attempt -> also IOERR_UNITBUSY (busy is symmetric: MINE can't
+     *     preempt an existing ordinary opener either). --- */
+    {
+        BOOL ok = TRUE;
+        struct MsgPort *portm = make_port();
+        struct IOSana2Req *iom = portm ? make_io(portm) : NULL;
+        struct MsgPort *portm2 = make_port();
+        struct IOSana2Req *iom2 = portm2 ? make_io(portm2) : NULL;
+        LONG err;
+
+        if (iom && iom2 &&
+            OpenDevice((STRPTR)DEVICE_NAME, 13, (struct IORequest *)iom, SANA2OPF_MINE) == 0) {
+            err = OpenDevice((STRPTR)DEVICE_NAME, 13, (struct IORequest *)iom2, 0);
+            ok = (err != 0) && (iom2->ios2_Req.io_Error == IOERR_UNITBUSY);
+            if (err == 0)
+                CloseDevice((struct IORequest *)iom2); /* shouldn't happen, don't leak if it does */
+
+            CloseDevice((struct IORequest *)iom);
+
+            err = OpenDevice((STRPTR)DEVICE_NAME, 13, (struct IORequest *)iom2, 0);
+            ok = ok && (err == 0);
+
+            err = OpenDevice((STRPTR)DEVICE_NAME, 13, (struct IORequest *)iom, SANA2OPF_MINE);
+            ok = ok && (err != 0) && (iom->ios2_Req.io_Error == IOERR_UNITBUSY);
+            if (err == 0)
+                CloseDevice((struct IORequest *)iom); /* shouldn't happen, don't leak if it does */
+
+            CloseDevice((struct IORequest *)iom2);
+        } else {
+            ok = FALSE;
+        }
+        if (iom)
+            FreeMem(iom, sizeof(struct IOSana2Req));
+        if (portm) {
+            FreeSignal(portm->mp_SigBit);
+            FreeMem(portm, sizeof(struct MsgPort));
+        }
+        if (iom2)
+            FreeMem(iom2, sizeof(struct IOSana2Req));
+        if (portm2) {
+            FreeSignal(portm2->mp_SigBit);
+            FreeMem(portm2, sizeof(struct MsgPort));
+        }
+
+        report(NAME_MINE, ok, &fails);
+    }
+
     /* --- record: unit 11 (`record=S:sana2loop/recorded.pcap`,
      * recordmax=150 as of the pre-launch review pass -- see
      * unit11.config's own comment) taps 3 known echo writes into a RAM
@@ -3033,6 +3362,33 @@ static APTR never_call_dma(APTR data asm("a0"))
     (void)data;
     g_DMAHookCalls++;
     return NULL;
+}
+
+/* M18: the packetfilter sub-test's S2_PacketFilter hook. Signature
+ * matches the wiki Autodocs' documented calling convention exactly
+ * (`keep = PacketFilter(hook, ios2, data)` / `d0 a0 a2 a1`) --
+ * loopback_device.c's own Sana2FilterFunc typedef comment cites the same
+ * source; this is the independent, harness-side confirmation that the
+ * device's own objdump-verified register usage really matches what a
+ * genuine caller-supplied hook expects to receive.
+ *
+ * Counts every invocation (g_FilterCallCount, proving the device
+ * actually calls this rather than skipping it) and rejects exactly one
+ * configurable packet type (g_FilterRejectType, 0 = accept everything)
+ * -- read from `io->ios2_PacketType`, which loopback_device.c's own
+ * prefill_read_metadata() must have already populated by the time this
+ * runs (per the Autodocs: the filter sees the request "as it would
+ * appear if the packet were successfully returned"), not the bare
+ * pre-read request -- so this hook is itself a live assertion that
+ * prefill happens before the filter call, not just a passive counter. */
+static BOOL reject_filter(struct Hook *hook asm("a0"), struct IOSana2Req *io asm("a2"), APTR data asm("a1"))
+{
+    (void)hook;
+    (void)data;
+    g_FilterCallCount++;
+    if (g_FilterRejectType != 0 && io->ios2_PacketType == g_FilterRejectType)
+        return FALSE;
+    return TRUE;
 }
 
 /* Every request in this harness is reused across many commands (two

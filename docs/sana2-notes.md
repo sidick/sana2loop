@@ -1002,6 +1002,127 @@ was reviewed as prior art -- its own config template carried
   Only then does `reap_interrupt_io()` prove the eventual, correct
   arrival -- exactly like `scheduled` does.
 
+## Multi-open fan-out, real `S2_PacketFilter` dispatch, `SANA2OPF_MINE` (M18)
+
+The last item in the nullsana-inspired queue (GitHub #25), and the only
+one that changed core delivery semantics rather than adding an
+orthogonal config knob -- scoped in depth via two investigation comments
+posted to the issue *before* any code moved (a design fork had to be
+settled first), then implemented per that plan.
+
+- **The design fork, resolved**: does typed-vs-orphan precedence stay
+  GLOBAL (across the whole unit) or become fully PER-OPEN once fan-out
+  exists? Resolved by going back to what `S2_READORPHAN` actually IS per
+  the SANA-II spec -- the unclaimed-TYPE catch-all, not a general
+  sniffing tool. So: typed reads fan out per-open (every distinct open
+  with a matching queued read gets a fill), but orphan reads stay a
+  GLOBAL, single-delivery fallback consulted only when NO typed reader
+  anywhere claimed the packet. This is why the pre-existing `delivery`
+  sub-test's own assertion (a typed read on one open beats an orphan
+  read on a SEPARATE open, and the orphan stays genuinely untouched)
+  passed **unchanged** -- confirmation the fork was resolved correctly,
+  not a lucky coincidence. Fanning orphan out too would have broken that
+  test's own definition of correct behavior, which is exactly the
+  collision the first investigation comment on #25 flagged before
+  implementation started.
+- **One candidate per open, not per queued read**: an open may have
+  several typed reads of the same type pipelined (the standard
+  "queue N reads to catch N *consecutive* packets" pattern this test
+  suite itself already teaches) -- one packet must satisfy at most ONE
+  of them, not drain the whole pipeline. `open_already_collected()`
+  dedups by comparing each candidate's `ios2_BufferManagement` (the
+  `Sana2LoopOpen*` cookie) against everything already collected for this
+  packet, during the single forward walk over `su_PendingReads`.
+- **`deliver_packet()`'s rewrite reuses an EXISTING pattern, not a new
+  one**: collect every matching candidate onto a PRIVATE local `List`
+  under ONE `Disable()` (exactly `abort_requests_for_open()`/
+  `fire_event()`'s own established "pop under Disable, act outside"
+  discipline -- both of those functions' own comments explain WHY
+  dropping Disable() mid-walk and resuming from a stale `next` is
+  dangerous under concurrent list mutation, and that reasoning applies
+  identically here), THEN filter+deliver each one outside `Disable()`
+  (consumer hooks and `ReplyMsg()` are never legal disabled). A
+  filter-rejected candidate requeues via `AddHead()` rather than being
+  treated as a failure -- it's still validly waiting for a FUTURE
+  packet, just not this one.
+- **The orphan fallback ALSO needs a proper multi-candidate walk, not
+  just single-delivery**: if the first collected orphan candidate's
+  filter rejects, the search must try the NEXT orphan candidate (a
+  rejection means "not for me", not "no eligible orphan exists") --
+  still stopping at the first ACCEPT, preserving single-delivery
+  overall. Untried remainder candidates (the search stopped early once
+  one accepted) are put back exactly as untouched as a
+  never-considered candidate should be.
+- **Stats are per wire-packet, not per-copy**: `PacketsReceived`/
+  `S2_TRACKTYPE` counts increment ONCE per packet arrival regardless of
+  how many opens received a fill -- matching what these numbers mean on
+  a real driver (packets that reached the interface), not a
+  per-listener multiplier. `UnknownTypesReceived` still means "nobody --
+  typed, orphan, or rxqueue -- wanted it".
+- **`S2_PacketFilter`'s calling convention, objdump-verified**: sourced
+  from wiki.amigaos.net's Autodocs (this toolchain's own
+  `<devices/sana2.h>` has no signature for it, the same class of gap
+  M13 already found for the Rev 2/3/7 tag VALUES) --
+  `keep = PacketFilter(hook, ios2, data)` / `d0 = a0(hook) a2(ios2)
+  a1(data)`. This is the file's THIRD distinct hook register convention
+  (after `Sana2CopyFunc`'s sequential `a0/a1/d0` and the VBlank
+  interrupt server's `a1`-plus-Z-flag convention), and the register
+  ORDER doesn't match C parameter order -- a documented quirk of the
+  standard Amiga Hook calling convention, not a typo, and exactly the
+  kind of subtlety this project doesn't take on faith: disassembling
+  the compiled `try_deliver_candidate()` confirmed the compiler loads
+  `a0`=hook, `a2`=ios2 (via `a3`, the stashed original `io` argument),
+  `a1`=data (`pkt->ep_Data`, computed once as a small-constant offset
+  add) immediately before the `jsr`, with the jump target itself staged
+  through `a6` (a GCC codegen convenience register, not part of the
+  hook's own ABI -- same pattern the pre-existing copy-hook calls
+  already used). Same M1 discipline, extended to a third convention.
+- **Filter dispatched from real VBlank interrupt context inherits the
+  same M9-established legality** as `S2_CopyToBuff` already has there
+  (scheduled replay, and M17's own delay-queue release both call
+  `deliver_packet()` from `vblank_server()`) -- not a new question, the
+  identical contract just reached by one more caller-supplied hook type.
+- **The AbortIO-during-filter-transit race, investigated and
+  deliberately left to the EXISTING contract**: a candidate is briefly
+  off every unit-shared list while its filter hook runs (which can take
+  arbitrarily long -- an external caller's code, unlike the earlier
+  Remove()-then-immediately-ReplyMsg() window this file already
+  accepted). A concurrent `AbortIO()` landing exactly there finds
+  nothing on any list and returns -1 ("already in-flight" --
+  `abort_io()`'s own PRE-EXISTING, unmodified contract, quoting Exec's
+  own "an operation already in progress may complete before it can be
+  aborted"). Two candidate fixes were considered and rejected: an
+  `io_Flags` bit (unsafe -- `SANA2IOF_*` is spec-owned, and
+  `SendIO()`/`DoIO()` already clear `io_Flags` wholesale before every
+  dispatch per M4's own finding, making it an unreliable place to stash
+  device-private transient state) and a fourth `abort_requests_for_open()`-
+  searched transit list (real complexity for a window this device's own
+  delivery model -- synchronous, task-context, never deferred past the
+  write's own `do_io()` -- makes unreachable from any test following
+  this file's existing write-then-check sequencing). Net: no new
+  tracking machinery; the pre-existing "-1, let WaitIO see it
+  naturally" contract already covers the widened window correctly.
+- **`SANA2OPF_MINE`**: new `su_Exclusive` BOOL, checked in `open()`
+  against the unit's CURRENT state (`unit_OpenCnt`/`su_Exclusive`)
+  BEFORE `dev->lib_OpenCnt++` -- a busy-rejected open never became a
+  real open, so (unlike every later failure path in `open()`) there's
+  no matching decrement needed. `IOERR_UNITBUSY` (Exec's own "device
+  opens ok, but requested unit is busy"), not an `S2ERR_*` -- this
+  rejection happens before SANA-II's own error space is reachable at
+  all.
+- **`run.sh`'s real-1.3 `BENCH` default raised 30 -> 45**: the new
+  sub-tests' extra `OpenDevice()`/`CloseDevice()` cycles (two of which,
+  in `mine`, trigger a real `ENV:`/`S:` config-file read via unit 13's
+  existing `buffhooks=32` fixture) pushed real Kickstart 1.3's own total
+  session time past its previous budget -- found as a guest-side clean
+  `END`/`RESULT=PASS` but a 0-byte `recorded.pcap` on host-side
+  extraction (the LAST DOS I/O's own write-back not yet flushed when
+  `--benchmark-until` tore the session down), confirmed via BENCH=45
+  passing twice where BENCH=30 failed twice. Same class of fix M9's own
+  KICK= default increase (10 -> 30) already needed, for the identical
+  underlying reason (real 1.3's dos.library is measurably slower than
+  AROS's).
+
 ## `S2_DEVICEQUERY` convention (easy to get backwards)
 
 The caller pre-sets `ios2_StatData->SizeAvailable` to the size of *its own*
@@ -1051,8 +1172,10 @@ The protocol (from `devices/sana2.h`, `utility/tagitem.h`):
 1. Before `OpenDevice()`, the caller may point `ios2_BufferManagement` at a
    `struct TagItem` array containing `S2_CopyToBuff`/`S2_CopyFromBuff`
    (function pointers, ABI below) and/or `S2_PacketFilter` (a `struct
-   Hook *`, recorded but not yet dispatched by this device). `NULL` means
-   "no tags" -- install defaults.
+   Hook *`; recorded at M1, genuinely dispatched per candidate delivery
+   since M18 -- see this file's own M18 section for the calling
+   convention and fan-out semantics). `NULL` means "no tags" -- install
+   defaults.
 2. The device's `Open()` parses that list with a **local tag walk**
    (`FindTagItem()` needs utility.library, absent on 1.3) that must handle
    the control tags correctly: `TAG_DONE` ends the list, `TAG_IGNORE` skips

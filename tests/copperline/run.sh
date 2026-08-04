@@ -47,7 +47,21 @@ KICK=${KICK:-}
 XDFTOOL=${XDFTOOL:-xdftool}
 DEVICE=${SANA2LOOP_DEVICE:-$ROOT/build/loopback.device}
 BIN=${SANA2TEST_M68K:-$ROOT/build/sana2test}
-BENCH=${BENCH:-$([ -n "$KICK" ] && echo 30 || echo 40)}
+# M18: real Kickstart 1.3's own default raised 30 -> 45 -- the new
+# fanout/packetfilter/mine sub-tests (several extra OpenDevice/
+# CloseDevice cycles, two of which -- "mine"'s two successful opens of
+# unit 13 -- read that unit's real ENV:/S: config file, real DOS I/O)
+# pushed real 1.3's own total session time past its previous 30s budget
+# specifically: the guest itself still reached END and reported
+# RESULT=PASS at BENCH=30, but the LAST DOS I/O (the "record" sub-test's
+# own recorded.pcap Write()+Close()) hadn't finished flushing back to
+# the host ADF by the time --benchmark-until tore the session down,
+# surfacing as verify_record.py's own "file too short (0 bytes)" rather
+# than any guest-visible failure -- confirmed via BENCH=45 passing
+# cleanly, twice, where BENCH=30 failed the same way both times. Same
+# class of real-1.3-is-measurably-slower fix M9's own KICK= default
+# already needed (10 -> 30) for the identical reason.
+BENCH=${BENCH:-$([ -n "$KICK" ] && echo 45 || echo 40)}
 ADF="$HERE/minimal-boot.adf"
 
 [ -e "$DEVICE" ] || { echo "FAIL: missing $DEVICE (run make device)" >&2; exit 2; }
@@ -103,7 +117,7 @@ grep -q '^END' "$OUT" 2>/dev/null || { echo "FAIL: no END marker (raise BENCH?)"
 # just the aggregate RESULT= -- so a regression in one milestone's check
 # names itself instead of being buried in one pass/fail bit. Keep this list
 # in sync with the NAME_* constants in sana2test.c as milestones add more.
-SUBTESTS="online devicequery stationaddress echo offline onevent oneventnow abortio cmdflush bufferhooks delivery configinterface tracktype broadcast multicast multicastaddress raw config crossover faultdrop faultdup faultreorder faultoversilent faultflap replay scheduled rawmtu peeraddress dnsaddress buffhooks dmahooks replaycap faulttruncate faultrxqueue mintu wire addr faulterrors faultloss delay record"
+SUBTESTS="online devicequery stationaddress echo offline onevent oneventnow abortio cmdflush bufferhooks delivery configinterface tracktype broadcast multicast multicastaddress raw config crossover faultdrop faultdup faultreorder faultoversilent faultflap replay scheduled rawmtu peeraddress dnsaddress buffhooks dmahooks replaycap faulttruncate faultrxqueue mintu wire addr faulterrors faultloss delay fanout packetfilter mine record"
 fails=0
 for s in $SUBTESTS; do
     grep -q "^SUB=${s}=PASS$" "$OUT" 2>/dev/null || {

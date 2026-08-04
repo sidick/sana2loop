@@ -27,9 +27,15 @@ Features
     delivered to the other, with real unswapped addressing and
     unicast/broadcast/multicast/promiscuous receive filtering.
   - Real SANA-II buffer-management hooks (S2_CopyToBuff/CopyFromBuff/
-    PacketFilter), broadcast/multicast writes and group membership,
-    S2_ONEVENT, global/type/special stats, and per-unit config files
-    (ENV:/S: sana2loop/unitN.config).
+    PacketFilter, the last genuinely dispatched per candidate delivery),
+    broadcast/multicast writes and group membership, S2_ONEVENT,
+    global/type/special stats, and per-unit config files (ENV:/S:
+    sana2loop/unitN.config).
+  - Multi-open fan-out: open a unit more than once (a stack plus a
+    passive monitor, sanamon-style) and every open with a matching
+    typed read gets its own independent copy, gated per-open by its own
+    S2_PacketFilter if negotiated -- plus SANA2OPF_MINE exclusive-open
+    enforcement.
   - Fault injection pipeline, all off by default: packet drop (percent
     or 1-in-N), duplicate, truncate, reorder, simulated link latency and
     jitter (delay=/deviation=, VBlank-tick delivery delay with optional

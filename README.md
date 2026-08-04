@@ -55,9 +55,13 @@ to silent drops -- fails writes with `S2ERR_TX_FAILURE` and fires
 `S2EVENT_TX|ERROR`), and finer-than-percent silent loss (`loss=N`,
 1-in-N). M17 added simulated link latency and jitter (`delay=`/
 `deviation=`, VBlank-tick delivery delay with optional symmetric
-scatter) -- see [`userdocs/Changelog.md`](userdocs/Changelog.md). **No
-release tag has been pushed yet** -- see
-[`docs/PLAN.md`](docs/PLAN.md)'s milestone table for what's left.
+scatter). M18 added multi-open fan-out delivery (open a unit more than
+once -- a stack plus a passive monitor -- and every open with a matching
+typed read gets its own independent copy), real `S2_PacketFilter`
+dispatch, and `SANA2OPF_MINE` exclusive-open enforcement -- see
+[`userdocs/Changelog.md`](userdocs/Changelog.md). **No release tag has
+been pushed yet** -- see [`docs/PLAN.md`](docs/PLAN.md)'s milestone
+table for what's left.
 
 Not yet done: cutting and publishing a first tagged release.
 
