@@ -498,6 +498,9 @@ int main(int argc, char **argv)
                 }
             if (!found && stats.hdr.RecordCountSupplied == 0)
                 printf("sana2loop quirk stat: none (expected for drivers other than sana2loop)\n");
+            else if (!found && strcmp(device, "loopback.device") != 0)
+                printf("sana2loop quirk stat: no DMA-hook-offered record (expected -- this "
+                       "driver's own special-stats records are not sana2loop's)\n");
             else if (!found)
                 printf("sana2loop quirk stat: no DMA-hook-offered record (unexpected -- this "
                        "probe's own open above should have counted as one)\n");
