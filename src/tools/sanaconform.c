@@ -397,7 +397,7 @@ int main(int argc, char **argv)
      * regardless of what the driver actually does. */
     if (wio)
         wio->ios2_BufferManagement = tags;
-    if (wio && OpenDevice((STRPTR)"loopback.device", (LONG)unit, (struct IORequest *)wio, 0) == 0) {
+    if (wio && OpenDevice((STRPTR)device, (LONG)unit, (struct IORequest *)wio, 0) == 0) {
         /* Static (see stack_cookie's own comment), and sized for a FULL
          * maximum delivery, not just this probe's own tiny payload: the
          * queued CMD_READ below matches on packet type alone, so any
@@ -496,7 +496,9 @@ int main(int argc, char **argv)
                            (unsigned long)stats.recs[i].Count);
                     found = TRUE;
                 }
-            if (!found)
+            if (!found && stats.hdr.RecordCountSupplied == 0)
+                printf("sana2loop quirk stat: none (expected for drivers other than sana2loop)\n");
+            else if (!found)
                 printf("sana2loop quirk stat: no DMA-hook-offered record (unexpected -- this "
                        "probe's own open above should have counted as one)\n");
         }
